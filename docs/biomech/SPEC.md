@@ -613,10 +613,25 @@ has no injury-data basis and sits inside measurement error for several tests.
 demand      = 0.60·max(m1, m2) + 0.40·min(m1, m2)        soft-max, 0..100
 degradation = (0.45·m4 + 0.30·m5) / Σ(available weights)  m4,m5 only — renormalised
 capacity    = 100 − 0.70·degradation                     30..100
-acute       = 100 · demand / (demand + capacity)
+ratio       = demand / capacity                          load vs capacity
+acute       = min(100, 200 · ratio² / (ratio² + 1))      100 when demand == capacity
 floor       = 0.50 · m3                                  accumulated-fatigue residue
 composite   = floor + (100 − floor) · acute/100          0..100
 ```
+
+⚠️ **`acute` was rescaled 2026-08-02 after a live wearing session.** It was
+`100·demand/(demand + capacity)` — a hyperbola whose value at `demand = 100` and a healthy
+`capacity = 100` is exactly **50**. For an uninjured athlete the acute term therefore could not
+exceed half scale however hard the session, and the upper half of a 0–100 "injury risk" was
+reachable only through accumulated dose. Measured live over 11 minutes: `demand` p99 = 91 (max
+98) yet composite p99 = 66, and the wearer independently reported the number "plateauing around
+50" without having seen the formula.
+
+The replacement keeps the load-versus-capacity ratio and the saturating shape, but squares the
+ratio (sigmoid rather than hyperbolic, so light activity stays low) and normalises so that
+**`demand == capacity` reads 100**. Degradation lowers `capacity`, so a degraded athlete reaches
+full scale at lower demand — which is the intent. Same session under the new form: walking 29
+(was 44), interval work 77 (was 63).
 
 **`m3` was removed from `degradation`.** It previously appeared in *both* `degradation` (0.25)
 and `floor` (0.50) — a genuine double-count that the earlier text acknowledged but did not fix.
@@ -675,11 +690,20 @@ Per the evidence, the following are deliberately absent: **[L]**
 | Phase | `m1` | `m2` | `m3` | `m4` | `m5` | **composite** |
 |---|---|---|---|---|---|---|
 | Standing still, 2–11 s (before work) | 0.0 | 0.0 | 0.0 | `null` | `null` | **0.0** |
-| Squatting, 16–31 s | 44.1 | 52.6 | 7.0 | `null` | `null` | **35.2** |
-| Standing still, 34–41 s (after work) | 0.6 | 0.7 | 13.7 | `null` | `null` | **7.5** |
+| Squatting, 16–31 s | 13.5 | 17.7 | 7.0 | `null` | `null` | **10.6** |
+| Standing still, 34–41 s (after work) | 0.0 | 0.0 | 13.7 | `null` | `null` | **6.9** |
 
-The requested semantics hold: zero when fresh and idle, mid-scale during genuine work, and
-settling onto the accumulated-dose floor (7.5) rather than collapsing to zero.
+The requested semantics hold: zero when fresh and idle, a real reading during work, and settling
+onto the accumulated-dose floor rather than collapsing to zero — after-work composite is exactly
+`0.50 × m3`, which the test now asserts as an identity rather than a magic number.
+
+⚠️ **Re-measured 2026-08-02** after the §4 normalisation floors were raised against a live
+wearing session. The earlier row read `m1` 44.1, `m2` 52.6, composite 35.2 for the same file:
+gentle squatting scored mid-scale because `m1`'s floor sat barely above the sensor noise. **`m3`
+is identical (7.0 / 13.7) across both measurements** — it does not depend on those floors, so it
+is the control showing the retune moved only what it was meant to. Controlled squats now reading
+below walking on `m1` is correct, not a regression: `m1` is *impact*, and a squat has less heel
+strike than a step.
 
 ⚠️ **`m4` and `m5` are `null` in every row** — the log contains only 19.9 s of movement, below
 their 60 s / 30 s warm-ups. This table therefore validates `m1`, `m2`, `m3` and the composite
@@ -988,7 +1012,8 @@ Any individual flag must show the component panel that drove it (§2).
    | Flag | Meaning |
    |---|---|
    | `warming_up` | `m4`/`m5` still inside their 60 s / 30 s warm-up (§5.4, §5.5). Only when the sensors those metrics need have actually streamed — see `degraded_sensors` |
-   | `partial` | a required sensor went inactive mid-session; `m4`/`m5` frozen or `null` |
+   | `partial` (debounced ≥0.75 s: a lossy link flickers `active` tick-to-tick and an
+     undebounced flag toggled hundreds of times per second in a live session) | a required sensor went inactive mid-session; `m4`/`m5` frozen or `null` |
    | `no_shank` | `m1` fell back to thigh sensors |
    | `saturated` | >2.6% clipped samples; `m1`/`m2` suppressed (§3.7) |
    | `degraded_sensors` | device streaming <4 sensors (§8), **or** a sensor a metric requires was mapped but has never produced data (flat battery, bad strap). Both are "this value is never coming"; `warming_up` promises the opposite, so the two must not be confused. Tested against `ema_seen`, never against `LIMB_MAP` alone |
@@ -1022,8 +1047,8 @@ Any individual flag must show the component panel that drove it (§2).
 | Check | Expected |
 |---|---|
 | Still, 2–11 s | `m1` < 2, `m2` < 2, `m3` = 0, composite < 2 |
-| Squats, 16–31 s | `m1` 40–52 (44.1), `m2` 48–62 (52.6), `m3` rising monotonically to ~7 (7.0), composite 30–42 (35.2) |
-| Still, 34–41 s | `m1` < 4, `m3` ≈ 13.7 (holds), composite ≈ 7.5 (**dose floor, not 0**) |
+| Squats, 16–31 s | `m1` 9–18 (13.5), `m2` 13–23 (17.7), `m3` rising monotonically to ~7 (7.0), composite 7–15 (10.6) |
+| Still, 34–41 s | `m1` < 4, `m3` ≈ 13.7 (holds), composite == `0.50 × m3` exactly (**dose floor, not 0**) |
 | Transmission `R` during squats (diagnostic `raw`, not `m4`) | 1.380 left, 1.382 right (agreement < 0.05) |
 | `m4`, `m5` | **`null` in every row** — asserted explicitly, see §11.1 |
 
@@ -1043,6 +1068,20 @@ step 4.** This must be visible in the code, not just here:
   `/debug` viewer and `/api/health` can surface it.
 - `test_biomech.py` groups these tests under `class TestSyntheticOnly` with a docstring stating
   that passing does **not** demonstrate real-world correctness.
+
+⚠️ **`m5`'s warm-up gate now counts accumulated-asymmetry time, not total movement time**
+(fixed 2026-08-02). `move_t` advances on every moving tick including ones where a side was
+inactive, so on a lossy link it passed the 30 s threshold while `accL`/`accR` were still nearly
+empty — and `USI = (accL−accR)/√(accL²+accR²)` is unstable when both are tiny. Live result:
+`m5`'s first emitted values read ~82 out of pure noise, then fell to ~15 once the accumulators
+filled. The gate is now `asym_t`, incremented only when the accumulators are actually updated.
+
+⚠️ **Open item — `ASYM_HALFLIFE_S = 5 min` may be too slow to be actionable.** In the same
+session, 90 s of deliberate one-sided loading (an exaggerated limp) moved `m5` only to ~27,
+because it was diluted by the preceding 2 minutes of symmetric squats. That time constant suits
+*chronic* asymmetry monitoring; it cannot show a trainer an asymmetry that develops within a
+session. Not changed yet — the trade-off needs a decision, and a shorter halflife makes `m5`
+noisier. Recorded here so it is a known limitation rather than a surprise.
 
 **Synthetic fixtures required** (each a generated frame stream, not a recording):
 

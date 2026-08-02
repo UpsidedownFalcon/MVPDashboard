@@ -70,10 +70,23 @@ MOVE_GATE_MS2 = 0.10         # tick-mean adyn: measured still 0.025-0.032,
                              # squatting 0.65-0.94 -- ~3x above the noise floor
 
 # --- reference ranges (SPEC Section 4) ---
-M1_LO_FLOOR = 0.15           # m1 lo = max(M1_LO_FLOOR, M1_LO_SIGMAS * sigma)
+# Floors raised from a live 11-minute wearing session (2026-08-02). The old
+# M1_LO_FLOOR of 0.15 m/s^2 sat barely above the rest noise floor, so ordinary
+# walking already scored 57/100 and everything from an easy walk to near-maximal
+# effort was squeezed into ten points. Measured shank p90 |a_dyn| that session:
+# still 0.2, squats 4.2, walking 8.4, jumps 11.3, hard interval work 16.7 m/s^2.
+# The CEILINGS are deliberately NOT anchored to that session -- its hardest
+# impact was 11 m/s^2 against 30-150 in the landing literature, so anchoring the
+# top to it would peg a real athlete at 100 permanently. Raise the floor, keep
+# the headroom.
+M1_LO_FLOOR = 2.0            # m1 lo = max(M1_LO_FLOOR, M1_LO_SIGMAS * sigma)
 M1_LO_SIGMAS = 5.0           # noise-adaptive: a noisier sensor must not read >0 at rest
 M1_HI = 150.0                # ~15 g, near accel full scale
-M2_LO, M2_HI = 120.0, 12_000.0     # lo at the measured rest jerk floor (p99 48-57)
+# m2 lo moves to the osteogenic jerk threshold (981 m/s^3, Jamsa 2011) rather
+# than the rest floor: below that the loading rate is not doing anything worth
+# scoring. Ceiling raised because 12,000 was being clipped by ordinary interval
+# work (session p90 hit 100 in three separate phases).
+M2_LO, M2_HI = 800.0, 30_000.0
 M3_LO, M3_HI = 0.01, 60.0          # dose-minutes; 16 s squats -> 14, 1 h hard -> 88
 W_LO, W_HI = 5.0, 1500.0           # deg/s; still mean 1.6, squat mean 82, sprint >1200
 
@@ -91,6 +104,12 @@ M4_FULL_SCALE = 0.50         # |R/R_base - 1| of 0.5 reads 100
 # --- m5 balance (SPEC Section 5.5) ---
 ASYM_HALFLIFE_S = 5 * 60.0
 M5_WARMUP_S = 30.0           # the accumulator is rep-dominated before this
+PARTIAL_DEBOUNCE_S = 0.75    # `partial` must persist this long before it shows.
+                             # A lossy link makes a limb's `active` flag flicker
+                             # tick to tick; undebounced, the flag toggled
+                             # hundreds of times per second in a live session and
+                             # would strobe the UI. Integrator, so clearing it
+                             # needs the same dwell -- hysteresis, not a timer.
 M5_FULL_SCALE_USI = 0.18     # from Delgado-Garcia 2025 (bilateral tibial
                              # accelerometry): asymmetry 9% -> 25% classic SI
                              # over a fatiguing run; USI ~ SI/sqrt(2) near
@@ -271,6 +290,9 @@ class _Sess:
         self.accL = 0.0
         self.accR = 0.0
         self.move_t = 0.0
+        self.asym_t = 0.0      # time accumulated INTO accL/accR
+        self.legs_bad = 0.0    # debounce integrators for `partial`
+        self.sides_bad = 0.0
         self.R_base: float | None = None
         self.m4_hold: float | None = None
         self.m5_hold: float | None = None
@@ -302,6 +324,13 @@ class _Sess:
             self.cal_gap[i] += step
             if self.cal_gap[i] > CAL_MAX_GAP_S:
                 self.cal_clear(i)
+
+    def debounce(self, field: str, bad: bool, step: float) -> bool:
+        """Leaky integrator: True only after `bad` has held for the dwell time."""
+        v = getattr(self, field) + (step if bad else -step)
+        v = min(max(v, 0.0), 2.0 * PARTIAL_DEBOUNCE_S)
+        setattr(self, field, v)
+        return v >= PARTIAL_DEBOUNCE_S
 
     def cal_clear(self, i: int) -> None:
         """Stillness broke (or a window closed): start the next one from zero."""
@@ -383,6 +412,7 @@ class _Sess:
             "accL": self.accL,
             "accR": self.accR,
             "move_t": self.move_t,
+            "asym_t": self.asym_t,
             "R_base": self.R_base,
             "last_tick_t": self.last_tick_t,
             "session_start_t": self.session_start_t,
@@ -405,6 +435,7 @@ class _Sess:
         self.accL = snap["accL"] * decay
         self.accR = snap["accR"] * decay
         self.move_t = snap["move_t"]
+        self.asym_t = snap.get("asym_t", 0.0)
         self.R_base = snap["R_base"]
         self.last_tick_t = last
         self.session_start_t = snap.get("session_start_t")
@@ -432,6 +463,9 @@ class _Sess:
         self.dose = 0.0
         self.accL = self.accR = 0.0
         self.move_t = 0.0
+        self.asym_t = 0.0      # time accumulated INTO accL/accR
+        self.legs_bad = 0.0    # debounce integrators for `partial`
+        self.sides_bad = 0.0
         self.R_base = None
         self.m4_hold = self.m5_hold = None
         self.m4_stale = self.m5_stale = 0.0
@@ -897,7 +931,7 @@ def compute(
         sess.m4_stale += step
         if sess.m4_hold is not None and sess.m4_stale <= STALE_TIMEOUT_S:
             m4 = sess.m4_hold
-        elif sess.m4_hold is not None and not legs_ok:
+        elif sess.m4_hold is not None and sess.debounce("legs_bad", not legs_ok, step):
             # `partial` means SENSORS are missing. Simply standing still also
             # freezes m4, but that is normal and must not raise a fault flag.
             flags.add("partial")
@@ -941,8 +975,14 @@ def compute(
         decay = 0.5 ** (step / ASYM_HALFLIFE_S)
         sess.accL = sess.accL * decay + w_noise * L * step
         sess.accR = sess.accR * decay + w_noise * R * step
+        # Time actually accumulated INTO the accumulators. move_t counts all
+        # movement including ticks where a side was inactive, so on a lossy link
+        # it reached the warm-up threshold while the accumulators were still
+        # nearly empty -- and USI = (L-R)/sqrt(L^2+R^2) is unstable when both are
+        # tiny, so m5's first emitted values were ~82 out of pure noise.
+        sess.asym_t += step
     denom = math.sqrt(sess.accL**2 + sess.accR**2)
-    if sides_ok and sess.move_t >= M5_WARMUP_S and denom > 0.0:
+    if sides_ok and sess.asym_t >= M5_WARMUP_S and denom > 0.0:
         usi = (sess.accL - sess.accR) / denom
         usi_pct = 100.0 * usi
         m5 = 100.0 * min(abs(usi) / M5_FULL_SCALE_USI, 1.0)
@@ -956,14 +996,14 @@ def compute(
         sides_live = (len(left_i) and len(right_i)
                       and bool(sess.ema_seen[left_i].all())
                       and bool(sess.ema_seen[right_i].all()))
-        if sess.move_t < M5_WARMUP_S and sides_live:
+        if sess.asym_t < M5_WARMUP_S and sides_live:
             flags.add("warming_up")
         sess.m5_stale += step
         if sess.m5_hold is not None and sess.m5_stale <= STALE_TIMEOUT_S:
             m5 = sess.m5_hold
         elif not sides_live:
             flags.add("degraded_sensors")
-        elif sess.m5_hold is not None and not sides_ok:
+        elif sess.m5_hold is not None and sess.debounce("sides_bad", not sides_ok, step):
             # As for m4: `partial` is a missing-sensor signal, not a rest signal.
             flags.add("partial")
 
@@ -982,7 +1022,17 @@ def compute(
     degradation = (sum(w * v for w, v in avail) / sum(w for w, _ in avail)
                    if avail else 0.0)
     capacity = 100.0 - CAPACITY_FACTOR * degradation
-    acute = 100.0 * demand / (demand + capacity) if (demand + capacity) > 0 else 0.0
+    # Risk rises with the load/capacity RATIO. The previous form,
+    # 100*demand/(demand+capacity), is a hyperbola whose value at demand = 100
+    # and healthy capacity = 100 is exactly 50 -- so for an uninjured athlete the
+    # acute term could not exceed half scale however hard the session, and the
+    # top half of a 0-100 "injury risk" was reachable only through accumulated
+    # dose. Measured live: demand p99 = 91 yet composite p99 = 66.
+    # Same ratio, squared (sigmoid rather than hyperbolic so light activity stays
+    # low), normalised so demand == capacity reads 100. Degradation lowers
+    # capacity and therefore reaches full scale sooner, which is the intent.
+    ratio = demand / capacity if capacity > 0 else float("inf")
+    acute = min(100.0, 200.0 * ratio * ratio / (ratio * ratio + 1.0))
     floor = FLOOR_FACTOR * m3
     composite = floor + (100.0 - floor) * acute / 100.0
 

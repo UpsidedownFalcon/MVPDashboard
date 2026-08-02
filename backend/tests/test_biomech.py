@@ -143,15 +143,22 @@ def test_jerk_uses_radians_not_degrees():
     Two rotation rates that differ only in magnitude must move m2 by the amount
     the radian form predicts. A deg/s implementation saturates m2 instead.
     """
+    # |w x a| scales with BOTH the rotation rate and |a|. Gravity alone cannot
+    # clear the raised M2_LO (800 m/s^3) anywhere inside the +-2000 deg/s gyro
+    # range, so the fixture holds a constant 30 m/s^2 instead. Constant
+    # magnitude means da/dt is zero and the baseline converges, so m1 stays 0
+    # and the rotation term is isolated -- which is the point of the test.
+    A_MAG = 30.0
+
     def gen_for(rate):
         def gen(k):
-            a = np.tile([0.0, 9.81, 0.0], (NS, 1))
+            a = np.tile([0.0, A_MAG, 0.0], (NS, 1))
             w = np.tile([rate, 0.0, 0.0], (NS, 1))
             return a, w
         return gen
 
-    # |w x g| = w_rad * 9.81. At 200 deg/s that is 34 m/s^3, well under M2_LO
-    # (120), so m2 must read 0. Under a deg/s bug the term is 57.3x bigger
+    # |w x a| = w_rad * 30. At 200 deg/s that is 105 m/s^3, well under M2_LO
+    # (800), so m2 must read 0. Under a deg/s bug the term is 57.3x bigger
     # (1963 m/s^3), which lands solidly inside the scale and m2 would read > 0.
     res, _ = _drive(gen_for(200.0), 150)
     assert res[-1].m2 == 0.0, (
@@ -160,7 +167,7 @@ def test_jerk_uses_radians_not_degrees():
     )
 
     # Sanity that the term exists at all: 1900 deg/s (just inside the +-2000
-    # gyro full scale, so nothing saturates) gives 325 m/s^3, above M2_LO.
+    # gyro full scale, so nothing saturates) gives 995 m/s^3, above M2_LO.
     res_hi, _ = _drive(gen_for(1900.0), 150)
     assert res_hi[-1].m2 is not None and res_hi[-1].m2 > 0.0
 
@@ -619,6 +626,10 @@ def test_squats_replay_golden_values():
         mean = lambda f: sum(f(m) for m in sel) / len(sel)
         return sel, mean
 
+    # Re-measured 2026-08-02 after the normalisation floors were raised against
+    # a live wearing session (SPEC §4/§11). m1/m2/composite all move DOWN; m3 is
+    # untouched by that change and still reads 7.0 / 13.7, which is the control
+    # showing the retune moved only what it was meant to.
     still, mean = phase(2, 11)
     assert mean(lambda m: m.m1) < 2.0
     assert mean(lambda m: m.m2) < 2.0
@@ -626,14 +637,16 @@ def test_squats_replay_golden_values():
     assert mean(lambda m: m.composite) < 2.0
 
     squat, mean = phase(16, 31)
-    assert 40.0 <= mean(lambda m: m.m1) <= 52.0
-    assert 48.0 <= mean(lambda m: m.m2) <= 62.0
-    assert 4.0 <= mean(lambda m: m.m3) <= 11.0
-    assert 30.0 <= mean(lambda m: m.composite) <= 42.0
+    assert 9.0 <= mean(lambda m: m.m1) <= 18.0            # measured 13.5
+    assert 13.0 <= mean(lambda m: m.m2) <= 23.0           # measured 17.7
+    assert 4.0 <= mean(lambda m: m.m3) <= 11.0            # measured 7.0, unchanged
+    assert 7.0 <= mean(lambda m: m.composite) <= 15.0     # measured 10.6
 
     after, mean = phase(34, 41)
     assert mean(lambda m: m.m1) < 4.0
-    assert 10.0 <= mean(lambda m: m.m3) <= 18.0
+    assert 10.0 <= mean(lambda m: m.m3) <= 18.0           # measured 13.7, unchanged
+    # composite at rest is the dose floor and nothing else: 0.50 * m3.
+    assert abs(mean(lambda m: m.composite) - 0.5 * mean(lambda m: m.m3)) < 0.1
     # composite rests on the accumulated-dose floor rather than collapsing to 0
     assert 4.0 <= mean(lambda m: m.composite) <= 18.0
 
@@ -814,7 +827,11 @@ def test_bench_per_device_time_stays_flat_with_device_count():
     per_device_us = {}
     for n_dev in (1, 2, 3, 5):
         states = [{} for _ in range(n_dev)]
-        payload = [make_tick(*_moving(0)) for _ in range(n_dev)]
+        # scale=6: the timing loop deliberately replays ONE fixed chunk, so the
+        # gravity baseline converges to it and the dynamic content is far below
+        # the raw amplitude. At scale=1 that lands under the raised M1_LO and the
+        # metrics read 0, which would make the smoke assertion below vacuous.
+        payload = [make_tick(*_moving(0, scale=6.0)) for _ in range(n_dev)]
         last = []
         for k in range(120):                  # warm up filters and rings
             for d in range(n_dev):
