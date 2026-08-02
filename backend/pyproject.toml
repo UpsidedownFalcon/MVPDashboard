@@ -8,6 +8,11 @@ dependencies = [
     "uvicorn[standard]",
     "redis>=5",
     "numpy",
+    # scipy.signal.lfilter runs the biomech one-pole cascades in C and carries
+    # filter state exactly across ticks (docs/biomech/SPEC.md §7.1). Must stay
+    # declared here: the Dockerfile's second install uses --no-deps, so an
+    # undeclared transitive dep would be silently absent at runtime.
+    "scipy",
     "pydantic-settings",
     "orjson",
 ]
