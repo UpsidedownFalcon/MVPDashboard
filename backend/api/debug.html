@@ -40,9 +40,10 @@ function mkChart(el, title, height, color) {
   if (title !== "composite") { const t = document.createElement("div");
     t.className = "chart-title"; t.textContent = title; wrap.appendChild(t); }
   el.appendChild(wrap);
+  const fixed = title === "composite";
   const opts = {
     width: 10, height,
-    scales: { x: { time: true }, y: { range: [0, 1] } },
+    scales: { x: { time: true }, y: fixed ? { range: [0, 1] } : { auto: true } },
     axes: [
       { stroke:"#777", grid:{stroke:"#222"}, ticks:{stroke:"#333"} },
       { stroke:"#777", grid:{stroke:"#222"}, ticks:{stroke:"#333"} },
