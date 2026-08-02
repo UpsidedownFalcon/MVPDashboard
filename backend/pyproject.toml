@@ -15,6 +15,10 @@ dependencies = [
     "scipy",
     "pydantic-settings",
     "orjson",
+    # stage 2: TimescaleDB access (batched COPY writer, queries, migrations)
+    "asyncpg",
+    # stage 2: predict.fit()'s stable interface takes a DataFrame (schema §5)
+    "pandas",
 ]
 
 [dependency-groups]
@@ -31,7 +35,7 @@ build-backend = "hatchling.build"
 # Flat layout: common/, ingest/, api/ are top-level importable packages, matching
 # the in-container layout (workdir = backend/, `python -m ingest.main`).
 [tool.hatch.build.targets.wheel]
-packages = ["common", "ingest", "api"]
+packages = ["common", "ingest", "api", "migrations"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
