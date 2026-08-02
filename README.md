@@ -26,9 +26,10 @@ docker compose up -d --build
 
 # 3. feed it data — replay recorded squats as N wearable devices
 uv run python simulator/simulate.py --devices 5
-#    knobs: --loss 5 --reorder 5 --jitter 20 --drift 200 --rate 600 --seed 1
+#    knobs: --loss 5 --reorder 5 --jitter 20 --drift 200 --rate 640 --seed 1
 #    --dead-sensors 0:1     simulate a failed sensor (biomech degradation ladder)
-#    --target HOST:PORT     UDP destination        (default 127.0.0.1:5005)
+#    --target HOST:PORT     UDP destination        (default 127.0.0.1:5010,
+#                           the local port workaround — see Gotchas; VPS uses 5005)
 #    --base-id N            device_id of the first device, then N+1, N+2, …
 #                           (default 30; use it to add devices without colliding
 #                           with a run already streaming)

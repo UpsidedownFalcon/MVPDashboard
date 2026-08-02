@@ -77,9 +77,14 @@ def _rising_risk(ctx: Ctx) -> Evidence | None:
     crossing = [p for p in ctx.forecasts if p["pred"] >= threshold]
     if not crossing:
         return None
-    first = min(crossing, key=lambda p: p["pred"])
+    # _latest_forecast_points ORDERs BY the raw horizon interval, so the list is
+    # already earliest-first and crossing[0] is the SOONEST crossing. Selecting
+    # min(pred) instead only coincides with that while predictions rise
+    # monotonically; fit() clips at 100, so once several horizons saturate the
+    # tie-break is arbitrary and the message names the wrong horizon.
+    first = crossing[0]
     return {"window": ctx.mid["window"], "trend": "up",
-            "pred": round(first["pred"], 2), "horizon": first["horizon"],
+            "pred": round(first["pred"], 1), "horizon": first["horizon"],
             "threshold": threshold}
 
 
@@ -106,7 +111,7 @@ RULES: list[Rule] = [
         severity="warning",
         evaluate=_rising_risk,
         message=lambda ctx, ev: (
-            f"{ctx.display_name}: risk rising and projected to reach {ev['pred']:.2f}"
+            f"{ctx.display_name}: risk rising and projected to reach {ev['pred']:.0f}"
             f" within {ev['horizon']} — schedule rest."
         ),
     ),

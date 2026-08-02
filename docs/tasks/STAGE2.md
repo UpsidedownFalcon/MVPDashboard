@@ -125,12 +125,18 @@ Steps:
    message(ctx, evidence) -> str)`; `ctx` = device (with display_name), window
    aggregates, latest forecasts, thresholds from config. `RULES: list[Rule]` is the
    **extension point** — catalogue TBD in a later session.
-2. Starter rules (thresholds via env `INSIGHT_WARN_THRESHOLD=0.7`,
-   `INSIGHT_ALERT_THRESHOLD=0.85`):
+2. Starter rules (thresholds via env `INSIGHT_WARN_THRESHOLD=85`,
+   `INSIGHT_ALERT_THRESHOLD=92`). ⚠️ These were `0.7`/`0.85` when this sheet was
+   written, on the pre-SPEC 0–1 metric scale. **Metrics are 0–100** (biomech
+   SPEC §5) — a 0.7 threshold on a 0–100 composite fires an alert on every tick,
+   which looks like the engine working. Raised again 2026-08-02 after the
+   composite rescale: measured interval work reads ~77, so the previous 70/85
+   would have warned during ordinary hard training. `.env.example` and
+   `common/config.py` are authoritative:
    - `composite_high`: shortest-window composite avg ≥ warn/alert threshold →
      "…sustained high load — consider reducing intensity."
    - `rising_risk`: mid-window trend `up` AND any forecast ≥ alert threshold →
-     "…risk projected to reach {pred:.2f} within {horizon} — schedule rest."
+     "…risk projected to reach {pred:.0f} within {horizon} — schedule rest."
    - `data_quality` (info): quality < 0.8 over shortest window → "check sensor fit."
 3. Loop every `INSIGHT_INTERVAL_S`: evaluate per device; insert only if no same
    (device, rule_id) insight within `INSIGHT_COOLDOWN_S`; store evidence JSONB.
@@ -206,15 +212,22 @@ Steps:
    (key-only from the start). Note the public IPv4.
 2. User: Cloudflare DNS **A record, DNS-only (grey cloud)** `dash.<domain>` → VPS IP.
    (Grey cloud is required: UDP can't proxy, and Caddy needs direct ACME.)
-3. Agent (over SSH, scripted in `deploy/provision.sh`):
-   `apt update && apt install -y docker.io docker-compose-plugin` (or get.docker.com),
-   create non-root user with docker group, disable SSH password auth
-   (`PasswordAuthentication no`), `ufw allow 22/tcp 80/tcp 443/tcp 5005/udp && ufw enable`,
-   unattended-upgrades on.
+3. Agent (over SSH): run `deploy/provision.sh`. Docker via **`get.docker.com`** —
+   `apt install docker-compose-plugin` fails on stock Ubuntu 24.04, that package
+   name is Docker's own repo, not Ubuntu's. The script creates a non-root user in
+   the docker group, disables SSH password auth (`PasswordAuthentication no`),
+   applies `ufw allow 22/tcp 80/tcp 443/tcp 5005/udp && ufw enable`, and enables
+   unattended-upgrades.
 4. `git clone` the repo (private → deploy key or HTTPS token — user provides).
 
-**Done check:** `ssh vps docker run hello-world` works; `ufw status` shows exactly
-the four rules; `dig dash.<domain>` returns the VPS IP; password SSH rejected.
+**Done check:** `ssh vps docker run hello-world` works; `dig dash.<domain>` returns
+the VPS IP; password SSH rejected.
+
+⚠️ `ufw status` is **not** evidence the firewall is protecting the stack: Docker
+publishes ports through the `nat`/`DOCKER` chains and bypasses ufw's INPUT filtering
+entirely. What actually protects this deployment is that `db` and `redis` publish no
+host ports and `api` binds `127.0.0.1` — verify *that* with
+`docker compose ps --format '{{.Service}}: {{.Ports}}'`.
 
 ## S2-T10 — Deploy + WAN validation  ⚑ stage-2 exit
 
@@ -222,17 +235,46 @@ the four rules; `dig dash.<domain>` returns the VPS IP; password SSH rejected.
 **Depends:** ⛓ S2-T08 + S2-T09.
 
 Steps:
-1. Create prod `.env` on the VPS: real `POSTGRES_PASSWORD`/`JWT_SECRET`
-   (`openssl rand -hex 32`), `DOMAIN=dash.<domain>`; windows/horizons stay at test
-   values until the user flips them.
-2. `docker compose up -d --build`; watch Caddy obtain the certificate.
+1. Create prod `.env` on the VPS **from `.env.example`, never by copying the dev
+   `.env`** — the dev copy carries local workarounds. Checklist:
+
+   | Key | Value | Why it matters |
+   |---|---|---|
+   | `UDP_PORT` | **5005** | The dev `.env` has **5010** (a local Docker Desktop port wedge, see README Gotchas). This string is what actually opens the port in compose — it must match the ufw rule *and* the device config, or you get silent total data loss. |
+   | `EXPECTED_INPUT_HZ` | **640** | Measured device rate. Must be present explicitly; an omitted key falls back to the code default and depresses `quality` ~6%, which trips the `data_quality` insight for no reason. |
+   | `DOMAIN` | `dash.<domain>` | `.env.example` ships `dash.example.com`; Caddy will fail/rate-limit ACME against it. |
+   | `POSTGRES_PASSWORD`, `JWT_SECRET` | `openssl rand -hex 32` | Both ship as `changeme`. |
+   | `SEED_USERS` | real credentials | Ships as `trainer:changeme`. Unused until stage 3, but this box is public. |
+   | windows / horizons | leave at test values | User flips them when they want production durations. |
+
+   ⚠️ **Start on a fresh `db_data` volume. Never seed or restore from the local dev
+   database.** `metrics` rows carry no `model_version`, so rows written before and
+   after the composite rescale are indistinguishable, and `metrics_1m` buckets older
+   than the 2h refresh offset can never be recomputed. Mixed-scale rows would corrupt
+   window trends, min/max and forecast slopes permanently.
+2. `docker compose up -d --build`; watch Caddy obtain the certificate. Caddy also
+   serves a plain `:80` site, so the stack is reachable by raw IP if ACME fails —
+   useful for diagnosis before blaming the deploy.
 3. WAN test from the Windows machine:
    `python simulator/simulate.py --target <VPS_IP>:5005 --devices 3 --loss 3` →
    `https://dash.<domain>` shows live charts from another network; after 10+ min,
    windows/forecasts/insights populate; `/api/health` clean; `quality` reflects loss.
+
+   Judge ingest by **`/api/health`'s per-sensor `rate_hz`**, not `docker compose ps`:
+   ingest has no healthcheck, so "Up" says nothing about whether packets are
+   arriving. Expect the first forecast at **~10–15 min**, not 10 —
+   `PREDICT_INTERVAL_S=300` plus the 10 one-minute buckets `predict.py` requires.
+   Note the simulator's own defaults are now `--rate 640` and
+   `--target 127.0.0.1:5010`, so always pass `--target` explicitly here.
 4. Resilience: `reboot` the VPS → stack self-heals (`restart: unless-stopped`);
    confirm data resumes.
 5. User points real wearables at `<VPS_IP>:5005`; verify auto-registration + rename.
-6. Record: follow-up backlog item — nightly `pg_dump` off-box (stage 3 / P3.4).
+6. `df -h` on the VPS. `METRICS_RETENTION` is 30d with no compression policy, which
+   is fine at real duty cycles (wearables stream during sessions) but a simulator
+   left running fills the disk: 60Hz × 5 devices continuous is ~778M rows/month.
+   If it ever becomes a problem the fix is one `.env` line or a Timescale
+   compression policy.
+7. Record: follow-up backlog item — nightly `pg_dump` off-box (stage 3 / P3.4).
+   There is no backup of any kind at stage-2 exit.
 
 **Done check (stage-2 exit):** PRD §7 stage-2 success measure met end-to-end.

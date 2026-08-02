@@ -39,12 +39,16 @@ def make_ctx(comp_avg=50.0, quality=1.0, mid_trend="flat",
 
 def test_composite_high_thresholds() -> None:
     rule = RULE["composite_high"]
+    # Values straddle the configured thresholds (warn 85 / alert 92). 75 used to
+    # be a warning; after the SPEC §6.1 composite rescale that is ordinary hard
+    # training and must NOT fire — which is the whole point of raising them.
     assert rule.evaluate(make_ctx(comp_avg=50.0)) is None
-    warn = rule.evaluate(make_ctx(comp_avg=75.0))
+    assert rule.evaluate(make_ctx(comp_avg=77.0)) is None    # hard interval work
+    warn = rule.evaluate(make_ctx(comp_avg=88.0))
     assert warn["severity"] == "warning"
-    alert = rule.evaluate(make_ctx(comp_avg=90.0))
+    alert = rule.evaluate(make_ctx(comp_avg=95.0))
     assert alert["severity"] == "alert"
-    msg = rule.message(make_ctx(comp_avg=90.0, name="Bob"), alert)
+    msg = rule.message(make_ctx(comp_avg=95.0, name="Bob"), alert)
     assert "Bob" in msg and "reducing intensity" in msg
     # empty window (no data) never fires
     ctx = make_ctx()
@@ -54,16 +58,23 @@ def test_composite_high_thresholds() -> None:
 
 def test_rising_risk_needs_trend_and_forecast() -> None:
     rule = RULE["rising_risk"]
-    crossing = [{"horizon": "10m", "pred": 60.0}, {"horizon": "30m", "pred": 88.0}]
+    crossing = [{"horizon": "10m", "pred": 60.0}, {"horizon": "30m", "pred": 94.0}]
     assert rule.evaluate(make_ctx(mid_trend="flat", forecasts=crossing)) is None
     assert rule.evaluate(make_ctx(mid_trend="up", forecasts=None)) is None
     assert rule.evaluate(
         make_ctx(mid_trend="up", forecasts=[{"horizon": "10m", "pred": 60.0}])
     ) is None
     ev = rule.evaluate(make_ctx(mid_trend="up", forecasts=crossing))
-    assert ev["pred"] == pytest.approx(88.0) and ev["horizon"] == "30m"
+    assert ev["pred"] == pytest.approx(94.0) and ev["horizon"] == "30m"
     msg = rule.message(make_ctx(name="Cara"), ev)
-    assert "Cara" in msg and "88.00" in msg and "30m" in msg and "rest" in msg
+    assert "Cara" in msg and "94" in msg and "30m" in msg and "rest" in msg
+
+    # The reported horizon must be the SOONEST crossing, not the lowest
+    # prediction. Once fit() clips several horizons at 100 those differ, and
+    # picking by prediction names the wrong horizon in the trainer's message.
+    saturated = [{"horizon": "10m", "pred": 100.0}, {"horizon": "30m", "pred": 100.0}]
+    ev = rule.evaluate(make_ctx(mid_trend="up", forecasts=saturated))
+    assert ev["horizon"] == "10m"
 
 
 def test_data_quality_info() -> None:
@@ -108,7 +119,7 @@ async def test_job_fires_once_per_cooldown_and_endpoint(scratch_app) -> None:
     for minute in (2, 1):
         for i in range(10):
             t = m_now - timedelta(minutes=minute) + timedelta(seconds=6 * i)
-            rows.append((t, "30", None, None, None, None, None, 90.0, 0.5))
+            rows.append((t, "30", None, None, None, None, None, 95.0, 0.5))
     await conn.copy_records_to_table(
         "metrics", records=rows,
         columns=("time", "device_id", "m1", "m2", "m3", "m4", "m5",
@@ -128,7 +139,7 @@ async def test_job_fires_once_per_cooldown_and_endpoint(scratch_app) -> None:
     high = by_rule["composite_high"]
     assert high["severity"] == "alert"
     assert "Renamed Athlete" in high["message"]     # message uses display_name
-    assert high["context"]["composite_avg"] == pytest.approx(90.0)
+    assert high["context"]["composite_avg"] == pytest.approx(95.0)
     assert by_rule["data_quality"]["severity"] == "info"
 
     # newest-first ordering + limit + device filter

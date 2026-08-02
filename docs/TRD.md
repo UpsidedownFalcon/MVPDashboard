@@ -298,8 +298,8 @@ Everything that connects components lives in **one root `.env`** (template:
 | `PAST_WINDOWS` | `5m,30m,2h` | **3 durations; deployment e.g. `1h,1d,3d`** |
 | `FUTURE_HORIZONS` | `10m,30m,1h` | deployment e.g. `1d,3d,1w` |
 | `PREDICT_INTERVAL_S` / `PREDICT_TRAIN_WINDOW` | 300 / 2h | |
+| `INSIGHT_WARN_THRESHOLD` / `INSIGHT_ALERT_THRESHOLD` | 85 / 92 | composite 0–100. Raised from 70/85 after the SPEC §6.1 rescale: a measured hard interval session reads ~77, so 70 warned during ordinary hard training. At 85 acute effort alone does not fire — accumulated dose is what raises the flag |
 | `INSIGHT_INTERVAL_S` / `INSIGHT_COOLDOWN_S` | 60 / 600 | |
-| `INSIGHT_WARN_THRESHOLD` / `INSIGHT_ALERT_THRESHOLD` | 70 / 85 | composite 0–100 scale (S2-T05 starter rules; task sheet's 0.7/0.85 predate the SPEC 0–100 rescale) |
 | `METRICS_RETENTION` | 30d | hypertable retention |
 | `MAX_DEVICES` | 5 | hard cap on concurrently tracked devices; a 6th while all 5 are live is dropped and counted in `ingest:stats/global:dev_dropped`, never merged into another device's stream (biomech SPEC §7.2). Raising it needs an ingest restart |
 | `POSTGRES_HOST` / `POSTGRES_PORT` | db / 5432 | expanded from the `POSTGRES_*` row above, which listed no per-key defaults |

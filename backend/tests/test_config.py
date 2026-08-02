@@ -106,7 +106,7 @@ def test_defaults_load_without_env_file(clean_env: pytest.MonkeyPatch) -> None:
     assert s.udp_port == 5005
     assert s.api_port == 8000
     assert s.redis_url == "redis://redis:6379/0"
-    assert s.expected_input_hz == 600
+    assert s.expected_input_hz == 640
     assert s.output_hz == 60
     assert s.jitter_buffer_ms == 50
     assert s.offline_after_s == 2

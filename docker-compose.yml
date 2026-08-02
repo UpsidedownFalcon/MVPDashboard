@@ -98,7 +98,10 @@ services:
       - caddy_config:/config
     restart: unless-stopped
     depends_on:
-      - api
+      # condition, not a bare list: api runs migrations at start-up, and without
+      # this Caddy serves ~30s of 502s on first boot, which reads as a failed deploy.
+      api:
+        condition: service_healthy
 
 volumes:
   db_data:

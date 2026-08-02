@@ -50,7 +50,8 @@ class Settings(BaseSettings):
     jwt_expire_hours: int = 24
     seed_users: str = "trainer:changeme"
 
-    expected_input_hz: float = 600.0
+    expected_input_hz: float = 640.0   # measured device rate (TRD §3); was an
+                                       # unmeasured 600 estimate until 2026-08-02
     output_hz: int = 60
     limb_map: dict[tuple[int, int], str] = Field(default_factory=lambda: dict(_DEFAULT_LIMB_MAP))
     jitter_buffer_ms: int = 50
@@ -70,9 +71,13 @@ class Settings(BaseSettings):
     insight_interval_s: int = 60
     insight_cooldown_s: int = 600
     # Insight rule thresholds on the composite's 0-100 scale (S2-T05; the task
-    # sheet's 0.7/0.85 predate the SPEC's 0-100 rescale — TRD §7).
-    insight_warn_threshold: float = 70.0
-    insight_alert_threshold: float = 85.0
+    # sheet's 0.7/0.85 predate the SPEC's 0-100 rescale — TRD §7). Raised from
+    # 70/85 after the composite rescale (biomech SPEC §6.1): a measured hard
+    # interval session reads ~77, so 70 would have warned during ordinary hard
+    # training. At 85 acute effort alone does not fire and it takes accumulated
+    # dose (m3 raising the floor) to reach warning — the intended semantics.
+    insight_warn_threshold: float = 85.0
+    insight_alert_threshold: float = 92.0
     metrics_retention_raw: str = Field("30d", validation_alias="METRICS_RETENTION")
 
     @field_validator("limb_map", mode="before")
