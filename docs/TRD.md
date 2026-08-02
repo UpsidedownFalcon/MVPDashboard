@@ -11,7 +11,7 @@ Five Docker Compose services on one VPS (identical stack locally via Docker Desk
 
 ```
 Wearables (1–5) ──UDP :5005 (public)──▶ ┌──────── ingest (Python) ────────┐
-  4 IMUs each, ~600Hz/sensor           │ UDP → CRC → decode → jitter     │
+  4 IMUs each, ~640Hz/sensor           │ UDP → CRC → decode → jitter     │
                                        │ buffer → align → biomech →      │
                                        │ 60Hz ticker → Redis publish     │
                                        └────────────┬────────────────────┘
@@ -125,7 +125,7 @@ assumes the exact rate: it measures per-sensor rate live and computes quality ag
    sorted by unwrapped timestamp, releasing reordered data in order; late arrivals
    beyond the window are dropped and counted.
 5. **Framing:** on each 60Hz tick, all samples per limb released since the previous
-   tick (~10 at 600Hz) are assembled as `frames: {limb: float32[n, 6]}` plus the
+   tick (~11 at 640Hz) are assembled as `frames: {limb: float32[n, 6]}` plus the
    matching server-mapped `times: {limb: float64[n]}`. The ticker neither resamples
    nor pads: limbs may arrive with different sample counts and biomech consumes
    them as-is, deriving its filter coefficients from the measured `Δt`. Length
@@ -228,7 +228,11 @@ assumes the exact rate: it measures per-sensor rate live and computes quality ag
    `OFFLINE_AFTER_S` (default 2s), the device's ticker suspends (device offline)
    rather than streaming stale holds.
 8. **Quality:** per tick, `received_samples / expected_samples` across the device's
-   4 sensors (expected = `EXPECTED_INPUT_HZ / OUTPUT_HZ × 4`), clamped to [0,1].
+   mapped sensors (expected = `EXPECTED_INPUT_HZ / OUTPUT_HZ × len(LIMB_MAP)`), clamped
+   to [0,1]. Scaled by the **mapped** count, not a hardcoded 4: a valid 3-sensor
+   `LIMB_MAP` used to read a permanent 0.75 — a 25% data-loss warning on healthy
+   hardware — while a 5+ sensor map clamped at 1.0 and hid real loss. A physically
+   dead sensor still lowers quality, which is what SPEC §8 relies on.
 9. **Publish:** tick JSON → Redis channel `ticks`; per-device/sensor `last_seen` and
    rate/drop stats → Redis keys every 1s (see [BACKEND_SCHEMA.md](BACKEND_SCHEMA.md) §4).
 
@@ -278,7 +282,7 @@ Everything that connects components lives in **one root `.env`** (template:
 | Key | Default (test) | Notes |
 |---|---|---|
 | `DOMAIN` | dash.example.com | dashboard hostname (Caddy + cookies) |
-| `UDP_PORT` | 5005 | device ingest |
+| `UDP_PORT` | 5005 | device ingest. **Local dev may differ** — Docker Desktop on the dev machine wedged both 5005 and 5010 (port shows bound, nothing reaches the container); the local `.env` overrides it and real-device sessions run ingest natively on the host. See README “Gotchas”. The VPS keeps 5005. |
 | `API_PORT` | 8000 | internal only (Caddy proxies) |
 | `POSTGRES_*` | db/5432/mvpdash/… | host, port, db, user, password |
 | `REDIS_URL` | redis://redis:6379/0 | |
@@ -339,6 +343,12 @@ Duration syntax everywhere: `<int><s|m|h|d|w>`.
 output rate, and all drop counters (CRC-fail, late-drop, buffer-drop, WS-drop,
 DB-buffer-drop), plus DB/Redis connectivity. This is the first place to look when
 anything misbehaves; the frontend quality badge is driven from the same numbers.
+
+Ingest additionally **logs an error** when datagrams are arriving but none decode
+and no device exists. That state is a configuration error (wrong frame format),
+not a data-quality statistic, and leaving it to a counter nobody watches cost a
+whole session: a healthy device streaming a 22-byte frame into a decoder that
+required 21 read exactly like "device not connected" (§3).
 
 ## 11. Open items (TBD ledger)
 

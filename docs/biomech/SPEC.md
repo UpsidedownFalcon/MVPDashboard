@@ -218,7 +218,7 @@ sample rate; TRD §4 requires rate-flexible input. A cascaded one-pole with
 `α = 1 − exp(−Δt/τ)` recomputed from **measured** Δt is rate-correct at any input rate, trading a
 gentler roll-off for that robustness. **No `filtfilt`** — non-causal, forbidden by §1.4. **[E]**
 
-Jerk is computed from the **low-passed** vector: raw 600 Hz differentiation has noise
+Jerk is computed from the **low-passed** vector: raw ~640 Hz differentiation has noise
 `σ_jerk = σ_a · fs/√2`, and unfiltered differentiation is documented at **374% error**
 (Crenna 2021). Measured rest jerk floor after filtering: ~40 m/s³ mean, ~48–57 m/s³ p99. **[V]**
 
@@ -276,7 +276,7 @@ values it tests the *residual* error, which is what lets carry-over be refined i
 locking a corrected sensor out of ever measuring again. Measured corrections **compose** with
 what is already applied (`k_total = k_applied · 9.81 / mean|a_calibrated|`).
 
-**Running sums, never samples.** 10 s × 600 Hz × 4 sensors is ~2 MB per device to produce three
+**Running sums, never samples.** 10 s × 640 Hz × 4 sensors is ~2 MB per device to produce three
 scalars, and all three are *exact* functions of `Σ|a|`, `Σω` and `Σ|a|²`:
 `k = 9.81/mean|a|`, `gyro_bias = mean(ω)`, `σ = √(E|a|² − (E|a|)²)`. Only the sums are kept.
 
@@ -318,6 +318,12 @@ gyro reports the sensor motionless while `|a|` still disagrees with gravity, mot
 it and the sensor can: after `CAL_FAULT_S` (20 s) of that state the sensor is flagged
 `cal_failed`. Without the split the two causes were indistinguishable, and a genuinely mis-scaled
 sensor read `uncalibrated` for the whole session — identical to an athlete who never stood still.
+
+**Held ticks age the window, they do not pause it.** `compute()` returns early when no limb
+produced samples at all. That early return must still advance `cal_gap`: a half-built window
+surviving a whole-device dropout of arbitrary length and then resuming would mean the "10 s of
+*continuous* stillness" guarantee was never actually checked. The real link drops packets in
+bursts, so this is the common case, not a corner one.
 
 - On rejection: flag `cal_failed`, keep last-known-good (or defaults), **clear the window and keep
   seeking**. There is nothing for the UI to retry: detection never stops.
@@ -417,7 +423,7 @@ for non-vertical loading.
 ⚠️ **Honesty flag: IMU jerk has never been validated against GRF loading rate.** No such study
 exists. The nearest support is the reverse direction — GRF loading *rate* predicts peak tibial
 acceleration at **r² = 0.95** (Hennig 1993) — plus a validated osteogenic **jerk threshold of
-100 g/s ≈ 981 m/s³** (Jämsä 2011, hip-mounted). **[L]** Also: at 600 Hz only ~60–90% of true
+100 g/s ≈ 981 m/s³** (Jämsä 2011, hip-mounted). **[L]** Also: at our ~640 Hz only ~60–90% of true
 peak jerk is recovered (peak jerk is ~5× more sample-rate-sensitive than peak acceleration), so
 **`m2` is meaningful as a within-athlete relative trend, not an absolute physical value.** Pin
 `fs`, cutoff and differentiation scheme; never compare across configurations.
@@ -1123,6 +1129,18 @@ presented to a trainer as a finding — only as a trend with the `unvalidated` f
     runs on last-known-good values, flagged `carried_over` and never `uncalibrated`; a later
     still window replaces them and clears the flag; a session reset demotes `measured` back to
     `carried` rather than to defaults (§3.8).
+
+28. **Whole-device dropout breaks the still window** — after several seconds of accumulated
+    stillness, feed held ticks (no limb has samples) for longer than `CAL_MAX_GAP_S`; the window
+    must clear. A held tick that returns before the still-window update lets a window survive a
+    dropout of any length (§3.8).
+29. **Sensor fault vs restless athlete** — a perfectly motionless sensor reading 10% off gravity
+    must raise `cal_failed` after `CAL_FAULT_S` and keep defaults; the same magnitude error *with*
+    rotation present must never raise it, because motion explains that one (§3.8).
+30. **Dead-from-the-start sensors** — a sensor mapped in `LIMB_MAP` that never streams must give
+    `degraded_sensors`, never `warming_up` (which promises a value that is never coming), and
+    `m5` must not go `null` with no flag at all. Tested against `ema_seen`; a healthy rig inside
+    its warm-up must still say `warming_up` (§8, §10).
 
 **Live iteration (S1-T15 step 4):** on `/debug` with real wearables, confirm standing still ≈ 0,
 walking clearly above zero, and the ordering `jump > run > squat > walk > still` on `m1`. Any

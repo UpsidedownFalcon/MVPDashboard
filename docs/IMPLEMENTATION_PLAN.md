@@ -46,7 +46,7 @@ signups) — don't hand those to unattended agents.
 | S1-T02 | Backend package + config loader + duration parser | T01 | — |
 | S1-T03 | Packet decoder/encoder (`common/packet.py`) + golden tests vs `example/` | T02 | T04 |
 | S1-T04 | Compose file: redis + ingest + api skeletons (db/caddy profiled off) | T02 | T03 |
-| S1-T05 | Simulator (replays `squats.bin` @600Hz, N devices, loss/reorder/jitter/drift) | T03 | — |
+| S1-T05 | Simulator (replays `squats.bin` @640Hz, N devices, loss/reorder/jitter/drift) | T03 | — |
 | S1-T06 | Ingest: UDP server + batch decode loop + stats | T04, T05 | — |
 | S1-T07 | Ingest: timestamp unwrap + per-leg clock alignment + reboot detect | T06 | — |
 | S1-T08 | Ingest: jitter buffer (reorder, late-drop) | T07 | — |

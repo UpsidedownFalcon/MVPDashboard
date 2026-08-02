@@ -84,8 +84,28 @@ auto-register on their first packet and appear on `/debug` within seconds.
 - **UDP stops arriving after `docker compose up -d` recreates the ingest
   container** (Docker Desktop's UDP port proxy can go stale): run
   `docker compose restart ingest` once and traffic flows again.
+- **Docker Desktop can wedge a UDP port permanently.** On this dev machine both
+  5005 and 5010 reached a state where the port shows as bound
+  (`0.0.0.0:5010->5010/udp`) but nothing reaches the container — verified by
+  firing 21,600 simulator packets at it and receiving zero. It survives engine
+  restarts and `wsl --shutdown`. Symptoms are indistinguishable from "the device
+  isn't sending".
+
+  The reliable workaround for a real-device session is to run **ingest natively
+  on the host**, which removes Docker's UDP proxy from the path entirely. Leave
+  everything else in Docker; it uses the same Redis via the `debug` profile:
+
+  ```powershell
+  docker compose stop ingest
+  docker compose --profile debug up -d          # exposes redis on 127.0.0.1
+  cd backend
+  $env:REDIS_URL = 'redis://127.0.0.1:6379/0'
+  uv run python -m ingest.main
+  ```
+
+  Don't rebuild the ingest container mid-session — that is what wedges the port.
 - The api service is bound to `127.0.0.1:8000` on purpose (stage 1 is
-  local-only); nothing except UDP 5005 is reachable from the LAN.
+  local-only); nothing except the UDP port is reachable from the LAN.
 
 ## Configuration
 

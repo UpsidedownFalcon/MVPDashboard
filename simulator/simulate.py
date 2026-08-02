@@ -227,8 +227,10 @@ def build_parser() -> argparse.ArgumentParser:
                                 formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     p.add_argument("--devices", type=int, default=1, help="number of simulated devices")
     p.add_argument("--base-id", type=int, default=30, help="device_id of the first device")
-    p.add_argument("--rate", type=float, default=600.0, help="per-sensor sample rate (Hz)")
-    p.add_argument("--target", default="127.0.0.1:5005", help="UDP destination host:port")
+    p.add_argument("--rate", type=float, default=640.0,
+                   help="per-sensor sample rate (Hz); 640 = measured device rate")
+    p.add_argument("--target", default="127.0.0.1:5010",
+                   help="UDP destination host:port")
     p.add_argument("--loss", type=float, default=0.0, help="%% of packets dropped before send")
     p.add_argument("--reorder", type=float, default=0.0, help="%% of packets held back 3-8 slots")
     p.add_argument("--jitter", type=float, default=0.0, help="max extra uniform delay (ms)")

@@ -76,8 +76,10 @@ username + logout.
 - Window cards and forecast horizons are **rendered from config** (labels like "past
   5m" / "next 30m" generated from the duration strings) — the UI never hardcodes them.
 - Metric labels come from one frontend constants file (`lib/metrics.ts`) mapping
-  `m1..m5, composite` → display names/units. *Real names TBD with the biomech spec;
-  placeholders "Metric 1..5", "Risk index" tonight.*
+  `m1..m5, composite` → display names/units. Names are now **fixed** by biomech
+  SPEC §5: `m1` Impact, `m2` Loading Rate, `m3` Accumulated Load, `m4` Movement
+  Control, `m5` L/R Balance, `composite` Injury Risk — all 0–100, `m1..m5`
+  nullable. Nulls render as **gaps, never 0** (SPEC §9).
 
 ## 5. Live chart behavior — SET IN STONE
 
@@ -101,9 +103,29 @@ username + logout.
 | online / offline | ● | green / gray |
 | quality | % + 5-bar meter | green ≥90, amber 60–90, red <60 |
 
+**Biomech flags — MUST be rendered** (biomech SPEC §10 makes this the UI's only job
+in the calibration story; the tick's `f` field carries them, BACKEND_SCHEMA §2):
+
+| Flag | Means | Weight |
+|---|---|---|
+| `cal_failed` | a sensor is motionless but disagrees with gravity — hardware fault | alert |
+| `degraded_sensors` | fewer sensors than mapped, or one never streamed: the affected metric is **never** coming | alert |
+| `saturated` | clipped window; `m1`/`m2` suppressed | alert |
+| `uncalibrated` | running on defaults; `m4`/`m5` carry per-sensor gain bias | warning |
+| `partial` | a required sensor went inactive mid-session | warning |
+| `no_shank` | impact falls back to all limbs | warning |
+| `carried_over` | calibrated from a previous session, not measured today | info |
+| `warming_up` | `m4`/`m5` inside their 60 s / 30 s warm-up — a value *is* coming | muted |
+| `unvalidated` | `m4`/`m5` have no real-data validation yet (SPEC §11.1) | muted |
+
+`warming_up` and `degraded_sensors` must never look alike: one promises a value,
+the other says none is coming. The uncalibrated→calibrated transition is a visible
+step change in `m4`/`m5` and should be marked as such, not shown as a change in the
+athlete (SPEC §3.8).
+
 ## 7. Empty & error states — SET IN STONE
 
-- No devices yet: "Waiting for devices… point wearables at `<IP>:5005`".
+- No devices yet: "Waiting for devices… point wearables at `<IP>:<UDP_PORT>`".
 - No insights: "No insights yet — all metrics in normal range."
 - History windows without enough data: card shows "collecting… (n min of 5m)".
 - Forecast before first prediction run: "First forecast in ~N min."

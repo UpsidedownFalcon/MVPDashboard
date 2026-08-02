@@ -43,7 +43,7 @@ time — who is at risk and what to do about it.
 
 - No self-service account signup, password reset, or role management.
 - No per-user device scoping (all logged-in users see all devices) — *TBD later*.
-- No raw 600Hz storage or replay; no video; no mobile app (responsive web only).
+- No raw high-rate (~640Hz) storage or replay; no video; no mobile app (responsive web only).
 - No alerting/push notifications outside the dashboard — *possible later*.
 - No medical claims — this is a training-load guidance tool, not a diagnostic device.
 - No device management/firmware features; devices are configured out of band.
@@ -87,6 +87,6 @@ only the order is staged.
 
 | Stage | Scope | Features delivered | Success measure (stage exit) |
 |---|---|---|---|
-| **1 — Local biomech** | Real biomech model on live real-time data; local machine only (simulator + wearables on LAN). No deploy, no DB, no auth. | F4 (live 60Hz), F5 (quality), F2 partially (online/offline in debug viewer) — real metrics, not stubs | User signs off on real-time metric quality watching the debug viewer; 5 devices at 600Hz sustained with stable 60Hz output. |
+| **1 — Local biomech** | Real biomech model on live real-time data; local machine only (simulator + wearables on LAN). No deploy, no DB, no auth. | F4 (live 60Hz), F5 (quality), F2 partially (online/offline in debug viewer) — real metrics, not stubs | User signs off on real-time metric quality watching the debug viewer; 5 devices at the device's measured ~640Hz sustained with stable 60Hz output. |
 | **2 — Deploy + intelligence** | VPS hosting, persistence, history windows, forecasts, insights. Crude disposable AI-generated frontend. **Fully public temporarily — accepted risk** (no login until stage 3; revisit if identifiable trainee data appears). | F2, F3, F6, F7, F8, F9, F10 (crude UI) | Simulator from a remote network → hosted dashboard shows live charts + populated history/forecast/insights over HTTPS on the real domain; real wearables then switched to the VPS IP. |
 | **3 — Product** | Properly designed frontend (user's mockup + design session), login system, polish, hardening backlog. | F1, final F2–F8 UX | Full acceptance list F1–F10 passes end-to-end; public access ends (auth enforced everywhere). |

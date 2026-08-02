@@ -74,7 +74,8 @@ format ([../TRD.md](../TRD.md) §3).
 
 Steps:
 1. Port from [../../example/parse_imu.py](../../example/parse_imu.py): CRC-8 table
-   builder, i16/u32 LE helpers — but operate on a **list of 21-byte payloads**
+   builder, i16/u32 LE helpers — but operate on a **list of 22-byte UDP payloads**
+   (the SD log's 21-byte record plus the trailing `soc` byte — TRD §3)
    (stack into an `(n, 21)` uint8 matrix), not a file.
 2. `decode(payloads: list[bytes]) -> Batch` where `Batch` is a dataclass of numpy
    arrays: `device_id, source_id, sensor_id, version, ts_us (u32), imu (n,6) int16`,
@@ -84,7 +85,8 @@ Steps:
    (single record, correct CRC). Used by the simulator; keeps encode/decode in one
    file so they can't drift apart.
 4. Tests: (a) round-trip encode→decode; (b) golden test — read the first ~1000
-   records of `example/squats.bin` (21-byte stride), decode, compare fields against
+   records of `example/squats.bin` (**21-byte** stride — the log form, via
+   `decode_log()`), compare fields against
    the same rows of `example/squats_decoded.csv`; (c) corrupt CRC/sync/length are
    counted and filtered.
 
@@ -122,7 +124,7 @@ Steps:
 **Files:** `simulator/simulate.py`, `backend/tests/test_simulator.py` (import-tested).
 
 Steps:
-1. Load `example/squats.bin` once with the T03 decoder (read file → 21-byte payload
+1. Load `example/squats.bin` once with `decode_log()` (read file → 21-byte payload
    list → `decode`). Group samples by `(source_id, sensor_id)` (4 streams), sorted
    by unwrapped ts.
 2. Decimate each stream from native (~6.6kHz) to `--rate` (default 600) by stride
@@ -136,7 +138,8 @@ Steps:
    endlessly). Batch scheduling: sleep in ~5ms slots, send everything due.
 4. Imperfection flags: `--loss P` (drop before send), `--reorder P` (hold a packet
    back 3–8 slots), `--jitter MS` (uniform extra delay), `--seed` (reproducible),
-   `--target host:port` (default `127.0.0.1:5005`).
+   `--target host:port` (default `127.0.0.1:5010` — matches the local `.env` override;
+   the VPS uses 5005).
 5. Print once per second: per-device sent/dropped/reordered and effective Hz.
 6. Runs on the host (no Docker): `uv run python simulator/simulate.py ...`.
 
@@ -166,7 +169,7 @@ Steps:
 5. `main.py`: uvloop if available, config load, start UDP + drain + stats loop;
    clean shutdown on SIGTERM.
 
-**Done check:** simulator 2 devices → ingest logs show ~600Hz per sensor per device,
+**Done check:** simulator 2 devices → ingest logs show ~640Hz per sensor per device,
 `crc_fail=0`; with `--loss 10` rates drop ~10%.
 
 ## S1-T07 — Ingest: timestamp unwrap + clock alignment
@@ -319,8 +322,8 @@ Steps — run and record the matrix (5 devices unless noted):
    no stale ticks while offline.
 5. Kill/restart `api`: ingest unaffected (counters keep advancing) — proves the
    isolation goal. Kill/restart `redis`: ingest reconnects with backoff, no crash.
-6. Real wearables (if available): point at dev machine LAN IP `:5005`, verify
-   device auto-appears; note Windows Defender Firewall must allow inbound UDP 5005
+6. Real wearables (if available): point at dev machine LAN IP `:<UDP_PORT>`, verify
+   device auto-appears; note Windows Defender Firewall must allow that inbound UDP port
    (document the `netsh`/UI step in README).
 7. README quickstart: compose up → simulator → `/debug`, + firewall note.
 

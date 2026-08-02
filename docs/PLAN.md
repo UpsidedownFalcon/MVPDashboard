@@ -33,8 +33,9 @@ Everything favors simplicity, stubs with stable interfaces, and configuration ov
   `device_id u8 | source_id u8 | wire[19] | soc u8` where
   wire = `sync 0xA5 | header(sensor_id bits0-1, version bits2-7) | timestamp_us u32 LE
   (wraps ~71.6 min) | ax,ay,az,gx,gy,gz i16 LE raw | crc8 (poly 0x07, init 0x00, over wire[1..17])`.
-- **Rate:** UDP streams ~600Hz per sensor (decimated from the ~6.6kHz SD-log rate).
-  4 sensors/device → ~2,400 pkt/s/device, ~12k pkt/s at 5 devices. Ingest is written
+- **Rate:** UDP streams **~640Hz** per sensor — measured on the real device, superseding
+  the ~600 estimate (decimated from the ~6.6kHz SD-log rate).
+  4 sensors/device → ~2,560 pkt/s/device, ~12.8k pkt/s at 5 devices. Ingest is written
   rate-agnostic (measures actual rate) but sized for bursts.
 - **Sensor topology:** per device, `source_id` ∈ {0,1} × `sensor_id` ∈ {1,2}.
   Default limb map (config-overridable): (0,1)=left shin, (0,2)=left thigh,
@@ -45,7 +46,8 @@ Everything favors simplicity, stubs with stable interfaces, and configuration ov
 - **Hosting:** new Hetzner-class VPS; user's existing domain pointed at it via Cloudflare
   **DNS-only records** (Cloudflare cannot proxy UDP; DNS-only also lets Caddy get
   Let's Encrypt certs directly). Devices target the raw `VPS_IP:5005/udp`.
-- **Retention:** 60Hz data ~30 days (configurable), aggregates forever. Raw 600Hz never stored.
+- **Retention:** 60Hz data ~30 days (configurable), aggregates forever. The raw
+  high-rate stream is never stored.
 
 ## Architecture (SET IN STONE)
 
