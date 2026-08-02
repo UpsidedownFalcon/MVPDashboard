@@ -688,8 +688,14 @@ because a 10-sample window usually misses the impact entirely. **[V]**
 
 **Two-level summary structure (required — not an optimisation detail).** Rather than buffering
 1 s of raw derived samples (~600/limb), each tick reduces its ~10 new samples to **three
-float32 summaries** (`max adyn`, `max jerk`, `mean adyn`), and only **60 of those summaries**
-(= 1 s) are retained. `m1`/`m2` then take a percentile over 60 values instead of 600.
+float32 summaries** (`p90 adyn`, `p90 jerk`, `mean adyn`), and only **60 of those summaries**
+(= 1 s) are retained. `m1`/`m2` then take the **`max` over those 60 values**, not a percentile.
+
+🚩 **The two levels use different statistics and the pairing is mandatory — see §5.1.** The `p90`
+is *within* the tick, where it rejects single-sample artifacts; the aggregate *across* the ring is
+`max`, because a percentile across the ring makes an isolated impact invisible (a 50 m/s² impact
+moves ring-p90 by 0.000). *(An earlier revision of this paragraph said "a percentile over 60
+values", contradicting §5.1. §5.1 is correct.)*
 
 | Buffer | Length | Contents | Bytes/device |
 |---|---|---|---|
@@ -1070,8 +1076,10 @@ presented to a trainer as a finding — only as a trend with the `unvalidated` f
     applied**; calibration is automatic but must never be load-bearing for correctness, and a
     device with no history that never stands still has to keep working on defaults.
 15. **Throughput guard** (`pytest -k bench`) — fully batched `compute()` for 5 devices must stay
-    **under 2 ms per tick** (measured 381 µs, §7.1), asserting the batching rules survive
-    refactoring. A per-limb-loop regression would show up as ~5 ms.
+    **under 3 ms per tick** (measured **1,590 µs**, §7.1), asserting the batching rules survive
+    refactoring. The guard sits ~1.9× above the measurement because it runs alongside the rest
+    of the suite; the regression it exists for — reverting to per-limb `lfilter` calls — costs
+    ~3.8× and lands at ~6 ms. `test_biomech.py` must assert this same 3 ms.
 16. **Latency guard** — a synthetic step impact must move `m1` on the **next tick**, proving
     trailing windows delay release, not onset (§7.1).
 17. **Variable device count** — run with 1, 2, 3, 5 devices; all must produce correct metrics,

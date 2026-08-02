@@ -1,8 +1,13 @@
 """Ingest service entrypoint — final wiring (S1-T11).
 
 UDP -> decode -> route -> (per device) align -> jitter -> 60Hz ticker ->
-biomech stub -> Redis publish, plus 1s stats/last_seen writes. Nothing in this
+biomech -> Redis publish, plus 1s stats/last_seen writes. Nothing in this
 process touches a DB or serves HTTP (stall-risk isolation, TRD §1).
+
+The biomech model is the real one (docs/biomech/SPEC.md, S1-T15) — 5
+orientation-free primitives plus a load-vs-capacity composite, not the stub
+this file was first written against. It also self-calibrates, so this module
+seeds each device from Redis as it appears (BiomechRestorer below).
 """
 
 from __future__ import annotations

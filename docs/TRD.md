@@ -111,14 +111,22 @@ assumes the exact rate: it measures per-sensor rate live and computes quality ag
 3. **Clock alignment:** per `(device, source)`, maintain `offset = server_recv_time −
    device_ts` as a rolling minimum (least-queued packets) with slow drift tracking;
    map all samples to server time. Offset jump > `RESET_OFFSET_JUMP_S` (default 5s)
-   ⇒ device/leg rebooted ⇒ reset that source's buffers. Legs are paired on mapped
-   server time (tolerance ±25ms) — raw timestamps are never compared across sources.
+   ⇒ device/leg rebooted ⇒ reset that source's buffers. Raw timestamps are never
+   compared across sources — mapped server time is the only common clock. There is
+   no explicit leg-pairing step: both legs are released into the same 60Hz tick
+   window (step 5), which is what "aligned across limbs" means downstream.
 4. **Jitter buffer:** per sensor, samples are held `JITTER_BUFFER_MS` (default 50ms)
    sorted by unwrapped timestamp, releasing reordered data in order; late arrivals
    beyond the window are dropped and counted.
 5. **Framing:** on each 60Hz tick, all samples per limb released since the previous
-   tick (~10 at 600Hz) are assembled as `frames: {limb: float32[n, 6]}`, resampled/
-   padded as needed — biomech gets a rate-flexible input.
+   tick (~10 at 600Hz) are assembled as `frames: {limb: float32[n, 6]}` plus the
+   matching server-mapped `times: {limb: float64[n]}`. The ticker neither resamples
+   nor pads: limbs may arrive with different sample counts and biomech consumes
+   them as-is, deriving its filter coefficients from the measured `Δt`. Length
+   equalisation happens one layer down, inside `biomech.compute`, as **hold-last**
+   fill with a per-limb `valid_n` that keeps filled rows out of the summaries
+   (biomech SPEC §7.2.1) — never zero-fill, which fabricates a 9.75 m/s² impact on
+   reconnect.
 6. **Biomech (interface SET IN STONE):**
    `compute(frames: dict[str, ndarray], state) -> Metrics(m1..m5, composite)`
    called at 60Hz per device. The real algorithm replaces `biomech.py` only.
@@ -153,22 +161,33 @@ assumes the exact rate: it measures per-sensor rate live and computes quality ag
      per-tick float32 summaries**, not 600 raw samples (~3 KB/device total). Raw frames are
      never buffered. Max lookback in ingest is **1 second**; everything longer is an O(1)
      recursive accumulator, and nothing in the live path touches the DB (SPEC §7.2).
-   - **Calibration is OPTIONAL** — the orientation-free design needs none, and the system runs
-     with defaults. A 15 s still-stand (10 s used, first 3 s discarded) measures per-sensor
-     accel gain, gyro bias and noise σ; worth taking because `m4`/`m5` are **inter-sensor
-     ratios**, so gain mismatch biases them directly (SPEC §3.8). `m4`'s movement baseline is
-     separate and self-learns from the first 60 s of movement.
+   - **Calibration is AUTOMATIC** — the orientation-free design needs none and the system runs
+     correctly on defaults, but every session calibrates itself anyway (SPEC §3.8, user
+     decision). No trainer action and no API route: per sensor, `compute()` discards the first
+     3 s of streaming and then watches for 10 s of continuous stillness, accumulating running
+     sums to recover accel gain, gyro bias and noise σ. Worth taking because `m4`/`m5` are
+     **inter-sensor ratios**, so gain mismatch biases them directly. Last-known-good values
+     carry across sessions in `biomech:cal:{device_id}` (BACKEND_SCHEMA §4), so only a device
+     with no history ever runs on defaults; the state is visible in `flags` (`uncalibrated`,
+     `carried_over`, `cal_failed`). `m4`'s movement baseline is separate and self-learns from
+     the first 60 s of movement.
    - **Real-time budget (measured, SPEC §7.1):** biomech adds **~22.6 ms** onset latency
      (4.2 ms filter + 1.7 ms diff + 16.7 ms tick quantisation) — the existing 50 ms jitter
-     buffer dominates. Throughput **381 µs/tick for all 5 devices = 2.3% of one core, 44×
-     headroom**, *provided* every sensor is batched into a single `scipy.signal.lfilter` call
-     per stage. Per-limb calls cost 13× more (Python call overhead) — S1-T15 must batch.
-     Trailing windows delay **release, not onset**: a new impact moves `m1` on the next tick.
-   - **Fixed-slot batching (SPEC §7.2)** — batching must not assume a fixed device count.
-     A permanent `MAX_DEVICES×4 = 20`-slot matrix is allocated at startup; each sensor claims a
-     slot on first packet; an `active[]` mask excludes absent slots from aggregation (feeding
-     the §8 degradation ladder). Timing is **constant (~380 µs) whether 1 or 5 devices are on**,
-     so the 60 Hz ticker never jitters as devices connect/disconnect.
+     buffer dominates. Throughput **1,590 µs/tick for all 5 devices = 9.5% of one core, ~10×
+     headroom**, *provided* each device's 4 limbs are batched into a single
+     `scipy.signal.lfilter` call per stage. Per-limb calls cost ~3.8× more (Python call
+     overhead). Trailing windows delay **release, not onset**: a new impact moves `m1` on the
+     next tick.
+   - **Per-device fixed-slot batching (SPEC §7.2)** — batching must not assume a fixed sensor
+     count. Each device's session allocates a permanent **4-slot matrix** (one per limb in
+     `LIMB_MAP`, ordered by sorted limb name so it is stable across restarts); an `active[]`
+     mask excludes absent limbs from aggregation, feeding the §8 degradation ladder.
+     ⚠️ **This is per-device, not the cross-device 20-slot matrix earlier revisions of this
+     section specified.** Ingest runs one asyncio task per device with independently reset tick
+     epochs, so there is no instant at which every device's frames are in scope; a cross-device
+     batch would mean replacing that scheduler, and it would couple every device's tick to the
+     slowest one. Cost is therefore **flat per device (~330 µs) and linear in total** — 344 µs
+     at 1 device, 1,590 µs at 5 — and adding a device adds CPU, not latency.
      🚩 **Absent slots MUST be hold-last filled, never zero-filled:** zero-fill lets the gravity
      baseline decay to 0, so a sensor reconnecting while the athlete stands still emits a
      **9.75 m/s² phantom impact** (`m1` ≈ 85/100). Hold-last gives 0.096 m/s² — the true noise
@@ -272,6 +291,12 @@ Everything that connects components lives in **one root `.env`** (template:
 | `INSIGHT_INTERVAL_S` / `INSIGHT_COOLDOWN_S` | 60 / 600 | |
 | `INSIGHT_WARN_THRESHOLD` / `INSIGHT_ALERT_THRESHOLD` | 70 / 85 | composite 0–100 scale (S2-T05 starter rules; task sheet's 0.7/0.85 predate the SPEC 0–100 rescale) |
 | `METRICS_RETENTION` | 30d | hypertable retention |
+| `MAX_DEVICES` | 5 | hard cap on concurrently tracked devices; a 6th while all 5 are live is dropped and counted in `ingest:stats/global:dev_dropped`, never merged into another device's stream (biomech SPEC §7.2). Raising it needs an ingest restart |
+| `POSTGRES_HOST` / `POSTGRES_PORT` | db / 5432 | expanded from the `POSTGRES_*` row above, which listed no per-key defaults |
+| `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD` | mvpdash / mvpdash / changeme | password is a placeholder — real value only in `.env`, never committed |
+| `JWT_EXPIRE_HOURS` | 24 | cookie lifetime; `JWT_SECRET` has no default on purpose (empty until stage 3) |
+| `PREDICT_TRAIN_WINDOW` | 2h | history fed to `predict.fit()`; duration syntax |
+| `INSIGHT_COOLDOWN_S` | 600 | per-rule re-fire suppression, so one condition cannot spam the feed |
 
 Duration syntax everywhere: `<int><s|m|h|d|w>`.
 

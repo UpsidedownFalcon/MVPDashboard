@@ -759,9 +759,10 @@ def test_bench_compute_five_devices():
     budget_us = 1e6 / 60
     print(f"\n  biomech: {best_us:.0f} us/tick for {n_dev} devices "
           f"({100 * best_us / budget_us:.1f}% of the 60 Hz budget)")
-    # ~1.6 ms measured on an idle dev machine. The guard is set at 3 ms so it
-    # tolerates a loaded machine while still catching the regression it exists
-    # for: reverting to per-limb lfilter calls costs ~3.8x (SPEC §7.1).
+    # 1,590 us measured on an idle dev machine (SPEC §7.1). The guard is set at
+    # 3 ms -- the same figure SPEC §11 test 15 states -- so it tolerates a
+    # loaded machine while still catching the regression it exists for:
+    # reverting to per-limb lfilter calls costs ~3.8x and lands at ~6 ms.
     assert best_us < 3000.0, (
         f"{best_us:.0f} us/tick for {n_dev} devices exceeds the 3 ms guard — "
         "check that filtering is still batched per device, not per limb"
