@@ -8,12 +8,14 @@ stages (align/jitter/ticker, T07-T09) consume the pending chunks.
 from __future__ import annotations
 
 import logging
+import time
 from collections import deque
 from dataclasses import dataclass, field
 
 import numpy as np
 
 from common.packet import Batch
+from common.scaling import SAT_THRESHOLD_COUNTS
 
 log = logging.getLogger("ingest.state")
 
@@ -30,6 +32,7 @@ class SensorStats:
     bad_sync: int = 0
     late_drop: int = 0       # filled by the jitter buffer (T08)
     buf_drop: int = 0        # pending-queue overflow
+    sat_count: int = 0       # samples within 1% of full scale (biomech SPEC §3.7)
     _recv_at_last_rate: int = 0
 
 
@@ -73,7 +76,8 @@ class DeviceState:
         self.quality_ema: float | None = None
         self._ticks_at_last_rate = 0
         self.last_seen: float = 0.0
-        self.user_state: dict = {}   # biomech scratch state (T10)
+        self.user_state: dict = {}   # biomech session state (T15)
+        self.last_metrics = None     # latest Metrics, for the 1s diag publish
 
     def sensor(self, source_id: int, sensor_id: int) -> SensorState:
         key = (source_id, sensor_id)
@@ -88,21 +92,56 @@ class DeviceState:
 class Registry:
     """All device state + global counters; owns batch routing."""
 
-    def __init__(self) -> None:
+    def __init__(self, max_devices: int | None = None) -> None:
         self.devices: dict[int, DeviceState] = {}
         # Bad records lose trustworthy identity, so malformed counters are global.
         self.crc_fail = 0
         self.bad_sync = 0
         self.bad_len = 0
-        self.on_new_device = None    # optional callback(device: DeviceState)
+        self.max_devices = max_devices
+        self.offline_after_s = 2.0   # set from Settings by the caller
+        self.dev_dropped = 0         # packets for devices beyond the cap
+        self._capped_logged: set[int] = set()
+        self.on_new_device = None       # optional callback(device: DeviceState)
+        self.on_device_removed = None   # optional callback(device_id: int)
 
-    def device(self, device_id: int) -> DeviceState:
+    def _remove(self, device_id: int, why: str) -> None:
+        self.devices.pop(device_id, None)
+        self._capped_logged.discard(device_id)
+        log.info("device %d released (%s)", device_id, why)
+        if self.on_device_removed is not None:
+            self.on_device_removed(device_id)
+
+    def device(self, device_id: int, now: float | None = None) -> DeviceState | None:
+        """Existing device, or a new one — displacing an OFFLINE one if at cap.
+
+        Returns None only when the cap is reached and every tracked device is
+        still live; those packets are dropped and counted, never silently mixed
+        into another device's stream (biomech SPEC §7.2).
+
+        Displacing the longest-silent offline device matters for usability: a
+        trainer swapping a wearable would otherwise wait out the whole session
+        gap before the replacement could register.
+        """
         state = self.devices.get(device_id)
-        if state is None:
-            state = self.devices[device_id] = DeviceState(device_id)
-            log.info("new device: %d", device_id)
-            if self.on_new_device is not None:
-                self.on_new_device(state)
+        if state is not None:
+            return state
+        if self.max_devices is not None and len(self.devices) >= self.max_devices:
+            now = time.time() if now is None else now
+            offline = [(d.last_seen, i) for i, d in self.devices.items()
+                       if not d.last_seen or now - d.last_seen > self.offline_after_s]
+            if not offline:
+                self.dev_dropped += 1
+                if device_id not in self._capped_logged:
+                    self._capped_logged.add(device_id)
+                    log.warning("device %d ignored: MAX_DEVICES=%d, all live",
+                                device_id, self.max_devices)
+                return None
+            self._remove(min(offline)[1], f"displaced by device {device_id}")
+        state = self.devices[device_id] = DeviceState(device_id)
+        log.info("new device: %d", device_id)
+        if self.on_new_device is not None:
+            self.on_new_device(state)
         return state
 
     def route(self, batch: Batch, recv_time: float) -> None:
@@ -128,14 +167,40 @@ class Registry:
             idx = order[s:e]
             k = int(sorted_key[s])
             device_id, source_id, sensor_id = k >> 16, (k >> 8) & 0xFF, k & 0xFF
-            device = self.device(device_id)
+            device = self.device(device_id, now=recv_time)
+            if device is None:
+                continue
             device.last_seen = recv_time
             sensor = device.sensor(source_id, sensor_id)
+            imu = batch.imu[idx]
+            # Clipping is unrecoverable and a clipped impact still matters, so
+            # count it rather than dropping it; biomech suppresses m1/m2 only
+            # once the saturated fraction gets high (SPEC §3.7).
+            sensor.stats.sat_count += int(
+                (np.abs(imu) >= SAT_THRESHOLD_COUNTS).any(axis=1).sum()
+            )
             sensor.append(SampleChunk(
                 recv_time=recv_time,
                 ts_us=batch.ts_us[idx],
-                imu=batch.imu[idx],
+                imu=imu,
             ))
+
+    def evict_stale(self, now: float, max_age_s: float) -> list[int]:
+        """Release devices silent for longer than max_age_s; returns their ids.
+
+        Without this, MAX_DEVICES counts devices that went offline hours ago and
+        a genuinely new device is refused a slot forever. The eviction horizon is
+        SESSION_GAP_S, which is also when biomech would discard the session's
+        accumulated load anyway — so nothing recoverable is lost, and a device
+        returning inside the snapshot TTL still restores its session (SPEC §7.4).
+        """
+        stale = [
+            device_id for device_id, device in self.devices.items()
+            if device.last_seen and now - device.last_seen > max_age_s
+        ]
+        for device_id in stale:
+            self._remove(device_id, f"silent {max_age_s:.0f}s")
+        return stale
 
     def update_rates(self, interval_s: float) -> None:
         """Recompute per-sensor rate_hz over the last stats interval."""

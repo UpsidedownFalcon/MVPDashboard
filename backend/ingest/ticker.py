@@ -20,6 +20,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from common.config import Settings
+from ingest import biomech
 from ingest.align import SourceAligner
 from ingest.jitter import JitterBuffer, default_capacity
 from ingest.state import DeviceState
@@ -32,6 +33,7 @@ class TickInput:
     device_id: int
     t_server: float                 # wall-clock tick time (unix seconds)
     frames: dict[str, np.ndarray]   # limb -> float32[n, 6] raw counts
+    times: dict[str, np.ndarray]    # limb -> float64[n] server-mapped sample times
     quality: float                  # 0..1 share of expected samples
     held: bool                      # True when no fresh samples this tick
     metrics: object | None = None   # Metrics, attached by the biomech callback (T10)
@@ -117,6 +119,12 @@ class DeviceTicker:
         frames: dict[str, np.ndarray] = {
             limb: np.empty((0, 6), dtype=np.float32) for limb in limb_map.values()
         }
+        # Server-mapped per-sample times, kept alongside frames. biomech's m2 is
+        # a derivative, so it needs real dt rather than a nominal rate
+        # (docs/biomech/SPEC.md §3.5).
+        times: dict[str, np.ndarray] = {
+            limb: np.empty(0, dtype=np.float64) for limb in limb_map.values()
+        }
         total = 0
         for (src, sen), jitter in self._jitters.items():
             released = jitter.release(t)
@@ -129,6 +137,7 @@ class DeviceTicker:
                 continue
             if released:
                 frames[limb] = np.array([r[2] for r in released], dtype=np.float32)
+                times[limb] = np.array([r[1] for r in released], dtype=np.float64)
                 total += len(released)
         quality = min(max(total / self._expected_per_tick, 0.0), 1.0)
         held = total == 0
@@ -136,6 +145,7 @@ class DeviceTicker:
             device_id=self._device.device_id,
             t_server=t,
             frames=frames,
+            times=times,
             quality=quality,
             held=held,
         )
@@ -143,11 +153,21 @@ class DeviceTicker:
         self._callback(tick)
         return tick
 
-    def _reset_pipeline(self) -> None:
-        """Device came back after being offline: start from clean state."""
+    def _reset_pipeline(self, gap_s: float) -> None:
+        """Device came back after being offline: start from clean state.
+
+        Align/jitter state always resets (device clocks may have rebooted). The
+        biomech SESSION only resets after a much longer gap — SESSION_GAP_S,
+        default 300 s vs OFFLINE_AFTER_S's 2 s — so a brief WiFi dropout or a
+        rest between sets does not wipe accumulated load (SPEC §7).
+        """
         self._aligners.clear()
         for jitter in self._jitters.values():
             jitter.reset()
+        if gap_s > self._settings.session_gap_s:
+            biomech.reset_session(self._device.user_state)
+            log.info("device %d: gap %.0fs > SESSION_GAP_S — biomech session reset",
+                     self._device.device_id, gap_s)
 
     # --- run loop ---------------------------------------------------------------
 
@@ -169,10 +189,11 @@ class DeviceTicker:
                     log.info("device %d: offline (silent %.1fs) — ticker suspended",
                              self._device.device_id, silent_for)
                 # idle-poll until traffic returns, then reset state + tick epoch
+                offline_since = self._device.last_seen
                 while self._now() - self._device.last_seen > offline_after:
                     await self._sleep(self._period)
                 self.suspended = False
-                self._reset_pipeline()
+                self._reset_pipeline(self._now() - offline_since)
                 start = self._now()
                 k = 0
                 log.info("device %d: back online — ticker resumed (state reset)",
@@ -197,6 +218,13 @@ class TickerManager:
         self._tasks[device.device_id] = asyncio.create_task(
             ticker.run(), name=f"ticker-dev{device.device_id}"
         )
+
+    def device_removed(self, device_id: int) -> None:
+        """Cancel an evicted device's ticker task so it stops idle-polling."""
+        self.tickers.pop(device_id, None)
+        task = self._tasks.pop(device_id, None)
+        if task is not None:
+            task.cancel()
 
     async def shutdown(self) -> None:
         for task in self._tasks.values():

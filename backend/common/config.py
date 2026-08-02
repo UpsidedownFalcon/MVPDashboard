@@ -56,6 +56,12 @@ class Settings(BaseSettings):
     jitter_buffer_ms: int = 50
     offline_after_s: float = 2.0
     reset_offset_jump_s: float = 5.0
+    # Gap after which biomech drops accumulated load and learned baselines.
+    # Deliberately >> offline_after_s so a brief dropout or a rest between sets
+    # does not wipe a session's dose (docs/biomech/SPEC.md §7).
+    session_gap_s: float = 300.0
+    # Hard cap on concurrently tracked devices; extras are dropped and counted.
+    max_devices: int = 5
 
     past_windows_raw: str = Field("5m,30m,2h", validation_alias="PAST_WINDOWS")
     future_horizons_raw: str = Field("10m,30m,1h", validation_alias="FUTURE_HORIZONS")

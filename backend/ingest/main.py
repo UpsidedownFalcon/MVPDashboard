@@ -11,6 +11,7 @@ import asyncio
 import contextlib
 import logging
 import signal
+import time
 from collections import deque
 
 from common.config import get_settings
@@ -37,10 +38,41 @@ def _config_echo(settings) -> str:
     return " ".join(pairs)
 
 
+async def load_biomech_snapshots(settings) -> dict[int, dict]:
+    """Read every biomech:state:* key so a restart resumes mid-session.
+
+    Without this an ingest restart silently resets an athlete to zero
+    accumulated load. Best-effort: Redis being unavailable just means every
+    device starts a fresh session, which is the pre-existing behaviour.
+    """
+    import orjson  # noqa: PLC0415
+    import redis.asyncio as aioredis  # noqa: PLC0415
+
+    out: dict[int, dict] = {}
+    client = aioredis.from_url(settings.redis_url)
+    try:
+        async for key in client.scan_iter(match="biomech:state:*"):
+            raw = await client.get(key)
+            if not raw:
+                continue
+            device_id = int(key.decode().rsplit(":", 1)[1])
+            out[device_id] = orjson.loads(raw)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("biomech snapshot restore skipped (%s) — fresh sessions", exc)
+    finally:
+        await client.aclose()
+    if out:
+        log.info("loaded biomech snapshots for devices: %s", sorted(out))
+    return out
+
+
 async def stats_loop(registry: Registry, udp_counters: UdpCounters,
-                     interval: float = STATS_INTERVAL_S) -> None:
+                     interval: float = STATS_INTERVAL_S,
+                     evict_after_s: float | None = None) -> None:
     while True:
         await asyncio.sleep(interval)
+        if evict_after_s is not None:
+            registry.evict_stale(time.time(), evict_after_s)
         registry.update_rates(interval)
         if registry.devices:
             for line in registry.summary_lines():
@@ -55,14 +87,36 @@ async def amain() -> None:
 
     buf: deque[bytes] = deque(maxlen=RAW_BUF_MAXLEN)
     udp_counters = UdpCounters()
-    registry = Registry()
+    registry = Registry(max_devices=settings.max_devices)
+    registry.offline_after_s = settings.offline_after_s
     publisher = Publisher(settings, registry)
+
+    # Warm-restart snapshots (biomech SPEC §7.4). Devices do not exist yet —
+    # they are created on first packet — so the snapshots are loaded now and
+    # applied lazily on each device's first tick.
+    pending_restore = await load_biomech_snapshots(settings)
+    limbs = tuple(sorted(settings.limb_map.values()))
 
     def on_tick(tick: TickInput) -> None:
         device = registry.devices.get(tick.device_id)
         if device is None:
             return
-        tick.metrics = biomech.compute(tick.frames, device.user_state)
+        snap = pending_restore.pop(tick.device_id, None)
+        if snap is not None:
+            if biomech.restore(device.user_state, snap, limbs, tick.t_server,
+                               settings.session_gap_s):
+                log.info("device %d: biomech session restored from snapshot",
+                         tick.device_id)
+        try:
+            tick.metrics = biomech.compute(tick.frames, device.user_state, tick.times)
+        except Exception:  # noqa: BLE001
+            # This runs inside the device's ticker task; an escaping exception
+            # would kill that task permanently and the device would silently go
+            # dark. Degrade to a held tick instead and keep the stream alive.
+            log.exception("device %d: biomech.compute failed — emitting held tick",
+                          tick.device_id)
+            tick.metrics = device.last_metrics or biomech.HELD_ZERO
+        device.last_metrics = tick.metrics
         device.quality_ema = (
             tick.quality if device.quality_ema is None
             else 0.9 * device.quality_ema + 0.1 * tick.quality
@@ -71,6 +125,7 @@ async def amain() -> None:
 
     ticker_manager = TickerManager(settings, on_tick)
     registry.on_new_device = ticker_manager.device_added
+    registry.on_device_removed = ticker_manager.device_removed
 
     transport = await start_udp_server(settings.udp_port, buf, udp_counters)
 
@@ -82,7 +137,10 @@ async def amain() -> None:
 
     tasks = [
         asyncio.create_task(drain_loop(buf, registry), name="drain"),
-        asyncio.create_task(stats_loop(registry, udp_counters), name="stats"),
+        asyncio.create_task(
+            stats_loop(registry, udp_counters,
+                       evict_after_s=settings.session_gap_s),
+            name="stats"),
         asyncio.create_task(publisher.stats_loop(), name="redis-stats"),
     ]
     try:

@@ -18,6 +18,7 @@ import redis.asyncio as aioredis
 
 from common import redis_keys
 from common.config import Settings
+from ingest import biomech
 from ingest.biomech import Metrics
 from ingest.state import Registry
 from ingest.ticker import TickInput
@@ -30,22 +31,30 @@ RECONNECT_MAX_S = 5.0
 
 
 def tick_to_json(tick: TickInput, metrics: Metrics) -> bytes:
-    """Exactly the §2 schema: {"type","t","dev","m","c","q"}."""
+    """Exactly the §2 schema: {"type","t","dev","m","c","q"}.
+
+    m entries are nullable (§2): m4/m5 are None for the first minute of every
+    session, and whenever a leg loses a sensor. round(None, 4) raises TypeError,
+    and this runs synchronously inside the ticker task — so an unguarded round()
+    here would permanently kill that device's ticker on the very first tick.
+    """
     dt = datetime.fromtimestamp(tick.t_server, tz=timezone.utc)
     iso = dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
     return orjson.dumps({
         "type": "tick",
         "t": iso,
         "dev": str(tick.device_id),
-        "m": [round(v, 4) for v in metrics.as_list()],
-        "c": round(metrics.composite, 4),
+        "m": [None if v is None else round(v, 2) for v in metrics.as_list()],
+        "c": round(metrics.composite, 2),
         "q": round(tick.quality, 3),
+        "f": sorted(metrics.flags) or None,
     })
 
 
 class Publisher:
     def __init__(self, settings: Settings, registry: Registry) -> None:
         self._registry = registry
+        self._session_gap_s = settings.session_gap_s
         self._redis = aioredis.from_url(settings.redis_url)
         self._pending: set[asyncio.Task] = set()
         self._up = True                # optimistic until a command fails
@@ -108,7 +117,34 @@ class Publisher:
                 mapping[f"{p}:recv"] = str(st.recv)
                 mapping[f"{p}:late_drop"] = str(st.late_drop)
                 mapping[f"{p}:buf_drop"] = str(st.buf_drop)
+                mapping[f"{p}:sat_count"] = str(st.sat_count)
+        mapping["global:dev_dropped"] = str(self._registry.dev_dropped)
         return mapping
+
+    def _write_biomech(self, pipe, now_ms: int) -> None:
+        """Per-device biomech diagnostics + the warm-restart state snapshot.
+
+        The snapshot (§7.4) is why an ingest restart does not silently reset a
+        mid-session athlete to zero accumulated load. ~200 B of O(1) scalars;
+        the 1 s summary rings and filter state are deliberately NOT persisted —
+        they re-warm in under a second and are not worth the bytes.
+        """
+        ttl = int(2 * self._session_gap_s)
+        for device_id, device in self._registry.devices.items():
+            metrics = getattr(device, "last_metrics", None)
+            if metrics is not None:
+                diag = {k: f"{v:.6g}" for k, v in metrics.raw.items()}
+                diag["flags"] = ",".join(sorted(metrics.flags))
+                key = redis_keys.biomech_diag(device_id)
+                pipe.delete(key)
+                pipe.hset(key, mapping=diag)
+                # Expire with the device: without a TTL, /api/health keeps
+                # reporting devices that stopped streaming hours ago.
+                pipe.expire(key, ttl)
+            snap = biomech.snapshot(device.user_state)
+            if snap is not None:
+                pipe.set(redis_keys.biomech_state(device_id),
+                         orjson.dumps(snap), ex=ttl)
 
     async def stats_loop(self, interval: float = 1.0) -> None:
         while True:
@@ -128,6 +164,7 @@ class Publisher:
                             )
                 pipe.delete(redis_keys.INGEST_STATS)
                 pipe.hset(redis_keys.INGEST_STATS, mapping=self._stats_mapping())
+                self._write_biomech(pipe, now_ms)
                 await pipe.execute()
             except asyncio.CancelledError:
                 raise
