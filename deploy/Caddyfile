@@ -1,0 +1,28 @@
+# Caddy config (S2-T08, TRD §8): serves the built frontend, proxies /api and
+# /ws to the api service (WS upgrade is automatic with reverse_proxy).
+# The frontend build is baked into the caddy image at /srv (frontend/Dockerfile).
+
+(app) {
+	handle /api/* {
+		reverse_proxy api:{$API_PORT}
+	}
+	handle /ws/* {
+		reverse_proxy api:{$API_PORT}
+	}
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+}
+
+# Public site: automatic Let's Encrypt for the real domain (stage 2+).
+{$DOMAIN} {
+	import app
+}
+
+# Plain-HTTP fallback for LAN/local testing without the domain
+# (http:// prefix disables the HTTPS redirect for this site).
+http://:80 {
+	import app
+}
