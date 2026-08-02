@@ -69,6 +69,9 @@ class DeviceState:
         self.device_id = device_id
         self.sensors: dict[tuple[int, int], SensorState] = {}
         self.ticks_out = 0       # advanced by the ticker (T09)
+        self.tick_rate: float = 0.0
+        self.quality_ema: float | None = None
+        self._ticks_at_last_rate = 0
         self.last_seen: float = 0.0
         self.user_state: dict = {}   # biomech scratch state (T10)
 
@@ -137,6 +140,8 @@ class Registry:
     def update_rates(self, interval_s: float) -> None:
         """Recompute per-sensor rate_hz over the last stats interval."""
         for device in self.devices.values():
+            device.tick_rate = (device.ticks_out - device._ticks_at_last_rate) / interval_s
+            device._ticks_at_last_rate = device.ticks_out
             for sensor in device.sensors.values():
                 st = sensor.stats
                 st.rate_hz = (st.recv - st._recv_at_last_rate) / interval_s
@@ -151,9 +156,12 @@ class Registry:
                 for (src, sen), sensor in sorted(device.sensors.items())
             ]
             drops = sum(s.stats.buf_drop for s in device.sensors.values())
+            late = sum(s.stats.late_drop for s in device.sensors.values())
+            quality = f"{device.quality_ema:.2f}" if device.quality_ema is not None else "-"
             lines.append(
-                f"dev {device_id}: {' '.join(parts)} ticks_out={device.ticks_out}"
-                f" buf_drop={drops}"
+                f"dev {device_id}: {' '.join(parts)} tick={device.tick_rate:5.1f}Hz"
+                f" q={quality} ticks_out={device.ticks_out}"
+                f" late_drop={late} buf_drop={drops}"
             )
         lines.append(
             f"global: crc_fail={self.crc_fail} bad_sync={self.bad_sync} bad_len={self.bad_len}"

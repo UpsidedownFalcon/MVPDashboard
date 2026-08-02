@@ -77,16 +77,22 @@ def decimate(streams: dict[tuple[int, int], np.ndarray],
 
 @dataclass
 class _Stream:
-    """One (device, source, sensor) emit schedule with a running device clock."""
+    """One (device, source, sensor) emit schedule.
+
+    The device timestamp is derived from the per-(device,source) clock —
+    both sensors of a source share the same MCU time base (ts_base/skew) —
+    with natural u32 wraparound applied on emit.
+    """
 
     device_id: int
     source_id: int
     sensor_id: int
     imu: np.ndarray            # int16[n, 6] replay samples
-    period_s: float            # wall-clock seconds between samples (incl. drift)
-    period_us: float           # device-clock µs step per sample (incl. drift)
+    period_s: float            # wall-clock seconds between samples
     next_send: float           # wall-clock time of next sample
-    ts_us: float               # running device-local timestamp (float µs, wrapped on emit)
+    t0: float                  # wall-clock epoch of the source clock
+    ts_base: float             # device µs at t0 (shared per source)
+    skew: float                # device-clock rate factor (drift, shared per source)
     index: int = 0
 
 
@@ -106,6 +112,8 @@ class DeviceSim:
         self.device_id = device_id
         self.stats = DeviceStats()
         self._streams: list[_Stream] = []
+        # one µs counter per (device, source): both sensors of a leg MCU share it
+        source_ts0 = {src: float(rng.randrange(0, 2**32)) for src in (0, 1)}
         for src, sen in STREAM_KEYS:
             # legs drift apart: source 0 runs fast, source 1 slow by drift_ppm/2 each
             skew = 1.0 + (drift_ppm * 1e-6 / 2.0) * (1 if src == 0 else -1)
@@ -114,9 +122,10 @@ class DeviceSim:
                 device_id=device_id, source_id=src, sensor_id=sen,
                 imu=streams[(src, sen)],
                 period_s=period_s,
-                period_us=1e6 * period_s * skew,
                 next_send=start + rng.uniform(0, period_s),
-                ts_us=float(rng.randrange(0, 2**32)),
+                t0=start,
+                ts_base=source_ts0[src],
+                skew=skew,
             ))
 
     def due_payloads(self, now: float) -> list[bytes]:
@@ -125,10 +134,11 @@ class DeviceSim:
         for st in self._streams:
             while st.next_send <= now:
                 imu6 = st.imu[st.index % len(st.imu)]
+                # device time at the scheduled sample moment, from the source clock
+                ts_us = st.ts_base + (st.next_send - st.t0) * 1e6 * st.skew
                 out.append(packet.encode(st.device_id, st.source_id, st.sensor_id,
-                                         int(st.ts_us) & 0xFFFFFFFF, imu6))
+                                         int(ts_us) & 0xFFFFFFFF, imu6))  # natural u32 wrap
                 st.index += 1
-                st.ts_us += st.period_us    # natural u32 wrap via mask on emit
                 st.next_send += st.period_s
         return out
 

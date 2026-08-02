@@ -112,10 +112,10 @@ class SourceClock:
 class SourceAligner:
     """One (device, source): shared clock + per-sensor unwrappers.
 
-    process() returns (server_time_seconds, was_reset). On a detected reboot all
-    per-source state is cleared and the chunk is re-processed against the fresh
-    epoch, so the caller only needs to clear its jitter buffers when
-    was_reset is True.
+    process() returns (ts_unwrapped_us, server_time_seconds, was_reset). On a
+    detected reboot all per-source state is cleared and the chunk is
+    re-processed against the fresh epoch, so the caller only needs to clear its
+    jitter buffers when was_reset is True.
     """
 
     def __init__(self, reset_jump_s: float = 5.0) -> None:
@@ -131,7 +131,7 @@ class SourceAligner:
 
     def process(
         self, sensor_id: int, recv_time: float, ts_raw: np.ndarray
-    ) -> tuple[np.ndarray, bool]:
+    ) -> tuple[np.ndarray, np.ndarray, bool]:
         ts_unwrapped = self._unwrapper(sensor_id).unwrap(ts_raw)
         was_reset = self.clock.observe(recv_time, ts_unwrapped)
         if was_reset:
@@ -139,4 +139,4 @@ class SourceAligner:
                 u.reset()
             ts_unwrapped = self._unwrapper(sensor_id).unwrap(ts_raw)
             self.clock.observe(recv_time, ts_unwrapped)
-        return self.clock.server_time(ts_unwrapped), was_reset
+        return ts_unwrapped, self.clock.server_time(ts_unwrapped), was_reset

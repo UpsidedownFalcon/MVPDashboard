@@ -124,7 +124,7 @@ def test_aligner_reprocesses_after_reset_and_flags() -> None:
     for chunk in range(40):
         ts = (uptime_us + np.arange(chunk * 6, chunk * 6 + 6) * period_us).astype(np.uint32)
         wall = base_wall + (chunk * 6 + 5) * period_us * 1e-6 + 0.001
-        server, was_reset = aligner.process(1, wall, ts)
+        _, server, was_reset = aligner.process(1, wall, ts)
         assert not was_reset
 
     # reboot: timestamps restart, arrival continues
@@ -132,7 +132,7 @@ def test_aligner_reprocesses_after_reset_and_flags() -> None:
     for chunk in range(5):
         ts = (np.arange(chunk * 6, chunk * 6 + 6) * period_us).astype(np.uint32)
         wall = base_wall + 0.5 + chunk * 0.01
-        server, was_reset = aligner.process(1, wall, ts)
+        _, server, was_reset = aligner.process(1, wall, ts)
         saw_reset = saw_reset or was_reset
         if was_reset:
             # post-reset mapping is against the fresh epoch: near current wall time
@@ -148,7 +148,7 @@ def test_two_sensors_share_source_clock() -> None:
     for chunk in range(40):
         ts = (np.arange(chunk * 6, chunk * 6 + 6) * period_us).astype(np.uint32)
         wall = base_wall + (chunk * 6 + 5) * period_us * 1e-6 + 0.001
-        s1, _ = aligner.process(1, wall, ts)
-        s2, _ = aligner.process(2, wall, ts)
+        _, s1, _ = aligner.process(1, wall, ts)
+        _, s2, _ = aligner.process(2, wall, ts)
         # same device timestamps on the same source map to the same server time
         assert np.allclose(s1, s2)

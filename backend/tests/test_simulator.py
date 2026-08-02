@@ -57,6 +57,25 @@ def test_emitted_payloads_decode_with_correct_ids_and_rates() -> None:
     assert per_stream * (1.0 / rate) <= now + 0.01
 
 
+def test_same_source_sensors_share_time_base() -> None:
+    dev = DeviceSim(device_id=30, streams=_fake_streams(), rate=600.0,
+                    drift_ppm=0.0, rng=random.Random(9), start=0.0)
+    payloads: list[bytes] = []
+    now = 0.0
+    for _ in range(20):
+        now += 0.005
+        payloads.extend(dev.due_payloads(now))
+    batch = packet.decode(payloads)
+    for src in (0, 1):
+        first_ts = {}
+        for sen in (1, 2):
+            mask = (batch.source_id == src) & (batch.sensor_id == sen)
+            first_ts[sen] = int(batch.ts_us[mask][0])
+        # both sensors of one leg MCU run on the same clock: first samples are
+        # within a few sample periods of each other (phase offset only)
+        assert abs(first_ts[1] - first_ts[2]) < 10_000
+
+
 def test_drift_skews_sources_apart() -> None:
     dev = DeviceSim(device_id=30, streams=_fake_streams(), rate=600.0,
                     drift_ppm=1000.0, rng=random.Random(2), start=0.0)
