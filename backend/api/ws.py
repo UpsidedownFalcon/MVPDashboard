@@ -47,6 +47,11 @@ class Hub:
     def __post_init__(self) -> None:
         self._redis = aioredis.from_url(self.settings.redis_url)
 
+    @property
+    def redis(self) -> aioredis.Redis:
+        """Shared client for read-side consumers (queries.py, health)."""
+        return self._redis
+
     # --- lifecycle --------------------------------------------------------------
 
     async def start(self) -> None:
