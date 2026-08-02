@@ -99,6 +99,7 @@ MVPDashboard/
   deploy/(Caddyfile, provision.sh, deploy.sh)
   example/      (existing sample data + parser — read-only reference)
   mockup/       (stage-3 input from user)
+  scripts/validate_stage1.py   (S1-T13 validation matrix runner)
   simulator/simulate.py
   backend/
     Dockerfile  pyproject.toml
