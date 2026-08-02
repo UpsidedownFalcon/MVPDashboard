@@ -18,7 +18,7 @@ Prereqs: Docker Desktop (WSL2 backend) and [uv](https://docs.astral.sh/uv/)
 
 ```powershell
 # 1. one-time setup
-Copy-Item .env.example .env          # single source of config truth (edit as needed)
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }   # never clobber an existing .env
 uv sync --dev                        # creates .venv with Python 3.12 + deps
 
 # 2. start the backend services (redis + ingest + api)
@@ -28,6 +28,11 @@ docker compose up -d --build
 uv run python simulator/simulate.py --devices 5
 #    knobs: --loss 5 --reorder 5 --jitter 20 --drift 200 --rate 600 --seed 1
 #    --dead-sensors 0:1     simulate a failed sensor (biomech degradation ladder)
+#    --target HOST:PORT     UDP destination        (default 127.0.0.1:5005)
+#    --base-id N            device_id of the first device, then N+1, N+2, …
+#                           (default 30; use it to add devices without colliding
+#                           with a run already streaming)
+#    --duration SECONDS     stop after N seconds   (default: run until Ctrl-C)
 
 # 4. watch it live
 Start-Process http://localhost:8000/debug
@@ -47,11 +52,20 @@ carry an `unvalidated` flag: they have no real-data validation yet (SPEC §11.1)
 Tests and the stage-1 validation matrix:
 
 ```powershell
-uv run pytest backend/tests/                        # unit + integration tests
 docker compose --profile debug up -d                # exposes redis on 127.0.0.1:6379
-uv run pytest backend/tests/test_ws.py              # WS throughput test (needs ^)
-uv run python scripts/validate_stage1.py            # full matrix (~15 min; --quick for a smoke run)
+uv run pytest backend/tests/                        # unit + integration tests
+uv run pytest backend/tests/test_ws.py              # WS throughput test on its own
+uv run python scripts/validate_stage1.py            # full matrix (--quick for a smoke run)
 ```
+
+Start the debug profile **before** pytest: `test_ws.py` needs Redis reachable on
+`127.0.0.1:6379` and *skips* without it, so running the suite first quietly
+leaves the WS throughput and tick-schema checks unrun.
+
+The validation matrix takes **~17–20 minutes** in full mode (~4 min with
+`--quick`) and is not read-only: scenario 5 deliberately **stops/starts the
+`api` container and restarts `redis`** to prove ingest survives both. Don't run
+it against anything you are using at the time.
 
 ### Real wearables on the LAN
 

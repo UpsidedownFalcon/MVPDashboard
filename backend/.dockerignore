@@ -1,0 +1,7 @@
+# The Dockerfile's `COPY . .` takes the whole backend/ tree, so anything left
+# here from a local `uv run pytest` ends up in the image — and a __pycache__
+# built against a different interpreter is worse than useless, it is a stale
+# .pyc that can shadow the source it was built from.
+.pytest_cache/
+__pycache__/
+*.pyc

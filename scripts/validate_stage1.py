@@ -3,8 +3,11 @@
 
 Run from the repo root with services up and the redis debug port exposed:
     docker compose --profile debug up -d
-    uv run python scripts/validate_stage1.py            # full (10-min clean run)
-    uv run python scripts/validate_stage1.py --quick    # shortened durations
+    uv run python scripts/validate_stage1.py            # full: ~17-20 min total
+    uv run python scripts/validate_stage1.py --quick    # shortened durations, ~4 min
+
+NOT read-only: scenario 5 stops/starts the `api` container and restarts `redis`
+to prove ingest survives both. Do not run it against a stack in use.
 
 Scenario 6 (real wearables) needs hardware and is documented in the README.
 Results print as a PASS/FAIL report; exit code 0 only if every check passes.

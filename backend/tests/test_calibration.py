@@ -18,7 +18,7 @@ import pytest
 
 from ingest import biomech
 from ingest.biomech import compute
-from tests.conftest import LIMBS, counts_from_si, make_tick
+from tests.conftest import LIMBS, make_tick
 
 FS = 600.0
 NS = 10

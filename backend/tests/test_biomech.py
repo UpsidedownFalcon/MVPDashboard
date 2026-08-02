@@ -19,17 +19,9 @@ import time
 import numpy as np
 import pytest
 
-from common.scaling import ACCEL_MS2_PER_COUNT, GYRO_DPS_PER_COUNT
 from ingest import biomech
 from ingest.biomech import compute, log_score
-from tests.conftest import (
-    LIMBS,
-    SQUATS_BIN,
-    counts_from_si,
-    make_tick,
-    run_ticks,
-    still_tick,
-)
+from tests.conftest import LIMBS, SQUATS_BIN, counts_from_si, make_tick
 
 FS = 600.0
 NS = 10                       # samples per 60 Hz tick at 600 Hz
@@ -589,13 +581,14 @@ def test_squats_replay_golden_values():
     below m4's 60 s baseline lock and m5's 30 s warm-up. This capture validates
     m1, m2, m3 and the composite only -- see SPEC §11.1 and TestSyntheticOnly.
     """
-    from common.packet import decode
-
     raw = np.fromfile(str(SQUATS_BIN), dtype=np.uint8)
     n = raw.size // 21
     recs = raw[: n * 21].reshape(n, 21)
-    batch = decode([bytes(r) for r in recs[:0]]) if False else None  # noqa: F841
 
+    # Decoded here rather than through common.packet.decode: this test replays
+    # a whole SD-log file, and decode() is the per-datagram wire path (sync +
+    # CRC + bounds). Vectorising the field extraction over the entire file is
+    # what keeps the replay to a few seconds.
     w = recs[:, 2:21]
     def i16(lo, hi):
         return (w[:, lo].astype(np.uint16) | (w[:, hi].astype(np.uint16) << 8)).astype(np.int16)
