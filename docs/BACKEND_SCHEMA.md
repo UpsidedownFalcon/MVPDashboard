@@ -101,9 +101,18 @@ resolution than `metrics_1m`, query `metrics` directly for windows < 5 min (the
   "dev": "30",
   "m":   [42.2, 48.3, 24.2, 0.0, null],   // m1..m5, each 0..100 or null
   "c":   45.3,                             // composite 0..100
-  "q":   0.98                              // quality 0..1
+  "q":   0.98,                             // quality 0..1
+  "f":   ["unvalidated", "warming_up"]     // active biomech flags, sorted; null when none
 }
 ```
+
+**`f` (flags)** carries the sorted `Metrics.flags` set from the biomech model, or `null`
+when no flag is active. The vocabulary is fixed by [biomech/SPEC.md](biomech/SPEC.md) §10:
+`warming_up`, `partial`, `no_shank`, `saturated`, `degraded_sensors`, `uncalibrated`,
+`cal_failed`, `carried_over`, `unvalidated`. It is how the UI distinguishes "no data" from
+"zero", marks the uncalibrated→calibrated step change, and shows that `m4`/`m5` are
+`unvalidated`. Flags are display/diagnostic state only — they are **not** written to the
+`metrics` table (the full diagnostic set goes to `biomech:diag:{device_id}`, §4).
 
 **Ranges (set by [biomech/SPEC.md](biomech/SPEC.md) §5, S1-T14):** `m1..m5` and `c` are
 **0–100** arbitrary units (the pre-SPEC stub emitted 0–1 — frontend axis bounds must match
@@ -157,8 +166,8 @@ All routes require the auth cookie except `POST /api/auth/login` and liveness
 | `last_seen:dev:{device_id}` | string (unix ms) | ingest → api | refreshed ≤1s while packets flow |
 | `last_seen:sensor:{dev}:{src}:{sen}` | string (unix ms) | ingest → api | per-sensor liveness (detects one dead leg) |
 | `ingest:stats` | hash, rewritten 1s | ingest → api (`/api/health`) | per-sensor `rate_hz`, counters: `recv, crc_fail, late_drop, buf_drop, ticks_out, sat_count` |
-| `biomech:diag:{device_id}` | hash, rewritten 1s | ingest → api (`/api/health`) | biomech diagnostics (SPEC §9.2): `flags`, absolute transmission ratio `R`, `R_base`, `SI_pct`, `dose`, pre-normalisation primitive values — for tuning the provisional reference bounds against real trial data |
-| `biomech:state:{device_id}` | hash, rewritten 1s, TTL `2×SESSION_GAP_S` | ingest → **ingest** | **Warm-restart snapshot** (~200 B, SPEC §7.4): `dose`, `accL`, `accR`, `R_base`, `move_time_s`, `session_started_at`, `last_tick_at`, per-sensor calibration (`k`, `gyro_bias`, `sigma`), `schema_version`. Written fire-and-forget; **read only by ingest on startup**, applying elapsed-time decay before use. Without it an ingest restart silently resets a mid-session athlete to zero accumulated load. |
+| `biomech:diag:{device_id}` | hash, rewritten 1s, TTL `2×SESSION_GAP_S` | ingest → api (`/api/health`) | biomech diagnostics (SPEC §10 item 3), all values formatted `%.6g`: `flags` (comma-separated), signed transmission ratio `R`, `R_base`, signed **`usi_pct`** (`m5`'s pre-normalisation USI, in percent), `dose`, `move_t`, `intensity`, `a_int`, `w_int`, `sat_frac`, `m1_lo`, per-tick noise weight `W`, `demand`, `degradation` — for tuning the provisional reference bounds against real trial data |
+| `biomech:state:{device_id}` | **string (JSON), rewritten 1s, TTL `2×SESSION_GAP_S`** | ingest → **ingest** | **Warm-restart snapshot** (~200 B, SPEC §7.4). A single JSON document, *not* a hash — it is written and read whole, so one `SET` beats a multi-field `HSET`. Fields: `v` (schema version, currently `1` — a mismatch is rejected and the session starts fresh), `dose`, `accL`, `accR`, `move_t`, `R_base`, `session_start_t`, `last_tick_t` (both unix seconds), and `cal` = `{limb_name: {k, gyro_bias[3], sigma}}` **keyed by limb name, never by slot index** (§7.4). Written fire-and-forget; **read only by ingest**, applying elapsed-time decay before use, and discarded when `now − last_tick_t > SESSION_GAP_S`. Without it an ingest restart silently resets a mid-session athlete to zero accumulated load. |
 
 `sat_count` counts samples with any axis within 1% of full scale (±16 g / ±2000 °/s). The
 squats log peaks at 1875 °/s against a 2000 °/s ceiling, so saturation is a live risk on

@@ -86,6 +86,30 @@ class Settings(BaseSettings):
             return parsed
         return value
 
+    @field_validator("limb_map", mode="after")
+    @classmethod
+    def _limb_names_must_be_unique(cls, value: dict[tuple[int, int], str]) -> dict[tuple[int, int], str]:
+        """Two sensors mapping to the same limb name silently wipes biomech.
+
+        The ticker builds `frames` keyed by limb name, so a duplicate makes one
+        sensor overwrite the other's frame; ingest's `limbs` tuple (built from
+        the same values) is then shorter than `frames.keys()`, which makes
+        biomech rebuild its session state every tick — zeroing dose, R_base and
+        the L/R accumulators 60 times a second. It looks like a flat athlete,
+        not like a config error, so reject it at load.
+        """
+        seen: dict[str, tuple[int, int]] = {}
+        for key, limb in value.items():
+            first = seen.get(limb)
+            if first is not None:
+                raise ValueError(
+                    f"LIMB_MAP limb names must be unique: {limb!r} is mapped by "
+                    f"both (source={first[0]}, sensor={first[1]}) and "
+                    f"(source={key[0]}, sensor={key[1]})"
+                )
+            seen[limb] = key
+        return value
+
     @property
     def past_windows(self) -> list[timedelta]:
         return parse_duration_list(self.past_windows_raw)

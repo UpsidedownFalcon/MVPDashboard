@@ -11,14 +11,28 @@ import json
 import threading
 import time
 
+import numpy as np
 import pytest
 import redis as sync_redis
 from starlette.testclient import TestClient
+
+from ingest import biomech
+from ingest.publish import tick_to_json
+from ingest.ticker import TickInput
+from tests.conftest import LIMBS, make_tick
 
 TEST_REDIS_URL = "redis://127.0.0.1:6379/0"
 DEVICES = ("30", "31")
 DURATION_S = 5.0
 RATE_HZ = 60.0
+NS = 10
+FS = 600.0
+
+# SPEC §10 item 3 — the only strings that may appear in a tick's "f" field.
+FLAG_VOCABULARY = {
+    "warming_up", "partial", "no_shank", "saturated", "degraded_sensors",
+    "uncalibrated", "cal_failed", "carried_over", "unvalidated",
+}
 
 
 def _redis_or_skip() -> sync_redis.Redis:
@@ -31,12 +45,47 @@ def _redis_or_skip() -> sync_redis.Redis:
     return r
 
 
+def _real_payloads() -> dict[str, bytes]:
+    """One serialised tick per device, built by the REAL producer.
+
+    Hand-writing the JSON here would make this test pass no matter what
+    ingest actually publishes — which is how the `f` field went undocumented.
+    So the frames go through biomech.compute() and the bytes come from
+    ingest.publish.tick_to_json(), the same function the ticker calls. The
+    signal is chosen to move m1..m3 while leaving m4/m5 inside their warm-up,
+    so the payload exercises the nullable-entry path too.
+    """
+    payloads: dict[str, bytes] = {}
+    for dev in DEVICES:
+        state: dict = {}
+        metrics = None
+        for k in range(120):
+            t = (k * NS + np.arange(NS)) / FS
+            a = np.stack([np.zeros(NS),
+                          9.81 + 4.0 * np.sin(2 * np.pi * 9 * t),
+                          np.zeros(NS)], 1)
+            w = np.tile([120.0, 0.0, 0.0], (NS, 1))
+            frames, times = make_tick(a, w, limbs=LIMBS, t0=k * NS / FS)
+            metrics = biomech.compute(frames, state, times)
+        tick = TickInput(
+            device_id=int(dev),
+            t_server=time.time(),
+            frames={},
+            times={},
+            quality=0.98,
+            held=False,
+        )
+        payloads[dev] = tick_to_json(tick, metrics)
+    return payloads
+
+
 class _Publisher(threading.Thread):
-    """Publishes schema-correct ticks at 60Hz per device until stopped."""
+    """Republishes real ingest payloads at 60Hz per device until stopped."""
 
     def __init__(self, r: sync_redis.Redis) -> None:
         super().__init__(daemon=True)
         self._r = r
+        self._payloads = _real_payloads()
         self.stop_flag = threading.Event()
 
     def run(self) -> None:
@@ -45,14 +94,8 @@ class _Publisher(threading.Thread):
         start = time.perf_counter()
         while not self.stop_flag.is_set():
             k += 1
-            now = time.time()
-            iso = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(now)) + \
-                f".{int(now * 1000) % 1000:03d}Z"
-            for dev in DEVICES:
-                self._r.publish("ticks", json.dumps({
-                    "type": "tick", "t": iso, "dev": dev,
-                    "m": [0.1, 0.2, 0.3, 0.4, 0.5], "c": 0.42, "q": 0.98,
-                }))
+            for payload in self._payloads.values():
+                self._r.publish("ticks", payload)
             sleep_for = start + k * period - time.perf_counter()
             if sleep_for > 0:
                 time.sleep(sleep_for)
@@ -90,13 +133,17 @@ def test_ws_throughput_and_schema(app_client: TestClient) -> None:
         publisher.stop_flag.set()
     publisher.join(timeout=2)
 
-    # schema: exactly the BACKEND_SCHEMA §2 fields
+    # schema: exactly the BACKEND_SCHEMA §2 fields, as the real producer emits them
     assert first is not None
-    assert set(first) == {"type", "t", "dev", "m", "c", "q"}
+    assert set(first) == {"type", "t", "dev", "m", "c", "q", "f"}
     assert isinstance(first["m"], list) and len(first["m"]) == 5
-    assert isinstance(first["c"], (int, float))
+    # 0..100, not the pre-SPEC stub's 0..1; entries may be null (§2)
+    for v in first["m"]:
+        assert v is None or 0.0 <= v <= 100.0
+    assert isinstance(first["c"], (int, float)) and 0.0 <= first["c"] <= 100.0
     assert 0.0 <= first["q"] <= 1.0
     assert first["t"].endswith("Z")
+    assert first["f"] is None or set(first["f"]) <= FLAG_VOCABULARY
 
     for dev, n in counts.items():
         assert n / DURATION_S >= 55.0, f"device {dev}: only {n / DURATION_S:.1f} msg/s"

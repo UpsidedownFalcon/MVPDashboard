@@ -141,6 +141,23 @@ def test_limb_map_parsed_from_json_env(clean_env: pytest.MonkeyPatch) -> None:
     }
 
 
+def test_duplicate_limb_names_are_rejected(clean_env: pytest.MonkeyPatch) -> None:
+    """Two sensors on one limb name silently wipes the biomech session.
+
+    The ticker keys `frames` by limb name, so a duplicate makes one sensor
+    overwrite the other's frame and leaves ingest's `limbs` tuple shorter than
+    `frames.keys()` — which rebuilds biomech's session state every tick. It
+    renders as a permanently flat athlete, not as a config error, so it has to
+    fail at load.
+    """
+    clean_env.setenv(
+        "LIMB_MAP",
+        '{"0,1": "left_shin", "0,2": "left_shin", "1,1": "right_thigh", "1,2": "right_shin"}',
+    )
+    with pytest.raises(ValueError, match="unique"):
+        Settings(_env_file=None)
+
+
 def test_env_overrides_apply(clean_env: pytest.MonkeyPatch) -> None:
     clean_env.setenv("UDP_PORT", "6001")
     clean_env.setenv("PAST_WINDOWS", "1h,1d,3d")
