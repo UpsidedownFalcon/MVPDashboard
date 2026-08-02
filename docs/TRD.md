@@ -193,6 +193,7 @@ Everything that connects components lives in **one root `.env`** (template:
 | `LIMB_MAP` | JSON, see §3 | `(source,sensor) → limb` |
 | `JITTER_BUFFER_MS` | 50 | reorder window |
 | `OFFLINE_AFTER_S` | 2 | online/offline threshold |
+| `RESET_OFFSET_JUMP_S` | 5 | offset jump ⇒ reboot, reset source buffers (§4 step 3) |
 | `PAST_WINDOWS` | `5m,30m,2h` | **3 durations; deployment e.g. `1h,1d,3d`** |
 | `FUTURE_HORIZONS` | `10m,30m,1h` | deployment e.g. `1d,3d,1w` |
 | `PREDICT_INTERVAL_S` / `PREDICT_TRAIN_WINDOW` | 300 / 2h | |

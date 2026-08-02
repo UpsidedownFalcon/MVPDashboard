@@ -55,6 +55,7 @@ class Settings(BaseSettings):
     limb_map: dict[tuple[int, int], str] = Field(default_factory=lambda: dict(_DEFAULT_LIMB_MAP))
     jitter_buffer_ms: int = 50
     offline_after_s: float = 2.0
+    reset_offset_jump_s: float = 5.0
 
     past_windows_raw: str = Field("5m,30m,2h", validation_alias="PAST_WINDOWS")
     future_horizons_raw: str = Field("10m,30m,1h", validation_alias="FUTURE_HORIZONS")
