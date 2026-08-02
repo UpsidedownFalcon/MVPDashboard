@@ -108,6 +108,9 @@ CAL_WINDOW_S = 10.0          # continuous stillness required, per sensor
 CAL_MAX_GAP_S = 0.25         # empty ticks tolerated inside a still window: a
                              # dropped packet is not evidence the athlete moved,
                              # but a real dropout means the gap is unverified
+CAL_FAULT_S = 20.0           # motionless (per gyro) but |a| off gravity for this
+                             # long => the SENSOR is wrong, not the athlete, so
+                             # say cal_failed instead of `uncalibrated` forever
 # Last-known-good carry-over lives for weeks: accel gain is stable across
 # sessions (SPEC 3.8), so a device that has ever calibrated should never run on
 # defaults again. Gyro bias drifts with temperature and is re-measured anyway.
@@ -224,6 +227,7 @@ class _Sess:
         self.cal_age = np.zeros(n)       # streaming time since the session began
         self.cal_dur = np.zeros(n)       # continuous stillness accumulated
         self.cal_gap = np.zeros(n)       # time with no samples inside a window
+        self.cal_bad_g = np.zeros(n)     # time motionless-but-wrong-|a| (fault)
         self.cal_n = np.zeros(n)         # samples in the window
         self.cal_s1 = np.zeros(n)        # sum |a|
         self.cal_s2 = np.zeros(n)        # sum |a|^2
@@ -261,6 +265,7 @@ class _Sess:
         # long-horizon EMAs (O(1) equivalents of SPEC 5.4's trailing means)
         self.ema_adyn = np.zeros(n)
         self.ema_seen = np.zeros(n, dtype=bool)
+        self.last_step = 1.0 / 60.0      # for held ticks, which carry no times
         # session accumulators
         self.dose = 0.0
         self.accL = 0.0
@@ -283,6 +288,20 @@ class _Sess:
         self.sigma_mean = float(np.mean([self.cal[limb].sigma for limb in self.limbs]))
 
     # --- automatic calibration (SPEC Section 3.8) ---------------------------
+
+    def age_still_gap(self, step: float) -> None:
+        """Age the no-samples gap for every still-unmeasured sensor.
+
+        Called on held ticks, where no limb produced samples at all: the window
+        is not broken by a dropout, but it is unverified, so the same
+        CAL_MAX_GAP_S tolerance applies as inside _still_window_update.
+        """
+        for i in range(len(self.cal_src)):
+            if self.cal_src[i] == "measured":
+                continue
+            self.cal_gap[i] += step
+            if self.cal_gap[i] > CAL_MAX_GAP_S:
+                self.cal_clear(i)
 
     def cal_clear(self, i: int) -> None:
         """Stillness broke (or a window closed): start the next one from zero."""
@@ -525,10 +544,23 @@ def _still_window_update(sess: _Sess, limbs: tuple[str, ...], counts: list[int],
             continue
         seg = amag[:n_i, i]
         mean_a = float(seg.mean())
-        if (abs(mean_a - GRAVITY_MS2) > g_tol
-                or float(wmag[:n_i, i].mean()) > CAL_MAX_ROTATION_DPS):
+        if float(wmag[:n_i, i].mean()) > CAL_MAX_ROTATION_DPS:
+            # The athlete moved. Says nothing about the sensor.
+            sess.cal_bad_g[i] = 0.0
             sess.cal_clear(i)
             continue
+        if abs(mean_a - GRAVITY_MS2) > g_tol:
+            # The gyro says this sensor is motionless, yet |a| disagrees with
+            # gravity. Motion cannot explain that -- the sensor can. Without
+            # this split the two causes were indistinguishable and a genuinely
+            # mis-scaled sensor read `uncalibrated` forever, which looks exactly
+            # like an athlete who never stood still.
+            sess.cal_bad_g[i] += step
+            if sess.cal_bad_g[i] >= CAL_FAULT_S:
+                sess.cal_failed[i] = True
+            sess.cal_clear(i)
+            continue
+        sess.cal_bad_g[i] = 0.0
         sess.cal_n[i] += n_i
         sess.cal_s1[i] += float(seg.sum())
         sess.cal_s2[i] += float(seg @ seg)
@@ -602,7 +634,12 @@ def compute(
     counts = [0 if frames[limb] is None else len(frames[limb]) for limb in limbs]
     n_max = max(counts)
     if n_max == 0:
-        # Held tick: repeat the previous values, accumulate no dose.
+        # Held tick: repeat the previous values, accumulate no dose. The still
+        # window must still AGE here -- returning without touching it froze a
+        # half-built window across a whole-device dropout and then resumed as
+        # though the stillness had been continuous. Ticks are fixed-rate, so
+        # last_step is the right increment; it defaults to one 60Hz tick.
+        sess.age_still_gap(sess.last_step)
         return sess.prev if sess.prev is not None else HELD_ZERO
 
     # --- 1. assemble [n_max, n_limbs, 6]; HOLD-LAST fill for short/absent limbs.
@@ -765,6 +802,7 @@ def compute(
     step = 1.0 / 60.0
     if now_t is not None and sess.last_tick_t is not None:
         step = min(max(now_t - sess.last_tick_t, 0.0), 1.0)
+    sess.last_step = step        # held ticks carry no time; they reuse this
     if now_t is not None:
         sess.last_tick_t = now_t
         if sess.session_start_t is None:
@@ -864,14 +902,17 @@ def compute(
             # freezes m4, but that is normal and must not raise a fault flag.
             flags.add("partial")
     if sess.R_base is None:
-        # R needs a shank AND a thigh. With either side of the pair unmapped,
-        # R_base can never lock -- that is a permanently degraded sensor set,
-        # not a warm-up, and flagging it `warming_up` forever tells the UI to
-        # keep waiting for a value that is never coming.
-        if len(shank_i) and len(thigh_i):
-            flags.add("warming_up")
-        else:
-            flags.add("degraded_sensors")
+        # R needs a shank AND a thigh. If either is unmapped OR mapped but never
+        # actually streamed (flat battery, bad strap), R_base can never lock --
+        # a permanently degraded sensor set, not a warm-up. Flagging it
+        # `warming_up` tells the UI to keep waiting for a value that is never
+        # coming. `ema_seen` is the has-ever-produced-data record: testing the
+        # static role indices alone caught only the unmapped case, so a dead
+        # thigh still read `warming_up` for the whole session.
+        pair_live = (len(shank_i) and len(thigh_i)
+                     and bool(sess.ema_seen[shank_i].all())
+                     and bool(sess.ema_seen[thigh_i].all()))
+        flags.add("warming_up" if pair_live else "degraded_sensors")
 
     # m5: wUSI over decaying accumulators. Both the per-tick noise weighting
     # (where the units match) and the both-sides gate are load-bearing -- SPEC
@@ -908,11 +949,20 @@ def compute(
         sess.m5_hold = m5
         sess.m5_stale = 0.0
     else:
-        if sess.move_t < M5_WARMUP_S:
+        # Same has-ever-streamed test as m4: a side that never produced data
+        # makes m5 permanently uncomputable. Without this the metric went null
+        # with NO flag at all -- the worst case, because "no data" and "no
+        # asymmetry" then look identical to the UI.
+        sides_live = (len(left_i) and len(right_i)
+                      and bool(sess.ema_seen[left_i].all())
+                      and bool(sess.ema_seen[right_i].all()))
+        if sess.move_t < M5_WARMUP_S and sides_live:
             flags.add("warming_up")
         sess.m5_stale += step
         if sess.m5_hold is not None and sess.m5_stale <= STALE_TIMEOUT_S:
             m5 = sess.m5_hold
+        elif not sides_live:
+            flags.add("degraded_sensors")
         elif sess.m5_hold is not None and not sides_ok:
             # As for m4: `partial` is a missing-sensor signal, not a rest signal.
             flags.add("partial")

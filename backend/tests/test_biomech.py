@@ -986,3 +986,55 @@ def test_evict_stale_releases_slots():
     gone = reg.evict_stale(now=1000.0 + 400.0, max_age_s=300.0)
     assert sorted(gone) == [30, 31, 32] and sorted(removed) == [30, 31, 32]
     assert reg.devices == {}
+
+
+# --- sensors dead from the first tick (live-hardware finding, 2026-08-02) -----
+# A sensor that is mapped but never streams (flat battery, bad strap contact) is
+# NOT the same as one that dies mid-session, and it used to be reported wrongly:
+# the role indices are built once from LIMB_MAP names, so the "can this metric
+# ever be computed?" test consulted configuration instead of reality.
+
+def _feed(dead: tuple[str, ...], ticks: int = 60 * 90):
+    state = {}
+    m = None
+    for k in range(ticks):
+        a, w = _moving(k)
+        frames, times = make_tick(a, w, t0=k * NS / FS)
+        for limb in dead:
+            frames[limb] = np.empty((0, 6), dtype=np.float32)
+            times[limb] = np.empty(0, dtype=np.float64)
+        m = compute(frames, state, times)
+    return m
+
+
+def test_thigh_dead_from_the_start_is_degraded_not_warming_up():
+    """m4 can never lock without a thigh — say so instead of waiting forever."""
+    m = _feed(("left_thigh", "right_thigh"))
+    assert m.m4 is None
+    assert "degraded_sensors" in m.flags
+    assert "warming_up" not in m.flags, (
+        "`warming_up` tells the UI a value is coming; with no thigh sensor "
+        "R_base can never lock and none ever will"
+    )
+
+
+def test_one_side_dead_from_the_start_flags_m5():
+    """m5 used to go null with NO flag at all — indistinguishable from 'no asymmetry'."""
+    m = _feed(("left_shin", "left_thigh"))
+    assert m.m5 is None
+    assert "degraded_sensors" in m.flags
+
+
+def test_all_sensors_live_still_warms_up_normally():
+    """The mirror: a healthy rig must keep saying `warming_up`, not `degraded`."""
+    state = {}
+    for k in range(30):                       # well under the 60 s m4 lock
+        a, w = _moving(k)
+        m = compute(*_mk(a, w, k, state))
+    assert "warming_up" in m.flags
+    assert "degraded_sensors" not in m.flags
+
+
+def _mk(a, w, k, state):
+    frames, times = make_tick(a, w, t0=k * NS / FS)
+    return frames, state, times

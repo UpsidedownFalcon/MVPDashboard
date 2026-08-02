@@ -345,3 +345,76 @@ def test_gain_mismatch_bias_disappears_after_calibration():
         f"m5 still carries {corrected.m5:.2f} points of gain bias after "
         f"calibration (uncalibrated: {biased.m5:.2f})"
     )
+
+
+# =============================================================================
+# Live-hardware findings (2026-08-02 capture session)
+# =============================================================================
+
+def test_whole_device_dropout_breaks_the_still_window() -> None:
+    """A held tick must AGE the window, not freeze it.
+
+    compute() returns early when no limb produced samples, which used to skip
+    the still-window update entirely: a half-built window survived a dropout of
+    any length and resumed as though the stillness had been continuous. The real
+    link drops packets in bursts, so this is the case that actually occurs.
+    """
+    state: dict = {}
+    t = 0.0
+    for _ in range(300):                       # 5 s of stillness, well past the discard
+        f, ts = make_tick(np.tile([0.0, G, 0.0], (NS, 1)),
+                          np.zeros((NS, 3)), t0=t, fs=FS)
+        compute(f, state, ts)
+        t += NS / FS
+    sess = _sess(state)
+    assert sess.cal_dur.max() > 1.0, "no window accumulated; fixture is wrong"
+
+    # Whole device silent: frames present but empty -> held ticks.
+    empty = {limb: np.zeros((0, 6), dtype=np.float32) for limb in LIMBS}
+    for _ in range(60):                        # 1 s >> CAL_MAX_GAP_S
+        compute(empty, state, {limb: np.zeros(0) for limb in LIMBS})
+
+    assert sess.cal_dur.max() == 0.0, (
+        "the still window survived a 1 s whole-device dropout — it must be "
+        "cleared, because nothing verified the athlete stayed still"
+    )
+
+
+def test_motionless_but_wrong_gravity_is_reported_as_a_sensor_fault() -> None:
+    """Gyro says still + |a| disagrees with gravity => cal_failed, not silence.
+
+    Previously the two guards were one test, so a mis-scaled sensor simply never
+    accumulated a window and read `uncalibrated` for the whole session — exactly
+    what an athlete who never stood still looks like. The gyro disambiguates it.
+    """
+    state: dict = {}
+    t = 0.0
+    ticks = int((biomech.CAL_FAULT_S + biomech.CAL_DISCARD_S + 2.0) * 60)
+    for _ in range(ticks):
+        # 10% high on every axis-magnitude, perfectly motionless.
+        f, ts = make_tick(np.tile([0.0, G * 1.10, 0.0], (NS, 1)),
+                          np.zeros((NS, 3)), t0=t, fs=FS)
+        m = compute(f, state, ts)
+        t += NS / FS
+
+    sess = _sess(state)
+    assert sess.cal_failed.all(), "a motionless, mis-scaled sensor must be flagged"
+    assert "cal_failed" in m.flags
+    assert all(src == "default" for src in sess.cal_src), (
+        "a bad correction must never be baked in — defaults are kept"
+    )
+
+
+def test_moving_athlete_is_not_blamed_on_the_sensor() -> None:
+    """The mirror of the above: rotation present => no fault flag, ever."""
+    state: dict = {}
+    t = 0.0
+    ticks = int((biomech.CAL_FAULT_S + biomech.CAL_DISCARD_S + 2.0) * 60)
+    for _ in range(ticks):
+        f, ts = make_tick(np.tile([0.0, G * 1.10, 0.0], (NS, 1)),
+                          np.tile([0.0, 0.0, 60.0], (NS, 1)), t0=t, fs=FS)
+        m = compute(f, state, ts)
+        t += NS / FS
+
+    assert not _sess(state).cal_failed.any()
+    assert "cal_failed" not in m.flags

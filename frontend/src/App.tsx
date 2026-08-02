@@ -55,6 +55,7 @@ function DeviceSection({ device, buffer }: { device: Device; buffer?: DeviceBuff
   return (
     <section style={{ border: '1px solid #999', margin: 12, padding: 12 }}>
       <Header device={device} />
+      <Flags flags={buffer?.flags ?? []} />
       <LiveChart buffer={buffer} />
       <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }}>
         <Windows dev={device.device_id} />
@@ -62,6 +63,45 @@ function DeviceSection({ device, buffer }: { device: Device; buffer?: DeviceBuff
         <Insights dev={device.device_id} />
       </div>
     </section>
+  )
+}
+
+// Biomech flags (BACKEND_SCHEMA §2, SPEC §10). `uncalibrated` / `cal_failed` /
+// `carried_over` are the calibration state a trainer can otherwise only get from
+// the debug page; `unvalidated` marks m4/m5 as having no real-data validation.
+const FLAG_STYLE: Record<string, string> = {
+  cal_failed: '#c0392b',
+  uncalibrated: '#d35400',
+  degraded_sensors: '#c0392b',
+  saturated: '#c0392b',
+  partial: '#d35400',
+  carried_over: '#2980b9',
+  warming_up: '#7f8c8d',
+  unvalidated: '#7f8c8d',
+  no_shank: '#d35400',
+}
+
+function Flags({ flags }: { flags: string[] }) {
+  if (!flags.length) return null
+  return (
+    <div style={{ margin: '4px 0' }}>
+      {flags.map((f) => (
+        <span
+          key={f}
+          title={f}
+          style={{
+            background: FLAG_STYLE[f] ?? '#7f8c8d',
+            color: 'white',
+            borderRadius: 3,
+            padding: '1px 6px',
+            marginRight: 6,
+            fontSize: 12,
+          }}
+        >
+          {f}
+        </span>
+      ))}
+    </div>
   )
 }
 

@@ -311,6 +311,14 @@ against a still-standing `|ω|` of 3–5 °/s is 5–10% of the low-end signal.
 - `k` outside `[0.95, 1.05]` ⇒ **reject**. Under automatic detection the first two are the
   per-tick acceptance test, so this one bites on the *composed* result — a carried-over `k` that
   has itself drifted compounding with this session's residual.
+**Distinguishing a faulty sensor from a restless athlete.** The two acceptance guards answer
+different questions and are therefore applied separately. `mean|ω| > CAL_MAX_ROTATION_DPS` means
+the athlete moved — it says nothing about the sensor, so the window simply restarts. But if the
+gyro reports the sensor motionless while `|a|` still disagrees with gravity, motion cannot explain
+it and the sensor can: after `CAL_FAULT_S` (20 s) of that state the sensor is flagged
+`cal_failed`. Without the split the two causes were indistinguishable, and a genuinely mis-scaled
+sensor read `uncalibrated` for the whole session — identical to an athlete who never stood still.
+
 - On rejection: flag `cal_failed`, keep last-known-good (or defaults), **clear the window and keep
   seeking**. There is nothing for the UI to retry: detection never stops.
 
@@ -973,11 +981,11 @@ Any individual flag must show the component panel that drove it (§2).
 
    | Flag | Meaning |
    |---|---|
-   | `warming_up` | `m4`/`m5` still inside their 60 s / 30 s warm-up (§5.4, §5.5) |
+   | `warming_up` | `m4`/`m5` still inside their 60 s / 30 s warm-up (§5.4, §5.5). Only when the sensors those metrics need have actually streamed — see `degraded_sensors` |
    | `partial` | a required sensor went inactive mid-session; `m4`/`m5` frozen or `null` |
    | `no_shank` | `m1` fell back to thigh sensors |
    | `saturated` | >2.6% clipped samples; `m1`/`m2` suppressed (§3.7) |
-   | `degraded_sensors` | device streaming <4 sensors (§8) |
+   | `degraded_sensors` | device streaming <4 sensors (§8), **or** a sensor a metric requires was mapped but has never produced data (flat battery, bad strap). Both are "this value is never coming"; `warming_up` promises the opposite, so the two must not be confused. Tested against `ema_seen`, never against `LIMB_MAP` alone |
    | `uncalibrated` | at least one sensor running on default `k`/`bias`/`σ` — no history and no still window yet (§3.8) |
    | **`carried_over`** | **at least one sensor running last-known-good values from a PREVIOUS session (`biomech:cal:{dev}`), applied but not measured on this athlete today (§3.8)** |
    | `cal_failed` | a calibration attempt hit a validity guard and was rejected; last-known-good stands and detection continues |

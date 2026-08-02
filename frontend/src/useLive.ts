@@ -1,6 +1,9 @@
 // One WebSocket for all devices; per-device rolling buffers of the last 60s.
 // Charts render nulls as GAPS, never 0 (BACKEND_SCHEMA §2 / biomech SPEC §10).
-// Unknown tick keys (e.g. "f" flags) are ignored.
+//
+// The "f" (flags) field IS surfaced: SPEC §10 makes rendering `uncalibrated`,
+// `cal_failed` and `carried_over` the UI's job, and dropping them left no way to
+// answer "was this session calibrated?" from anywhere but the debug page.
 
 import { useEffect, useRef, useState } from 'react'
 import { fetchRecent } from './api'
@@ -14,6 +17,7 @@ export type LiveData = [number[], ...(number | null)[][]]
 export interface DeviceBuffer {
   data: LiveData
   version: number
+  flags: string[]
 }
 
 function emptyData(): LiveData {
@@ -27,12 +31,14 @@ interface Tick {
   m: (number | null)[]
   c: number
   q: number
+  f?: string[] | null
 }
 
 export function useLive(deviceIds: string[]): Record<string, DeviceBuffer> {
   const buffers = useRef<Record<string, LiveData>>({})
   const [snapshot, setSnapshot] = useState<Record<string, DeviceBuffer>>({})
   const backfilled = useRef<Set<string>>(new Set())
+  const flags = useRef<Record<string, string[]>>({})
 
   const push = (dev: string, t: number, m: (number | null)[], c: number) => {
     const buf = (buffers.current[dev] ??= emptyData())
@@ -75,6 +81,7 @@ export function useLive(deviceIds: string[]): Record<string, DeviceBuffer> {
         const msg = JSON.parse(ev.data) as Tick
         if (msg.type !== 'tick') return
         push(msg.dev, Date.parse(msg.t) / 1000, msg.m, msg.c)
+        flags.current[msg.dev] = msg.f ?? []
       }
       ws.onclose = () => {
         if (!closed) setTimeout(connect, 1000)
@@ -86,7 +93,11 @@ export function useLive(deviceIds: string[]): Record<string, DeviceBuffer> {
         Object.fromEntries(
           Object.entries(buffers.current).map(([dev, data]) => [
             dev,
-            { data, version: data[0].length ? data[0][data[0].length - 1] : 0 },
+            {
+              data,
+              version: data[0].length ? data[0][data[0].length - 1] : 0,
+              flags: flags.current[dev] ?? [],
+            },
           ]),
         ),
       )

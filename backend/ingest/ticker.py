@@ -56,8 +56,14 @@ class DeviceTicker:
         self._now = now_fn
         self._sleep = sleep_fn
         self._period = 1.0 / settings.output_hz
+        # Scale by the number of MAPPED sensors, not a hardcoded 4: a 3-sensor
+        # LIMB_MAP is a valid configuration and used to read a permanent 0.75
+        # quality (a 25% data-loss warning on a healthy rig), while a 5+ sensor
+        # map clamped at 1.0 and hid real loss. A physically dead sensor still
+        # lowers quality, which is the behaviour SPEC §8 relies on.
         self._expected_per_tick = (
-            4.0 * settings.expected_input_hz / settings.output_hz
+            max(len(settings.limb_map), 1) * settings.expected_input_hz
+            / settings.output_hz
         )
         self._aligners: dict[int, SourceAligner] = {}
         self._jitters: dict[tuple[int, int], JitterBuffer] = {}

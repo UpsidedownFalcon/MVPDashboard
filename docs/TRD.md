@@ -103,7 +103,7 @@ source address** (NAT may rewrite it).
 **Limb mapping — default SET, values CONFIGURABLE** (`LIMB_MAP` in `.env`):
 `(0,1)=left_shin, (0,2)=left_thigh, (1,1)=right_thigh, (1,2)=right_shin`.
 
-Expected stream rate ~600Hz/sensor (device decimates from ~6.6kHz). Ingest never
+Measured stream rate **~640Hz/sensor** (device decimates from ~6.6kHz); the pre-hardware estimate of 600 is superseded. Ingest never
 assumes the exact rate: it measures per-sensor rate live and computes quality against
 `EXPECTED_INPUT_HZ`.
 
@@ -284,7 +284,7 @@ Everything that connects components lives in **one root `.env`** (template:
 | `REDIS_URL` | redis://redis:6379/0 | |
 | `JWT_SECRET`, `JWT_EXPIRE_HOURS` | —, 24 | |
 | `SEED_USERS` | trainer:changeme | comma-sep `user:pass` pairs, seeded once |
-| `EXPECTED_INPUT_HZ` | 600 | per sensor |
+| `EXPECTED_INPUT_HZ` | 640 | per sensor; **measured** on the real device (median inter-sample spacing 1563 us across all 4 sensors, two captures 2026-08-02). The earlier 600 was an estimate and made `quality` read ~6% low. |
 | `OUTPUT_HZ` | 60 | tick + WS + DB rate |
 | `LIMB_MAP` | JSON, see §3 | `(source,sensor) → limb` |
 | `JITTER_BUFFER_MS` | 50 | reorder window |
