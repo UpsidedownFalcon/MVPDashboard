@@ -140,6 +140,15 @@ Steps:
 
 **Done check:** production URL serves the product UI; nothing references the crude app.
 
+> **T02–T07 + T10 DONE 2026-08-03** (single auto-execution session, user-mandated):
+> new `frontend/` product app (Vite+React+TS; sidebar shell, overview hero +
+> projection-first panels, detail live column + Insights/History/Projections
+> tabs, login); auth enforced on every route/WS (bcrypt direct + pyjwt, cookie
+> `session`, WS 4401, JWT_SECRET required at startup, seed_users in compose
+> entrypoint); migration 002 + `/api/metrics/history`; crude UI deleted and the
+> caddy image now bakes the product build. `pytest`: 221 passed. Deployed to the
+> VPS the same day. Remaining for stage-3 exit: S3-T08 acceptance run.
+
 ## S3-T08 — Full acceptance run  ⚑ stage-3 / MVP exit
 
 **Goal:** every PRD acceptance criterion demonstrated.
