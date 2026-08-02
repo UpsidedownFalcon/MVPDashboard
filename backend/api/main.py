@@ -15,6 +15,10 @@ from fastapi.responses import FileResponse
 
 from common.config import get_settings
 from migrations.migrate import dsn
+from api.jobs.predict import PredictJob
+from api.routes.devices import router as devices_router
+from api.routes.forecasts import router as forecasts_router
+from api.routes.metrics import router as metrics_router
 from api.writer import Writer
 from api.ws import Hub
 
@@ -37,15 +41,24 @@ def create_app() -> FastAPI:
         writer = Writer(settings, pool)
         hub.tick_listeners.append(writer.on_tick)
         await writer.start()
+        predict_job = PredictJob(settings, pool)
+        await predict_job.start()
         app.state.pool = pool
         app.state.writer = writer
-        log.info("api up (ws fan-out + /debug + db writer)")
+        app.state.predict_job = predict_job
+        app.state.settings = settings
+        app.state.redis = hub.redis
+        log.info("api up (ws fan-out + /debug + db writer + rest + predict)")
         yield
+        await predict_job.stop()
         await writer.stop()
         await pool.close()
         await hub.stop()
 
     app = FastAPI(title="MVP Dashboard API", lifespan=lifespan)
+    app.include_router(devices_router)
+    app.include_router(metrics_router)
+    app.include_router(forecasts_router)
 
     @app.get("/api/health/live")
     async def health_live() -> dict[str, str]:
