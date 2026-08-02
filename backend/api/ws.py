@@ -38,6 +38,9 @@ class Hub:
     settings: Settings
     clients: dict[WebSocket, _Client] = field(default_factory=dict)
     ws_dropped: int = 0
+    # Extra synchronous consumers of the one Redis subscription (S2-T02: the DB
+    # writer). Called with the parsed tick dict; must never block or raise.
+    tick_listeners: list = field(default_factory=list)
     _tasks: list[asyncio.Task] = field(default_factory=list)
     _online: dict[str, bool] = field(default_factory=dict)
 
@@ -109,9 +112,16 @@ class Hub:
                         continue
                     payload: bytes = msg["data"]
                     try:
-                        device = orjson.loads(payload).get("dev")
+                        obj = orjson.loads(payload)
                     except orjson.JSONDecodeError:
                         continue
+                    device = obj.get("dev")
+                    if obj.get("type") == "tick":
+                        for listener in self.tick_listeners:
+                            try:
+                                listener(obj)
+                            except Exception:  # noqa: BLE001 — a bad consumer
+                                log.exception("tick listener failed")
                     # browsers want text frames; decode once per message
                     self._broadcast(payload.decode(), device)
             except asyncio.CancelledError:

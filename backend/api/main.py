@@ -1,6 +1,6 @@
-"""Minimal api service (S1-T12): WS fan-out + /debug viewer + health.
-
-DB writer, REST and jobs arrive in stage 2; auth in stage 3.
+"""api service: WS fan-out + /debug viewer + health (S1-T12), DB writer +
+device auto-registration (S2-T02). REST and jobs land in later stage-2 tasks;
+auth in stage 3.
 """
 
 from __future__ import annotations
@@ -9,10 +9,13 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import asyncpg
 from fastapi import FastAPI, WebSocket
 from fastapi.responses import FileResponse
 
 from common.config import get_settings
+from migrations.migrate import dsn
+from api.writer import Writer
 from api.ws import Hub
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -24,11 +27,22 @@ DEBUG_HTML = Path(__file__).resolve().parent / "debug.html"
 def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        hub = Hub(get_settings())
+        settings = get_settings()
+        hub = Hub(settings)
         await hub.start()
         app.state.hub = hub
-        log.info("api up (ws fan-out + /debug)")
+        # min_size=0: the api must come up (and stream live data) even if the
+        # db is down — the writer just buffers/drops and retries.
+        pool = await asyncpg.create_pool(dsn(settings), min_size=0, max_size=5)
+        writer = Writer(settings, pool)
+        hub.tick_listeners.append(writer.on_tick)
+        await writer.start()
+        app.state.pool = pool
+        app.state.writer = writer
+        log.info("api up (ws fan-out + /debug + db writer)")
         yield
+        await writer.stop()
+        await pool.close()
         await hub.stop()
 
     app = FastAPI(title="MVP Dashboard API", lifespan=lifespan)
@@ -54,6 +68,9 @@ def create_app() -> FastAPI:
             "api": {
                 "ws_clients": len(hub.clients),
                 "ws_dropped": hub.ws_dropped,
+                "db_buffer": app.state.writer.db_buffer,
+                "db_dropped": app.state.writer.db_dropped,
+                "rows_written": app.state.writer.rows_written,
             },
         }
 
