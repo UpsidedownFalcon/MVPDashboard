@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | Set in stone for the MVP build. Metric *names* (`m1..m5`, `composite`) are stable column/field IDs (**5 primitives + 1 composite — confirmed**); their meanings are TBD (stage-1 biomech session) — display names live only in the frontend. Staged activation: §1 DDL + REST routes from stage 2 (`users` table used from stage 3); §2 tick format and §4 Redis contract from stage 1; auth on routes from stage 3 (until then all routes open — TRD §1.1). |
+| Status | Set in stone for the MVP build. Metric *names* (`m1..m5`, `composite`) are stable column/field IDs (**5 primitives + 1 composite — confirmed**). Their meanings are now **DECIDED** — [biomech/SPEC.md](biomech/SPEC.md) (S1-T14): `m1` Impact, `m2` Loading Rate, `m3` Accumulated Load, `m4` Movement Control, `m5` L/R Balance, `composite` Injury Risk; all **0–100**, nullable except `composite`. Display names live only in the frontend (SPEC §10). Staged activation: §1 DDL + REST routes from stage 2 (`users` table used from stage 3); §2 tick format and §4 Redis contract from stage 1; auth on routes from stage 3 (until then all routes open — TRD §1.1). |
 | Related | [TRD.md](TRD.md) · [APPFLOW.md](APPFLOW.md) |
 
 ## 1. Database DDL (TimescaleDB) — `backend/migrations/001_init.sql`
@@ -99,11 +99,29 @@ resolution than `metrics_1m`, query `metrics` directly for windows < 5 min (the
   "type": "tick",
   "t":   "2026-08-02T21:14:03.250Z",  // server-aligned tick time (ISO, UTC)
   "dev": "30",
-  "m":   [0.12, 0.34, 0.56, 0.41, 0.22],  // m1..m5
-  "c":   0.42,                             // composite
+  "m":   [42.2, 48.3, 24.2, 0.0, null],   // m1..m5, each 0..100 or null
+  "c":   45.3,                             // composite 0..100
   "q":   0.98                              // quality 0..1
 }
 ```
+
+**Ranges (set by [biomech/SPEC.md](biomech/SPEC.md) §5, S1-T14):** `m1..m5` and `c` are
+**0–100** arbitrary units (the pre-SPEC stub emitted 0–1 — frontend axis bounds must match
+the model). `q` remains 0–1.
+
+**`m` entries may be `null`** when a primitive is unavailable — the device streams fewer than 4
+sensors (SPEC §8), the metric is still warming up (`m4` needs 60 s of movement, `m5` needs 30 s),
+a required sensor went inactive mid-session (`partial` — SPEC §5.4/§5.5), or the window was
+>2.6% saturated (`m1`/`m2`, SPEC §3.7). `c` and `q` are **never null**. The DDL already allows
+this (`m1..m5` nullable `REAL`; only `composite`/`quality` are `NOT NULL`), and `metrics_1m`'s
+`avg()` skips NULLs, which is the desired behaviour.
+
+⚠️ **`m4` and `m5` are `null` far more often than the other three**, by design — expect them
+absent for the first minute of every session, and whenever a leg loses a sensor. Charts must
+render gaps, never zero (SPEC §9). Both also carry the `unvalidated` flag through stage 1: they
+have no real-data validation (SPEC §11.1).
+
+Display names, bands and the "render null as greyed, never as 0" rule: SPEC §10.
 
 Status event (WS only, emitted by api on transitions):
 
@@ -138,19 +156,43 @@ All routes require the auth cookie except `POST /api/auth/login` and liveness
 | `ticks` | pub/sub channel | ingest → api | tick JSON (§2), all devices on one channel |
 | `last_seen:dev:{device_id}` | string (unix ms) | ingest → api | refreshed ≤1s while packets flow |
 | `last_seen:sensor:{dev}:{src}:{sen}` | string (unix ms) | ingest → api | per-sensor liveness (detects one dead leg) |
-| `ingest:stats` | hash, rewritten 1s | ingest → api (`/api/health`) | per-sensor `rate_hz`, counters: `recv, crc_fail, late_drop, buf_drop, ticks_out` |
+| `ingest:stats` | hash, rewritten 1s | ingest → api (`/api/health`) | per-sensor `rate_hz`, counters: `recv, crc_fail, late_drop, buf_drop, ticks_out, sat_count` |
+| `biomech:diag:{device_id}` | hash, rewritten 1s | ingest → api (`/api/health`) | biomech diagnostics (SPEC §9.2): `flags`, absolute transmission ratio `R`, `R_base`, `SI_pct`, `dose`, pre-normalisation primitive values — for tuning the provisional reference bounds against real trial data |
+| `biomech:state:{device_id}` | hash, rewritten 1s, TTL `2×SESSION_GAP_S` | ingest → **ingest** | **Warm-restart snapshot** (~200 B, SPEC §7.4): `dose`, `accL`, `accR`, `R_base`, `move_time_s`, `session_started_at`, `last_tick_at`, per-sensor calibration (`k`, `gyro_bias`, `sigma`), `schema_version`. Written fire-and-forget; **read only by ingest on startup**, applying elapsed-time decay before use. Without it an ingest restart silently resets a mid-session athlete to zero accumulated load. |
+
+`sat_count` counts samples with any axis within 1% of full scale (±16 g / ±2000 °/s). The
+squats log peaks at 1875 °/s against a 2000 °/s ceiling, so saturation is a live risk on
+harder movements; saturated windows are reported but **not** discarded (a clipped impact is
+still a real large impact). See [biomech/SPEC.md](biomech/SPEC.md) §2.
 
 No Redis persistence needed (`appendonly no`); everything in Redis is reconstructible.
 
 ## 5. Stable code interfaces (drop-in points for later sessions)
 
 ```python
-# backend/ingest/biomech.py — REPLACED by the real algorithm later
+# backend/ingest/biomech.py — algorithm specified in docs/biomech/SPEC.md (S1-T14),
+# implemented in S1-T15. The SIGNATURE below is unchanged by the spec.
 def compute(frames: dict[str, np.ndarray], state: DeviceState) -> Metrics:
     """frames: limb name -> float32[n_samples, 6] (ax..gz, raw counts) since last
     tick, already time-aligned across limbs. Called at OUTPUT_HZ per device.
-    Returns Metrics(m1..m5, composite). `state` persists across calls per device
-    (for filters/calibration)."""
+    Returns Metrics(m1..m5, composite), all 0..100. `state` persists across calls
+    per device and holds the 1 s derived-scalar ring buffers, filter state, and
+    session accumulators (SPEC §7). No calibration input is required."""
+
+@dataclass
+class Metrics:
+    m1: float | None    # Impact          0..100  (None if unavailable — SPEC §8)
+    m2: float | None    # Loading Rate    0..100
+    m3: float | None    # Accumulated Load 0..100
+    m4: float | None    # Movement Control 0..100 (None while warming up)
+    m5: float | None    # L/R Balance     0..100 (None while warming up)
+    composite: float    # Injury Risk     0..100  — never None
+    flags: frozenset[str]     # 'warming_up','no_shank','saturated','degraded_sensors'
+    raw:   dict[str, float]   # pre-normalisation diagnostics -> biomech:diag:{dev} (§4)
+
+# backend/common/scaling.py — raw counts to SI (ICM-45686, verified vs example/squats.bin)
+ACCEL_MS2_PER_COUNT = 9.81 / 2048     # ±16 g  -> m/s²
+GYRO_DPS_PER_COUNT  = 1.0 / 16.384    # ±2000 °/s -> °/s
 
 # backend/api/jobs/predict.py — REPLACED by the real model later
 def fit(history: pd.DataFrame, horizons: list[timedelta]) -> dict[timedelta, Forecast]:

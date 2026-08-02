@@ -119,12 +119,83 @@ assumes the exact rate: it measures per-sensor rate live and computes quality ag
 5. **Framing:** on each 60Hz tick, all samples per limb released since the previous
    tick (~10 at 600Hz) are assembled as `frames: {limb: float32[n, 6]}`, resampled/
    padded as needed — biomech gets a rate-flexible input.
-6. **Biomech (STUB tonight — interface SET IN STONE):**
-   `compute(frames: dict[str, ndarray], state) -> (m1, m2, m3, m4, m5, composite)`
-   called at 60Hz per device. Stub: per-limb gyro/accel RMS energy + weighted
-   normalized composite, so charts move realistically with the replayed squat data.
-   The real algorithm replaces `biomech.py` only. *Definitions of the 6 metrics: TBD
-   (dedicated session; notes go in `docs/biomech/`).*
+6. **Biomech (interface SET IN STONE):**
+   `compute(frames: dict[str, ndarray], state) -> Metrics(m1..m5, composite)`
+   called at 60Hz per device. The real algorithm replaces `biomech.py` only.
+   **Definitions are specified in [biomech/SPEC.md](biomech/SPEC.md)** (S1-T14);
+   implemented in S1-T15. Summary of what the spec fixes:
+   - **Orientation-free by mandate:** rotation-invariant magnitudes (`|a|`, `|ω|`) and
+     time derivatives only. No absolute angles, no complementary/Kalman filter, no
+     bone-aligned axis. Gravity is removed by high-passing the **scalar** `|a|`, never
+     per-axis — per-axis (VeDBA/ODBA) fabricates ~7 m/s² of false impact at ordinary squat
+     rotation rates (SPEC §3.3). Jerk uses the **exact identity** `‖Δa/Δt + ω×a‖`, which is
+     gravity-free and rotation-invariant *identically*, from measured accel+gyro only
+     (SPEC §3.4); this requires accel and gyro to stay synchronised — they share one packet.
+   - **Primitives:** `m1` Impact (peak dynamic accel), `m2` Loading Rate (exact linear jerk),
+     `m3` Accumulated Load (power-law-weighted decaying dose, exponent 3), `m4` Movement
+     Control (**|drift|** of shank→thigh shock transmission vs. session baseline —
+     direction-agnostic, as the literature does not fix the sign), `m5` L/R Balance (weighted
+     Universal Symmetry Index of accumulated load, full scale 18%). `composite` =
+     load-vs-capacity injury risk.
+   - **All six outputs are 0–100**, not 0–1. Log-scaled for `m1..m3`, linear for `m4`,`m5`.
+   - **Low-pass cutoff is 75 Hz, not the stale model's 50 Hz:** 50 Hz retains 97% of peak
+     acceleration but only 36–75% of peak jerk (SPEC §3.6).
+   - **⚠️ Claims limits (SPEC §2):** these are surrogates for *external impact loading rate*,
+     never bone load (peak tibial accel vs internal tibial force: r ≈ 0). No composite injury
+     score has ever passed prospective validation, and base rates make individual alerts ~90%
+     false. `composite` is a monitoring/triage aid, not a prediction — UI copy must say so.
+   - **🚩 Hardware flag:** ±16 g will clip on the **shank during running/jumping** (published
+     resultant peaks 20–27 g; literature recommends ≥±32 g). Fine for thigh and for all
+     strength training. Ingest counts saturation and suppresses `m1`/`m2` above 2.6% saturated
+     samples rather than reporting a truncated peak.
+   - **Sample context:** needs **1 s of trailing history** per limb, not just the ~10 newest
+     samples — a single tick underestimates peak acceleration by ~2.3×. Stored as **60
+     per-tick float32 summaries**, not 600 raw samples (~3 KB/device total). Raw frames are
+     never buffered. Max lookback in ingest is **1 second**; everything longer is an O(1)
+     recursive accumulator, and nothing in the live path touches the DB (SPEC §7.2).
+   - **Calibration is OPTIONAL** — the orientation-free design needs none, and the system runs
+     with defaults. A 15 s still-stand (10 s used, first 3 s discarded) measures per-sensor
+     accel gain, gyro bias and noise σ; worth taking because `m4`/`m5` are **inter-sensor
+     ratios**, so gain mismatch biases them directly (SPEC §3.8). `m4`'s movement baseline is
+     separate and self-learns from the first 60 s of movement.
+   - **Real-time budget (measured, SPEC §7.1):** biomech adds **~22.6 ms** onset latency
+     (4.2 ms filter + 1.7 ms diff + 16.7 ms tick quantisation) — the existing 50 ms jitter
+     buffer dominates. Throughput **381 µs/tick for all 5 devices = 2.3% of one core, 44×
+     headroom**, *provided* every sensor is batched into a single `scipy.signal.lfilter` call
+     per stage. Per-limb calls cost 13× more (Python call overhead) — S1-T15 must batch.
+     Trailing windows delay **release, not onset**: a new impact moves `m1` on the next tick.
+   - **Fixed-slot batching (SPEC §7.2)** — batching must not assume a fixed device count.
+     A permanent `MAX_DEVICES×4 = 20`-slot matrix is allocated at startup; each sensor claims a
+     slot on first packet; an `active[]` mask excludes absent slots from aggregation (feeding
+     the §8 degradation ladder). Timing is **constant (~380 µs) whether 1 or 5 devices are on**,
+     so the 60 Hz ticker never jitters as devices connect/disconnect.
+     🚩 **Absent slots MUST be hold-last filled, never zero-filled:** zero-fill lets the gravity
+     baseline decay to 0, so a sensor reconnecting while the athlete stands still emits a
+     **9.75 m/s² phantom impact** (`m1` ≈ 85/100). Hold-last gives 0.096 m/s² — the true noise
+     floor — and needs no filter re-seeding, because the baseline tracks orientation-independent
+     `|g|` and stays valid even across a remount.
+   - **Session state is snapshotted to Redis at 1 Hz** (`biomech:state:{device_id}`, ~200 B/device,
+     TRD-approved) and restored on startup with elapsed-time decay applied, so an `ingest` restart
+     does not silently reset a mid-session athlete to zero accumulated load (SPEC §7.4).
+   - **Session state** resets after a gap > `SESSION_GAP_S` (300 s, **an `.env` key** — §7),
+     deliberately longer than `OFFLINE_AFTER_S` so a brief dropout does not wipe dose.
+   - **🚩 Unit trap:** the `ω×a` jerk term needs **ω in rad/s**; °/s makes `m2` wrong by 57.3×
+     and it looks plausible rather than broken (SPEC §3.5, test 23).
+   - **🚩 Peak statistic:** per-tick `p90` of the ~10 samples, then **`max` across the 1 s ring**.
+     A percentile *across the ring* is silently broken — an isolated 50 m/s² impact moves it by
+     0.000, so running impacts would be under-reported and cadence-dependent (SPEC §5.1).
+   - **🚩 `m4`/`m5` freeze when a required sensor goes inactive.** Without the gate a single dead
+     sensor drives `m5` to 100 ("severe asymmetry") within 30 s and pins `m4` at 100 — a hardware
+     fault rendering as the most alarming possible finding (SPEC §5.4, §5.5).
+   - **⚠️ `m4` and `m5` ship without real-data validation** — the only capture holds 19.9 s of
+     movement vs their 60 s / 30 s warm-ups, so neither emits on it. Synthetic fixtures only, by
+     user decision; flagged `unvalidated` in `Metrics` for all of stage 1 and surfaced via
+     `/api/health`. Closing this needs one ≥10-min session with a fatigue block (SPEC §11.1).
+   - **Degraded operation:** devices may stream <4 sensors; unavailable primitives emit
+     `null` and the composite reweights (SPEC §8).
+   - Scale factors are compile-time constants in `backend/common/scaling.py`:
+     `9.81/2048` m/s² per count, `1/16.384` °/s per count (ICM-45686, ±16 g / ±2000 °/s,
+     verified against `example/squats.bin`).
 7. **60Hz ticker:** wall-clock driven (`asyncio` timer, drift-corrected by absolute
    scheduling). **Emits every tick regardless of input** — on missing data it
    holds the last value (flag `held=true` internally, quality reflects it). Output
@@ -194,6 +265,7 @@ Everything that connects components lives in **one root `.env`** (template:
 | `JITTER_BUFFER_MS` | 50 | reorder window |
 | `OFFLINE_AFTER_S` | 2 | online/offline threshold |
 | `RESET_OFFSET_JUMP_S` | 5 | offset jump ⇒ reboot, reset source buffers (§4 step 3) |
+| `SESSION_GAP_S` | 300 | gap after which biomech resets accumulated load/baselines (biomech SPEC §7); deliberately ≫ `OFFLINE_AFTER_S` |
 | `PAST_WINDOWS` | `5m,30m,2h` | **3 durations; deployment e.g. `1h,1d,3d`** |
 | `FUTURE_HORIZONS` | `10m,30m,1h` | deployment e.g. `1d,3d,1w` |
 | `PREDICT_INTERVAL_S` / `PREDICT_TRAIN_WINDOW` | 300 / 2h | |
@@ -240,7 +312,8 @@ anything misbehaves; the frontend quality badge is driven from the same numbers.
 
 | Item | Where decided | Placeholder until then |
 |---|---|---|
-| 5 primitives + composite definitions, units, calibration | **stage 1** biomech session (`docs/biomech/` → SPEC.md) | RMS-energy stub during pipeline bring-up |
+| ~~5 primitives + composite definitions, units, calibration~~ | **DECIDED** — [biomech/SPEC.md](biomech/SPEC.md) (S1-T14) | — implemented in S1-T15 |
+| Asymmetry full-scale threshold (`SI_FULL_SCALE`) + reference-bound calibration | biomech SPEC §13 open items | 15%; provisional bounds |
 | Prediction model + CI method | prediction session (stage 2+) | linear regression stub |
 | Insight rule catalogue + thresholds | insights session (stage 2+) | 2 starter rules |
 | Final UI design | **stage 3** frontend session (`mockup/`) | stage-2 crude disposable UI |
