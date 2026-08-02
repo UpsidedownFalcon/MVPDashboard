@@ -1,0 +1,82 @@
+# Stage-1 services: redis + ingest + api. db and caddy are defined but inactive
+# until stage 2 (profiles: ["stage2"]). All wiring comes from the root .env.
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "no"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    # no host port: internal only (see redis-debug below for local poking)
+
+  # `docker compose --profile debug up -d` exposes redis on 127.0.0.1:6379
+  # for redis-cli poking without ever opening it by default.
+  redis-debug:
+    image: alpine/socat
+    profiles: ["debug"]
+    command: TCP-LISTEN:6379,fork,reuseaddr TCP:redis:6379
+    ports:
+      - "127.0.0.1:6379:6379"
+    depends_on:
+      - redis
+
+  ingest:
+    build: ./backend
+    command: python -m ingest.main
+    env_file: .env
+    ports:
+      - "${UDP_PORT}:${UDP_PORT}/udp"
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  api:
+    build: ./backend
+    command: uvicorn api.main:app --host 0.0.0.0 --port ${API_PORT}
+    env_file: .env
+    ports:
+      - "127.0.0.1:${API_PORT}:${API_PORT}"
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,os;urllib.request.urlopen(f\"http://127.0.0.1:{os.environ['API_PORT']}/api/health/live\")"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # --- stage 2+ (inactive until then) -----------------------------------------
+  db:
+    image: timescale/timescaledb:latest-pg17
+    profiles: ["stage2"]
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    # no host port: internal only
+
+  caddy:
+    image: caddy:2
+    profiles: ["stage2"]
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./frontend/dist:/srv:ro
+      - caddy_data:/data
+    restart: unless-stopped
+    depends_on:
+      - api
+
+volumes:
+  db_data:
+  caddy_data:
