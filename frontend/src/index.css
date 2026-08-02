@@ -1,0 +1,5 @@
+/* Crude stage-2 UI: browser defaults, just readable. */
+body {
+  font-family: system-ui, sans-serif;
+  margin: 12px;
+}
