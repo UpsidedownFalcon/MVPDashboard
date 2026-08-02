@@ -29,16 +29,16 @@ FS = 600.0
 
 
 class FakeRedis:
-    """Just enough of redis.asyncio for the restorer: get() and aclose()."""
+    """Just enough of redis.asyncio for the restorer: mget() and aclose()."""
 
     def __init__(self, values: dict[str, bytes] | None = None) -> None:
         self.values = values or {}
         self.gets: list[str] = []
         self.closed = False
 
-    async def get(self, key: str):
-        self.gets.append(key)
-        return self.values.get(key)
+    async def mget(self, *keys):
+        self.gets.extend(keys)
+        return [self.values.get(k) for k in keys]
 
     async def aclose(self) -> None:
         self.closed = True
@@ -147,7 +147,7 @@ async def test_missing_snapshot_and_redis_failure_are_survivable() -> None:
     assert restorer.restored == 0
 
     class Broken(FakeRedis):
-        async def get(self, key: str):
+        async def mget(self, *keys):
             raise ConnectionError("redis down")
 
     registry2 = Registry(max_devices=5)

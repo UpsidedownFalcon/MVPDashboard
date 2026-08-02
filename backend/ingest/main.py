@@ -39,7 +39,12 @@ def _config_echo(settings) -> str:
 
 
 class BiomechRestorer:
-    """Restores a device's warm-restart snapshot whenever the device appears.
+    """Seeds a device's biomech state from Redis whenever the device appears.
+
+    Two independent things, both fetched here because both are needed before
+    the first tick: the device's last-known-good calibration (`biomech:cal`,
+    TTL of days — SPEC §3.8) and its warm-restart session snapshot
+    (`biomech:state`, TTL 2xSESSION_GAP_S — SPEC §7.4).
 
     Per DEVICE, not per process start (biomech SPEC §7.4). Devices are created
     on first packet and released again — evicted when silent past SESSION_GAP_S,
@@ -66,6 +71,7 @@ class BiomechRestorer:
         self._client = client
         self._tasks: set[asyncio.Task] = set()
         self.restored = 0
+        self.carried = 0
 
     def device_added(self, device) -> None:
         """Registry callback (synchronous): kick off the fetch, never block."""
@@ -78,20 +84,32 @@ class BiomechRestorer:
         import orjson  # noqa: PLC0415
 
         from common import redis_keys  # noqa: PLC0415
+        dev = device.device_id
         try:
-            raw = await self._client.get(redis_keys.biomech_state(device.device_id))
+            cal_raw, state_raw = await self._client.mget(
+                redis_keys.biomech_cal(dev), redis_keys.biomech_state(dev))
         except Exception as exc:  # noqa: BLE001
             log.warning("device %d: snapshot fetch failed (%s) — fresh session",
-                        device.device_id, exc)
+                        dev, exc)
             return
-        if not raw:
-            return
-        ok = biomech.restore(device.user_state, orjson.loads(raw), self._limbs,
-                             time.time(), self._session_gap_s)
-        if ok:
+        # Calibration first, so the session starts on last-known-good values
+        # rather than defaults and only refines from there (SPEC §3.8). This is
+        # a different key from the session snapshot on purpose: the snapshot is
+        # discarded after SESSION_GAP_S, which is the very case — an athlete
+        # returning the next day — where carry-over is what stops m4/m5 running
+        # on an uncorrected gain mismatch.
+        if cal_raw:
+            n = biomech.apply_carried_calibration(
+                device.user_state, orjson.loads(cal_raw), self._limbs)
+            if n:
+                self.carried += 1
+                log.info("device %d: carried over calibration for %d sensor(s)",
+                         dev, n)
+        if state_raw and biomech.restore(device.user_state, orjson.loads(state_raw),
+                                         self._limbs, time.time(),
+                                         self._session_gap_s):
             self.restored += 1
-            log.info("device %d: biomech session restored from snapshot",
-                     device.device_id)
+            log.info("device %d: biomech session restored from snapshot", dev)
 
     async def close(self) -> None:
         for task in list(self._tasks):

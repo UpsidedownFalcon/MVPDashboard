@@ -248,27 +248,48 @@ also destroys jerk (a flat top has zero derivative). **This belongs in the hardw
 ±16 g is fine for thigh sensors and all strength training, but marginal on the shank for
 running and jumping.** Gyro ±2000 °/s is adequate everywhere except kicking. **[L]**
 
-### 3.8 Calibration — not required for correctness, but 15 s is worth taking
+### 3.8 Calibration — AUTOMATIC, so every session runs calibrated
 
 **Nothing in this spec needs calibration to be correct.** There is no gravity vector to estimate,
 no axis to align, no orientation to initialise — that is the whole point of §3.2–§3.4, and the
-system must work with zero setup. **Calibration is therefore OPTIONAL**, with defaults `k = 1`,
-`gyro_bias = 0`, `σ = 0.035 m/s²`; a trainer who skips it gets a fully working system.
+system works with zero setup on defaults `k = 1`, `gyro_bias = 0`, `σ = 0.035 m/s²`.
 
 But a still-stand does measure three things cheaply, and **one of them matters more than it
 looks**: `m4` and `m5` are **inter-sensor ratios**, so any per-sensor gain mismatch lands
-directly on them as a bias that no amount of downstream processing can remove.
+directly on them as a bias that no amount of downstream processing can remove. **User decision
+(supersedes the §13 open item 8 deferral): calibration is automatic and always on.** There is no
+trainer-visible routine, no instruction to the athlete, and no API route — the athlete stands
+still at some point in almost every session, so the model simply watches for it.
 
-**Routine (total 18 s, within your 20 s budget):**
+**Trigger — automatic still-detection, per sensor:**
 
-| Window | Action |
+| Stage | Rule |
 |---|---|
-| 0–3 s | **Discard** — power-on transients (your specification) |
-| 3–18 s | Athlete told: **"stand still for 15 seconds"** |
-| **5–15 s** | **The 10 s actually used** — skips settling at the start and any early fidget at the end |
+| First **3 s** of a sensor's streaming | **Discarded** — power-on transients |
+| Acceptance, per tick | `mean\|ω\| < 5 °/s` **and** `\|mean\|a\| − 9.81\| < 2%` — the rejection guards below, used as the acceptance test |
+| Window | **10 s of *continuous* stillness**; any failing tick resets the accumulation to zero |
+| Scope | **Per sensor, independent** — sensors settle at different moments and calibrate at different moments |
+
+The guards run on the **calibrated** magnitudes — what the pipeline actually carries. For a
+sensor on defaults (`k = 1`) that is exactly the raw test; for one already running carried-over
+values it tests the *residual* error, which is what lets carry-over be refined instead of
+locking a corrected sensor out of ever measuring again. Measured corrections **compose** with
+what is already applied (`k_total = k_applied · 9.81 / mean|a_calibrated|`).
+
+**Running sums, never samples.** 10 s × 600 Hz × 4 sensors is ~2 MB per device to produce three
+scalars, and all three are *exact* functions of `Σ|a|`, `Σω` and `Σ|a|²`:
+`k = 9.81/mean|a|`, `gyro_bias = mean(ω)`, `σ = √(E|a|² − (E|a|)²)`. Only the sums are kept.
 
 **Stand still, not "some motions."** All three products come from stillness; a motion routine
 would add nothing and could not be standardised across running vs lifting users.
+
+**Start calibrated, then refine (`biomech:cal:{device_id}`, BACKEND_SCHEMA §4).** On session
+start the device's **last-known-good** calibration is loaded from a dedicated Redis key with a
+TTL of days, keyed on **limb name** and never on slot index, and applied immediately — then
+upgraded in place when a fresh still window lands. This is deliberately **not** the §7.4 session
+snapshot: that one is discarded after `SESSION_GAP_S`, which is exactly the case where carry-over
+matters (the athlete came back the next day). **Only a device with no history ever runs on
+defaults.**
 
 **What it measures** (all orientation-free — `|a|` at rest is `|g|` regardless of how the sensor
 sits): **[V]** measured on the still segment of `squats.bin`:
@@ -287,22 +308,29 @@ against a still-standing `|ω|` of 3–5 °/s is 5–10% of the low-end signal.
 **Validity guards — reject rather than bake in a bad correction:**
 - `|mean(|a|) − 9.81| > 2%` ⇒ athlete was not still, or sensor faulty ⇒ **reject, keep defaults**.
 - `mean(|ω|) > 5 °/s` ⇒ athlete moved ⇒ **reject**.
-- `k` outside `[0.95, 1.05]` ⇒ **reject**.
-- On rejection: flag `cal_failed`, keep last-known-good (or defaults), and let the UI offer a retry.
+- `k` outside `[0.95, 1.05]` ⇒ **reject**. Under automatic detection the first two are the
+  per-tick acceptance test, so this one bites on the *composed* result — a carried-over `k` that
+  has itself drifted compounding with this session's residual.
+- On rejection: flag `cal_failed`, keep last-known-good (or defaults), **clear the window and keep
+  seeking**. There is nothing for the UI to retry: detection never stops.
 
 **What calibration must NOT attempt:** orientation, axis alignment, or limb assignment. Those are
 forbidden by §1.1 and are exactly the failure mode of the stale model (§3.2).
 
 **Persistence.** Accel gain is stable across sessions; gyro bias drifts with temperature.
-Recompute per session when available, and carry the last-known-good values as fallback. Persisted
-in the §7.4 snapshot, keyed on the sensor triple — never on slot index.
+Recompute per session when a still window lands, and carry the last-known-good values as
+fallback. Two keys, deliberately: the §7.4 snapshot (same session, TTL `2×SESSION_GAP_S`) and
+`biomech:cal:{device_id}` (across sessions, TTL days). A new session **demotes** its measured
+values to carried and starts the search again — including the 3 s discard. Both are keyed on
+limb name, never on slot index.
 
-**Streaming during calibration.** The 60 Hz ticker **keeps emitting throughout** the 18 s routine,
-using defaults, flagged `uncalibrated`. When calibration lands, corrections apply from the next
-tick — a visible step of up to ~0.5% in `m1`/`m3` and rather more in `m4`/`m5` if sensor gains
-were mismatched. This is accepted rather than hidden: the alternative (suppressing output for
-18 s) looks like a dead device. The `uncalibrated` → calibrated transition is in `flags`, so the
-UI can mark the discontinuity rather than presenting it as a change in the athlete.
+**Streaming during calibration.** The 60 Hz ticker **keeps emitting throughout**, using whatever
+is currently applied. When a window lands, corrections apply from the next tick — a visible step
+of up to ~0.5% in `m1`/`m3` and rather more in `m4`/`m5` if sensor gains were mismatched. This is
+accepted rather than hidden: the alternative (suppressing output) looks like a dead device. The
+transition is in `flags` — `uncalibrated` (defaults), `carried_over` (last session's values),
+neither (measured this session) — so the UI can mark the discontinuity rather than presenting it
+as a change in the athlete.
 
 `m4`'s transmission baseline `R_base` is **not** part of this routine — it requires *movement*
 representative of the actual activity, so it self-learns from the first 60 s of movement (§5.4).
@@ -847,11 +875,12 @@ is O(1) scalars, so persisting it is cheap. **Confirmed required by the user.**
 | `accL`, `accR` | float | `m5` decaying load accumulators |
 | `R_base`, `move_time_s` | float | `m4` baseline + the 60 s lock progress |
 | `session_started_at`, `last_tick_at` | float (unix s) | drives the `SESSION_GAP_S` decision on restore |
-| `cal[(device_id, source_id, sensor_id)]` | 5 × float | per sensor: `k`, `gyro_bias[3]`, `sigma` (§3.8) |
-| `schema_version` | int | reject-and-restart on mismatch |
+| `cal[limb_name]` | 5 × float | per sensor: `k`, `gyro_bias[3]`, `sigma` (§3.8) |
+| `cal_src[limb_name]` | str | `default` / `carried` / `measured` — calibration provenance (§3.8) |
+| `schema_version` (`v`) | int | reject-and-restart on mismatch |
 
-🚩 **Calibration MUST be keyed on the sensor triple `(device_id, source_id, sensor_id)`, never on
-the slot index.** Slots are assigned dynamically on first packet (§7.2), so if devices reconnect
+🚩 **Calibration MUST be keyed on the limb name (equivalently the sensor triple it is mapped
+from), never on the slot index.** Slots are assigned dynamically on first packet (§7.2), so if devices reconnect
 in a different order after a restart, slot-keyed calibration would silently apply the wrong
 sensor's gain and bias — and since the corrections are small (0.5%), the result would look
 plausible rather than obviously wrong. Slot index is an implementation detail of the batch layout
@@ -929,9 +958,12 @@ Any individual flag must show the component panel that drove it (§2).
 1. **`m` entries nullable** (§8, warm-up, saturation): `"m":[42.2, 48.3, 24.2, 0.0, null]`. The
    DDL already permits it (`m1..m5` nullable `REAL`); `metrics_1m`'s `avg()` skips NULLs.
 2. **Range 0–100**, not the stub's 0–1 — frontend axis bounds must change with the model.
-3. **`Metrics` gains `flags: frozenset[str]`** and **`raw: dict[str,float]`** (signed `R`,
-   `R_base`, signed USI, `dose`, per-tick `W`, pre-normalisation values) — diagnostics only,
-   published to `biomech:diag:{device_id}`, never written to `metrics`. Flag vocabulary:
+3. **`Metrics` gains `flags: frozenset[str]`** and **`raw: dict[str,float]`** — diagnostics only,
+   published to `biomech:diag:{device_id}`, never written to `metrics`. `raw` carries the signed
+   `R`, `R_base`, signed `usi_pct`, `dose`, `move_t`, `intensity`, `a_int`, `w_int`, `sat_frac`,
+   `m1_lo`, `demand`, `degradation`, and the **per-tick noise weight `W`** — `W` is there
+   specifically because a constant `1.0` is the visible signature of the §5.5 bug (weighting
+   applied to the accumulators instead of per tick). Flag vocabulary:
 
    | Flag | Meaning |
    |---|---|
@@ -940,8 +972,9 @@ Any individual flag must show the component panel that drove it (§2).
    | `no_shank` | `m1` fell back to thigh sensors |
    | `saturated` | >2.6% clipped samples; `m1`/`m2` suppressed (§3.7) |
    | `degraded_sensors` | device streaming <4 sensors (§8) |
-   | `uncalibrated` | running on default `k`/`bias`/`σ` (§3.8) |
-   | `cal_failed` | a calibration attempt hit a validity guard and was rejected |
+   | `uncalibrated` | at least one sensor running on default `k`/`bias`/`σ` — no history and no still window yet (§3.8) |
+   | **`carried_over`** | **at least one sensor running last-known-good values from a PREVIOUS session (`biomech:cal:{dev}`), applied but not measured on this athlete today (§3.8)** |
+   | `cal_failed` | a calibration attempt hit a validity guard and was rejected; last-known-good stands and detection continues |
    | **`unvalidated`** | **`m4`/`m5` — synthetic fixtures only, no real-data validation (§11.1). Set for the whole of stage 1.** |
 
 4. **`ingest:stats` gains `sat_count`** per sensor (§3.7).
@@ -950,12 +983,15 @@ Any individual flag must show the component panel that drove it (§2).
    operational behaviour a deployment may need to tune, and the project rule is one-place config.
    `DOSE_EXPONENT`, half-lives and reference bounds stay file-local — those are model parameters
    that must not drift per deployment or the numbers stop being comparable.)*
-6. **`state` gains an optional calibration block** (§3.8), per sensor — `k` (accel gain),
-   `gyro_bias` (3-vector), `sigma` (accel noise). Absent ⇒ defaults `1.0 / (0,0,0) / 0.035`.
-   `compute()`'s signature is unchanged; calibration is passed in `state`, not as an argument.
-   A `calibrate(frames_window) -> CalibrationResult | None` helper is added alongside
-   `compute()`; it returns `None` on any validity-guard failure (§3.8) so the caller keeps
-   the previous values. Flags gain `cal_failed`, `uncalibrated`.
+6. **`state` gains a calibration block** (§3.8), per sensor — `k` (accel gain), `gyro_bias`
+   (3-vector), `sigma` (accel noise), plus each sensor's provenance
+   (`default`/`carried`/`measured`). Absent ⇒ defaults `1.0 / (0,0,0) / 0.035`.
+   **`compute()`'s signature is unchanged: it performs still-detection and calibration itself**,
+   in `state`, with no argument and no caller involvement. `calibrate(frames_window) ->
+   dict[limb, Calibration] | None` remains alongside it as the batch form for a caller holding a
+   complete window; it returns `None` on any validity-guard failure. Flags gain `uncalibrated`,
+   `carried_over`, `cal_failed`. The carry-over key `biomech:cal:{device_id}` is
+   read/written by ingest only (BACKEND_SCHEMA §4) — **no API route**.
 
 ---
 
@@ -1022,13 +1058,17 @@ presented to a trainer as a finding — only as a trend with the `unvalidated` f
    does not fall merely because sensors are missing.
 10. **Held ticks** — empty `frames` repeats previous `Metrics`, accumulates no dose.
 11. **Session reset** — a >300 s gap zeroes `dose`/`R_base`; a 3 s gap does not.
-12. **Calibration correctness** — synthetic sensors given known gain/bias errors ⇒ `calibrate()`
-    recovers them within 0.1%, and `m5` bias caused by a deliberate 3% L/R gain mismatch drops
-    to <0.5 points after correction.
+12. **Calibration correctness** — synthetic sensors given known gain/bias errors ⇒ the running
+    sums recover them within 0.1%, and `m5` bias caused by a deliberate 3% L/R gain mismatch
+    drops to <0.5 points after correction. *(The 3% is applied as ±1.5% per side: a single
+    sensor reading 3% off gravity is indistinguishable from a faulty one and is correctly
+    refused by the acceptance guard — which test 13 asserts.)*
 13. **Calibration rejection** — a "still" window containing movement (`|ω|` > 5 °/s), or a
-    sensor reading `|a|` = 8.0 m/s², must return `None` and leave defaults in place.
+    sensor reading `|a|` = 8.0 m/s², must leave the previous values in place: `calibrate()`
+    returns `None`, and automatic detection never accepts the window.
 14. **Uncalibrated path** — the full golden-value suite (above) must pass with **no calibration
-    applied**; calibration is optional and must never be load-bearing for correctness.
+    applied**; calibration is automatic but must never be load-bearing for correctness, and a
+    device with no history that never stands still has to keep working on defaults.
 15. **Throughput guard** (`pytest -k bench`) — fully batched `compute()` for 5 devices must stay
     **under 2 ms per tick** (measured 381 µs, §7.1), asserting the batching rules survive
     refactoring. A per-limb-loop regression would show up as ~5 ms.
@@ -1059,6 +1099,14 @@ presented to a trainer as a finding — only as a trend with the `unvalidated` f
 25. **Noise-weighting efficacy** — assert `W < 0.7` when per-tick load is at the noise floor and
     `W > 0.99` during movement; a `W ≡ 1` implementation (weighting applied to the accumulator
     instead of per tick) must fail (§5.5).
+26. **Still-window detection** — 15 s of stillness calibrates with no trainer action, and lands
+    at ~13 s (3 s discard + 10 s window). A window containing movement, one containing rotation
+    above 5 °/s, a sensor stuck at `|a|` = 8.0, and ten *discontinuous* still seconds must all
+    leave the sensor uncalibrated (§3.8).
+27. **Carry-over** — a session that is movement from the first tick (so no window can land) still
+    runs on last-known-good values, flagged `carried_over` and never `uncalibrated`; a later
+    still window replaces them and clears the flag; a session reset demotes `measured` back to
+    `carried` rather than to defaults (§3.8).
 
 **Live iteration (S1-T15 step 4):** on `/debug` with real wearables, confirm standing still ≈ 0,
 walking clearly above zero, and the ordering `jump > run > squat > walk > still` on `m1`. Any
@@ -1082,7 +1130,7 @@ S1-T15 step 5.
 | Linear dose | Power-law dose (exponent 3) | Bone loading is `magnitude^m × cycles`, m ≈ 2–4 (§5.3) |
 | Classic Symmetry Index | wUSI | SI fails 5-axiom benchmark; wUSI handles the noise floor (§5.5) |
 | Windows/forecasts inside the model | DB's job (continuous aggregates) | Stage-2 architecture (TRD §6) |
-| Verified physical mounting axes required | Calibration **optional**; system correct without it | Falls out of orientation-free design. The optional 15 s still-stand measures gain/bias/noise only — never orientation (§3.8) |
+| Verified physical mounting axes required | Calibration **automatic**; system correct without it | Falls out of orientation-free design. Automatic still-detection measures gain/bias/noise only — never orientation — and carries last-known-good across sessions (§3.8) |
 
 Retained: mean-not-sum for dose, sample-rate independence, and the shank/thigh + left/right
 topology.
@@ -1101,7 +1149,7 @@ topology.
 | 5 | UI claims language (§2) — "Injury Risk" as a product name vs. the evidence on composite validity | stage 3 frontend session | Flagged for your decision |
 | 6 | Confirm no device ships a different full-scale range | before multi-device trials | ±16 g / ±2000 °/s assumed (user: **keeping ±16 g**) |
 | 7 | ~~Session-state persistence~~ | — | **CLOSED — user approved.** Specified as required in §7.4 (1 Hz Redis snapshot, ~200 B/device, decay applied on restore) |
-| 8 | Calibration UX — who triggers it, and how the athlete is told to stand still (§3.8). The routine is optional and the system works without it | stage 2/3 frontend | Backend side specified; **user confirmed calibration is in** |
+| 8 | ~~Calibration UX — who triggers it, and how the athlete is told to stand still~~ | — | **CLOSED — user decision, supersedes the deferral.** Nobody triggers it: automatic still-detection, every session, with last-known-good carried across sessions (§3.8). The UI's only job is to render `uncalibrated` / `carried_over` / `cal_failed` and mark the step change |
 | 9 | Slot-table sizing: `MAX_DEVICES` (5) is fixed at startup (§7.2). Raising it needs an ingest restart — acceptable for MVP | post-MVP | Devices beyond the cap are dropped and counted |
 
 ### References

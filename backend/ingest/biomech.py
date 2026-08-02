@@ -36,6 +36,10 @@ from scipy.signal import lfilter
 
 from common.scaling import (
     ACCEL_MS2_PER_COUNT,
+    CAL_K_MAX,
+    CAL_K_MIN,
+    CAL_MAX_G_ERROR,
+    CAL_MAX_ROTATION_DPS,
     DEFAULT_CALIBRATION,
     GRAVITY_MS2,
     GYRO_DPS_PER_COUNT,
@@ -94,6 +98,20 @@ M5_FULL_SCALE_USI = 0.18     # from Delgado-Garcia 2025 (bilateral tibial
 
 # How long a frozen m4/m5 stays held before going None + `partial`.
 STALE_TIMEOUT_S = 20.0
+
+# --- automatic calibration (SPEC Section 3.8) ---
+# There is no trainer-triggered routine: every session calibrates itself the
+# moment the athlete happens to stand still for long enough, per sensor and
+# independently, so sensors settle at whatever moment each one goes quiet.
+CAL_DISCARD_S = 3.0          # power-on transients, discarded per SPEC 3.8
+CAL_WINDOW_S = 10.0          # continuous stillness required, per sensor
+CAL_MAX_GAP_S = 0.25         # empty ticks tolerated inside a still window: a
+                             # dropped packet is not evidence the athlete moved,
+                             # but a real dropout means the gap is unverified
+# Last-known-good carry-over lives for weeks: accel gain is stable across
+# sessions (SPEC 3.8), so a device that has ever calibrated should never run on
+# defaults again. Gyro bias drifts with temperature and is re-measured anyway.
+CAL_CARRY_TTL_S = 30 * 24 * 3600
 
 # --- composite (SPEC Section 6.1) ---
 DEMAND_MAX_W, DEMAND_MIN_W = 0.60, 0.40
@@ -193,6 +211,23 @@ class _Sess:
         self.idx = {limb: i for i, limb in enumerate(limbs)}
         self.roles = [limb_role(limb) for limb in limbs]
         self.cal: dict[str, Calibration] = {limb: DEFAULT_CALIBRATION for limb in limbs}
+        # Where each limb's calibration came from: 'default' (nothing known),
+        # 'carried' (last-known-good from a previous session) or 'measured'
+        # (a still window landed this session). Drives the uncalibrated /
+        # carried_over flags, which is how the UI tells a step change in the
+        # numbers apart from a change in the athlete (SPEC Section 3.8).
+        self.cal_src: list[str] = ["default"] * n
+        self.cal_failed = np.zeros(n, dtype=bool)
+        # Still-window detection: running sums only. 10 s x 600 Hz x 4 sensors
+        # of raw samples is ~2 MB per device to produce three scalars that are
+        # exact functions of these sums (SPEC Section 3.8).
+        self.cal_age = np.zeros(n)       # streaming time since the session began
+        self.cal_dur = np.zeros(n)       # continuous stillness accumulated
+        self.cal_gap = np.zeros(n)       # time with no samples inside a window
+        self.cal_n = np.zeros(n)         # samples in the window
+        self.cal_s1 = np.zeros(n)        # sum |a|
+        self.cal_s2 = np.zeros(n)        # sum |a|^2
+        self.cal_sw = np.zeros((n, 3))   # sum w (3-vector)
         # Role index sets and the calibration-derived scalars are fixed for the
         # life of the session, so they are resolved once here rather than being
         # rebuilt 60 times a second.
@@ -246,8 +281,80 @@ class _Sess:
         self.bias_vec = np.array([self.cal[limb].gyro_bias
                                   for limb in self.limbs])[None, :, :]
         self.sigma_mean = float(np.mean([self.cal[limb].sigma for limb in self.limbs]))
-        self.all_default = all(self.cal[limb] is DEFAULT_CALIBRATION
-                               for limb in self.limbs)
+
+    # --- automatic calibration (SPEC Section 3.8) ---------------------------
+
+    def cal_clear(self, i: int) -> None:
+        """Stillness broke (or a window closed): start the next one from zero."""
+        self.cal_dur[i] = 0.0
+        self.cal_gap[i] = 0.0
+        self.cal_n[i] = 0.0
+        self.cal_s1[i] = 0.0
+        self.cal_s2[i] = 0.0
+        self.cal_sw[i] = 0.0
+
+    def finish_calibration(self, i: int, limb: str) -> None:
+        """Turn one sensor's running sums into k / gyro_bias / sigma.
+
+        All three SPEC Section 3.8 outputs are exact functions of the sums, so
+        nothing is lost by never holding the samples:
+            k     = 9.81 / mean|a|      gain
+            bias  = mean(w)             gyro zero offset
+            sigma = sqrt(E|a|^2 - E|a|^2)   accel noise SD
+
+        The sums were taken on the CORRECTED signal, so the results compose
+        with whatever was already applied rather than replacing it -- that is
+        what lets a sensor running carried-over values refine them instead of
+        measuring its own correction as an error.
+        """
+        n = self.cal_n[i]
+        prev = self.cal[limb]
+        mean_a = self.cal_s1[i] / n
+        var = max(self.cal_s2[i] / n - mean_a * mean_a, 0.0)
+        bias = prev.gyro_bias + self.cal_sw[i] / n
+        k = prev.k * GRAVITY_MS2 / mean_a
+        self.cal_clear(i)
+        if not (CAL_K_MIN <= k <= CAL_K_MAX):
+            # Reject rather than bake in a bad correction: keep last-known-good
+            # (or defaults), flag it, and keep looking for a better window.
+            self.cal_failed[i] = True
+            return
+        self.cal[limb] = Calibration(
+            k=k,
+            gyro_bias=np.asarray(bias, dtype=np.float64),
+            sigma=math.sqrt(var) or prev.sigma,
+        )
+        self.cal_src[i] = "measured"
+        self.cal_failed[i] = False
+        self.refresh_cal()
+
+    def apply_carried(self, cal_map: dict) -> int:
+        """Seed the session from last-known-good values (SPEC Section 3.8).
+
+        Only a device with no history should ever run on defaults, so this is
+        applied the moment a device appears and before the first still window
+        lands. Marked `carried`, never `measured`: the UI has to be able to
+        tell "these numbers were measured on this athlete just now" from
+        "these are last week's numbers, still the best we have".
+        """
+        applied = 0
+        for limb, d in (cal_map or {}).items():
+            i = self.idx.get(limb)
+            if i is None or self.cal_src[i] == "measured":
+                continue
+            self.cal[limb] = Calibration.from_dict(d)
+            self.cal_src[i] = "carried"
+            applied += 1
+        if applied:
+            self.refresh_cal()
+        return applied
+
+    def cal_export(self) -> dict | None:
+        """Everything worth carrying into the next session, or None."""
+        out = {limb: self.cal[limb].as_dict()
+               for i, limb in enumerate(self.limbs)
+               if self.cal_src[i] != "default"}
+        return out or None
 
     # --- SPEC Section 7.4 snapshot ------------------------------------------
     def snapshot(self) -> dict:
@@ -264,6 +371,7 @@ class _Sess:
             # dynamically, so slot-keyed calibration would silently apply the
             # wrong sensor's gain after devices reconnect in a different order.
             "cal": {limb: c.as_dict() for limb, c in self.cal.items()},
+            "cal_src": {limb: self.cal_src[i] for i, limb in enumerate(self.limbs)},
         }
 
     def restore(self, snap: dict, now: float, session_gap_s: float) -> bool:
@@ -281,14 +389,27 @@ class _Sess:
         self.R_base = snap["R_base"]
         self.last_tick_t = last
         self.session_start_t = snap.get("session_start_t")
+        src = snap.get("cal_src") or {}
         for limb, d in (snap.get("cal") or {}).items():
-            if limb in self.cal:
-                self.cal[limb] = Calibration.from_dict(d)
+            i = self.idx.get(limb)
+            if i is None:
+                continue
+            self.cal[limb] = Calibration.from_dict(d)
+            # Snapshots written before cal_src existed carry no provenance;
+            # `carried` is the honest default — it never overclaims that the
+            # values were measured on this athlete during this session.
+            self.cal_src[i] = src.get(limb, "carried")
         self.refresh_cal()
         return True
 
     def reset_session(self) -> None:
-        """New session: drop accumulated load and learned baselines, keep cal."""
+        """New session: drop accumulated load and learned baselines, keep cal.
+
+        Calibration survives as the new session's carry-over (SPEC Section 3.8
+        recomputes per session and keeps last-known-good as fallback), so
+        `measured` is demoted to `carried` and the still-window search restarts
+        from scratch — including the 3 s power-on discard.
+        """
         self.dose = 0.0
         self.accL = self.accR = 0.0
         self.move_t = 0.0
@@ -296,6 +417,12 @@ class _Sess:
         self.m4_hold = self.m5_hold = None
         self.m4_stale = self.m5_stale = 0.0
         self.session_start_t = None
+        for i in range(len(self.limbs)):
+            if self.cal_src[i] == "measured":
+                self.cal_src[i] = "carried"
+            self.cal_clear(i)
+        self.cal_age[:] = 0.0
+        self.cal_failed[:] = False
 
 
 _KEY = "_biomech"
@@ -329,29 +456,99 @@ def set_calibration(state: dict, cal: dict[str, Calibration]) -> None:
     if sess is None:
         return
     for limb, c in cal.items():
-        if limb in sess.cal:
+        i = sess.idx.get(limb)
+        if i is not None:
             sess.cal[limb] = c
+            sess.cal_src[i] = "measured"
     sess.refresh_cal()
 
 
+def apply_carried_calibration(state: dict, cal_map: dict,
+                              limbs: tuple[str, ...]) -> int:
+    """Apply a device's last-known-good calibration from biomech:cal:{dev}.
+
+    Kept separate from the SPEC Section 7.4 session snapshot on purpose: that
+    snapshot is deliberately discarded after SESSION_GAP_S, which is exactly
+    the case where carry-over matters most — the athlete came back tomorrow.
+    """
+    return get_session(state, tuple(sorted(limbs))).apply_carried(cal_map)
+
+
+def calibration_export(state: dict) -> dict | None:
+    """{limb: cal} for the carry-over key, or None if nothing beats defaults."""
+    sess = state.get(_KEY)
+    return sess.cal_export() if sess is not None else None
+
+
 # =============================================================================
-# Calibration (SPEC Section 3.8) -- OPTIONAL; the defaults are a working system.
+# Calibration (SPEC Section 3.8) -- AUTOMATIC, so every session runs calibrated.
+# Nothing here is load-bearing for correctness: the defaults are a fully working
+# system, and a device that never stands still keeps running on them.
 # =============================================================================
 
+def _still_window_update(sess: _Sess, limbs: tuple[str, ...], counts: list[int],
+                         a_cal: np.ndarray, w_cal: np.ndarray,
+                         wmag: np.ndarray, step: float) -> None:
+    """Automatic still-detection + running-sum calibration (SPEC Section 3.8).
+
+    No trainer action and no API route: every session calibrates itself the
+    moment the athlete happens to stand still. Per sensor, the first
+    CAL_DISCARD_S of streaming is thrown away (power-on transients), then each
+    tick is accepted into the window only if it passes SPEC Section 3.8's own
+    rejection guards -- mean|w| below CAL_MAX_ROTATION_DPS and mean|a| within
+    CAL_MAX_G_ERROR of gravity. Anything else breaks stillness and the window
+    restarts. Sensors are independent: they settle at different moments.
+
+    The guards run on the CALIBRATED magnitudes, i.e. what the pipeline
+    actually carries. For a sensor on defaults (k = 1) that is exactly SPEC
+    Section 3.8's raw test; for one already running carried-over values it
+    tests the residual error, which is what lets carry-over be refined instead
+    of locking a corrected sensor out of ever measuring again.
+    """
+    amag = np.sqrt(np.einsum("ijk,ijk->ij", a_cal, a_cal))
+    g_tol = GRAVITY_MS2 * CAL_MAX_G_ERROR
+    for i, limb in enumerate(limbs):
+        if sess.cal_src[i] == "measured":
+            continue                      # done for this session
+        n_i = counts[i]
+        if not n_i:
+            # A missing tick is not evidence the athlete moved, but a real
+            # dropout leaves the window unverified -- tolerate a little, then
+            # start over.
+            sess.cal_gap[i] += step
+            if sess.cal_gap[i] > CAL_MAX_GAP_S:
+                sess.cal_clear(i)
+            continue
+        sess.cal_gap[i] = 0.0
+        sess.cal_age[i] += step
+        if sess.cal_age[i] < CAL_DISCARD_S:
+            continue
+        seg = amag[:n_i, i]
+        mean_a = float(seg.mean())
+        if (abs(mean_a - GRAVITY_MS2) > g_tol
+                or float(wmag[:n_i, i].mean()) > CAL_MAX_ROTATION_DPS):
+            sess.cal_clear(i)
+            continue
+        sess.cal_n[i] += n_i
+        sess.cal_s1[i] += float(seg.sum())
+        sess.cal_s2[i] += float(seg @ seg)
+        sess.cal_sw[i] += w_cal[:n_i, i].sum(axis=0)
+        sess.cal_dur[i] += step
+        if sess.cal_dur[i] >= CAL_WINDOW_S:
+            sess.finish_calibration(i, limb)
+
+
 def calibrate(frames: dict[str, np.ndarray]) -> dict[str, Calibration] | None:
-    """Per-sensor gain/bias/noise from a still-stand window.
+    """Per-sensor gain/bias/noise from an explicit still-stand window.
+
+    The batch form of the same measurement compute() now makes automatically
+    (_still_window_update): kept for callers holding a complete window of
+    frames, and as the executable statement of the validity guards.
 
     Worth doing because m4 and m5 are inter-sensor RATIOS, so gain mismatch
     biases them directly. Returns None if any sensor fails a validity guard --
     rejecting is strictly better than baking in a bad correction.
     """
-    from common.scaling import (
-        CAL_K_MAX,
-        CAL_K_MIN,
-        CAL_MAX_G_ERROR,
-        CAL_MAX_ROTATION_DPS,
-    )
-
     out: dict[str, Calibration] = {}
     for limb, f in frames.items():
         if f is None or len(f) < 2:
@@ -583,11 +780,23 @@ def compute(
     )
     sess.ema_seen |= active
 
+    # Automatic calibration (SPEC Section 3.8). Runs only while some sensor is
+    # still unmeasured, so a fully calibrated device pays nothing per tick. The
+    # ticker keeps emitting throughout: the transition shows up in `flags`, so
+    # the UI can mark the step change instead of presenting it as a change in
+    # the athlete.
+    if not all(src == "measured" for src in sess.cal_src):
+        _still_window_update(sess, limbs, counts, a_raw, w_dps, wmag, step)
+
     flags: set[str] = set()
     if sat_frac > 0.0:
         flags.add("saturated")
-    if sess.all_default:
+    if "default" in sess.cal_src:
         flags.add("uncalibrated")
+    if "carried" in sess.cal_src:
+        flags.add("carried_over")
+    if sess.cal_failed.any():
+        flags.add("cal_failed")
     if n_limbs < 4:
         flags.add("degraded_sensors")
 
@@ -672,7 +881,12 @@ def compute(
                 and bool(active[left_i].all()) and bool(active[right_i].all()))
     m5 = None
     usi_pct = None
-    if sides_ok and moving:
+    # W is evaluated every tick (and published in `raw`) even when the gates
+    # stop it being used: it is the diagnostic that shows the weighting is
+    # applied PER TICK, where the units match, rather than to the accumulators,
+    # where it evaluates to 0.99999 and wUSI silently degenerates to plain USI.
+    w_noise = float("nan")
+    if len(left_i) and len(right_i):
         L = float(tick_mean_adyn[left_i].mean())
         R = float(tick_mean_adyn[right_i].mean())
         # Clamped at 0: the weight goes NEGATIVE once L and R fall below the
@@ -682,6 +896,7 @@ def compute(
         # where sigma is large. 0 is the correct floor: "this tick carries no
         # trustworthy asymmetry information", not "undo the last tick".
         w_noise = max(0.0, 1.0 - 2.0 * sigma**2 / (sigma**2 + L * L + R * R))
+    if sides_ok and moving:
         decay = 0.5 ** (step / ASYM_HALFLIFE_S)
         sess.accL = sess.accL * decay + w_noise * L * step
         sess.accR = sess.accR * decay + w_noise * R * step
@@ -729,6 +944,10 @@ def compute(
             "R": R_now if R_now is not None else float("nan"),
             "R_base": sess.R_base if sess.R_base is not None else float("nan"),
             "usi_pct": usi_pct if usi_pct is not None else float("nan"),
+            # per-tick wUSI noise weight (SPEC Section 10 item 3): near 1 during
+            # movement, well below it at the noise floor. A constant 1.0 here
+            # means the weighting is being applied to the accumulators.
+            "W": w_noise,
             "dose": sess.dose,
             "move_t": sess.move_t,
             "intensity": intensity,

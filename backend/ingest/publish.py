@@ -145,6 +145,15 @@ class Publisher:
             if snap is not None:
                 pipe.set(redis_keys.biomech_state(device_id),
                          orjson.dumps(snap), ex=ttl)
+            # Last-known-good calibration, carried between SESSIONS (SPEC §3.8)
+            # — a separate key with a TTL of days, because the snapshot above is
+            # deliberately discarded after SESSION_GAP_S and that is exactly
+            # when carry-over matters. Only a device with no history should
+            # ever run on defaults.
+            cal = biomech.calibration_export(device.user_state)
+            if cal is not None:
+                pipe.set(redis_keys.biomech_cal(device_id),
+                         orjson.dumps(cal), ex=biomech.CAL_CARRY_TTL_S)
 
     async def stats_loop(self, interval: float = 1.0) -> None:
         while True:

@@ -769,7 +769,176 @@ def test_bench_compute_five_devices():
 
 
 # =============================================================================
-# 13. MAX_DEVICES cap, displacement and eviction (SPEC §7.2, test 20).
+# 13. SPEC §11 tests 16, 17, 19, 25.
+# =============================================================================
+
+def test_trailing_windows_delay_release_not_onset():
+    """SPEC §11 test 16 — a step impact moves m1 on the NEXT tick (§7.1).
+
+    m1 is "peak over the last 1 s", which is a peak-HOLD: the window governs
+    how long a peak persists, not how long it takes to appear. If this ever
+    starts needing several ticks, the 22.6 ms latency budget is wrong and the
+    onset claim in §7.1 no longer holds.
+    """
+    state = _quiet_state()
+    frames, times = make_tick(np.tile([0.0, 9.81, 0.0], (NS, 1)),
+                              np.zeros((NS, 3)), t0=2.0)
+    quiet = compute(frames, state, times)
+
+    step = np.tile([0.0, 9.81, 0.0], (NS, 1))
+    step[:, 1] += 30.0
+    frames, times = make_tick(step, np.zeros((NS, 3)), t0=2.0 + NS / FS)
+    onset = compute(frames, state, times)
+
+    assert onset.m1 > quiet.m1 + 20.0, (
+        f"impact took more than one tick to reach m1 ({quiet.m1:.1f} -> "
+        f"{onset.m1:.1f}); trailing windows must delay release, not onset"
+    )
+
+    # And the release side of the same claim: the peak is held for the 1 s
+    # ring, then released. Without the hold a 5 ms impact would be invisible
+    # on a 60 Hz chart.
+    tail = []
+    for i in range(biomech.PEAK_WINDOW_TICKS):
+        frames, times = make_tick(np.tile([0.0, 9.81, 0.0], (NS, 1)),
+                                  np.zeros((NS, 3)), t0=2.0 + (2 + i) * NS / FS)
+        tail.append(compute(frames, state, times))
+    assert tail[0].m1 == pytest.approx(onset.m1, abs=1e-9), "peak must hold"
+    # The step leaves a decaying baseline transient behind it (tau = 0.35 s), so
+    # this asserts the peak is released, not that it returns to the floor.
+    assert tail[-1].m1 < onset.m1 - 5.0, "peak must be released after ~1 s"
+
+
+def test_bench_per_device_time_stays_flat_with_device_count():
+    """SPEC §11 test 17 — 1, 2, 3, 5 devices all work; per-DEVICE time is flat.
+
+    Per-device batching (§7.2) predicts a flat per-device cost and a total that
+    scales linearly — measured 344 us at 1 device and 332 us at 5. A flat TOTAL
+    would indicate cross-device batching, which this build deliberately does
+    not use, so the assertion is on the per-device figure.
+    """
+    per_device_us = {}
+    for n_dev in (1, 2, 3, 5):
+        states = [{} for _ in range(n_dev)]
+        payload = [make_tick(*_moving(0)) for _ in range(n_dev)]
+        last = []
+        for k in range(120):                  # warm up filters and rings
+            for d in range(n_dev):
+                frames, times = payload[d]
+                last.append(compute({l: f.copy() for l, f in frames.items()},
+                                    states[d],
+                                    {l: t + k * NS / FS for l, t in times.items()}))
+
+        # every device must still produce correct metrics, not just be fast
+        for m in last[-n_dev:]:
+            assert m.m1 is not None and m.m1 > 0.0
+            assert m.m2 is not None and m.m3 is not None
+            assert 0.0 < m.composite <= 100.0
+
+        reps, rounds, off = 60, 5, 200
+        best = float("inf")
+        for _ in range(rounds):
+            t0 = time.perf_counter()
+            for k in range(reps):
+                for d in range(n_dev):
+                    frames, times = payload[d]
+                    compute({l: f.copy() for l, f in frames.items()}, states[d],
+                            {l: t + (off + k) * NS / FS for l, t in times.items()})
+            off += reps
+            best = min(best, (time.perf_counter() - t0) / reps * 1e6)
+        per_device_us[n_dev] = best / n_dev
+        print(f"\n  {n_dev} device(s): {best:.0f} us/tick total, "
+              f"{best / n_dev:.0f} us/device")
+
+    # Generous: this runs alongside the rest of the suite. A per-limb-loop
+    # regression or per-device state leaking across devices would show up as
+    # per-device cost RISING with the device count, not as a small ratio.
+    assert per_device_us[5] < 2.5 * per_device_us[1], (
+        f"per-device cost grew with device count: {per_device_us} us/device"
+    )
+
+
+def test_mid_run_sensor_fault_is_isolated_and_recovers():
+    """SPEC §11 test 19 — one device loses a sensor for 2 s.
+
+    Three things have to hold at once: the affected device degrades per §8
+    (m4/m5 freeze rather than pinning at 100), the other devices are
+    bit-identically unaffected, and on reconnect m1 returns within noise of a
+    slot that stayed live — hold-last fill, no filter re-seeding (§7.2.1).
+    """
+    n_dev = 3
+    states = [{} for _ in range(n_dev)]
+    control: dict = {}
+    fault_from, fault_to = 60 * 70, 60 * 72          # 2 s, after both warm-ups
+    out: list[list] = [[] for _ in range(n_dev)]
+    ctl = []
+
+    for k in range(60 * 75):
+        a, w = _moving(k)
+        t0 = k * NS / FS
+        for d in range(n_dev):
+            frames, times = make_tick(a, w, t0=t0)
+            if d == 0 and fault_from <= k < fault_to:
+                frames["left_shin"] = np.empty((0, 6), dtype=np.float32)
+                times["left_shin"] = np.empty(0, dtype=np.float64)
+            out[d].append(compute(frames, states[d], times))
+        frames, times = make_tick(a, w, t0=t0)
+        ctl.append(compute(frames, control, times))
+
+    # 1. the untouched devices are bit-identical to a run with no fault at all
+    for d in (1, 2):
+        for k in (fault_from - 1, fault_from, fault_to, len(ctl) - 1):
+            got, want = out[d][k], ctl[k]
+            assert got.as_list() == want.as_list(), f"device {d} disturbed at k={k}"
+            assert got.composite == want.composite, f"device {d} disturbed at k={k}"
+
+    # 2. the affected device freezes m4/m5 instead of pinning them
+    before = out[0][fault_from - 1]
+    assert before.m4 is not None and before.m5 is not None
+    for k in range(fault_from, fault_to):
+        m = out[0][k]
+        if m.m4 is not None:
+            assert m.m4 == pytest.approx(before.m4), "m4 moved on a dead sensor"
+        if m.m5 is not None:
+            assert m.m5 == pytest.approx(before.m5), "m5 moved on a dead sensor"
+            assert m.m5 < 100.0
+
+    # 3. on reconnect m1 comes back within noise of the slot that stayed live
+    live = max(m.m1 for m in ctl[fault_to:fault_to + 30])
+    back = max(m.m1 for m in out[0][fault_to:fault_to + 30])
+    assert back <= 1.2 * live, (
+        f"m1 after reconnect was {back:.2f} vs {live:.2f} on a live slot — "
+        "hold-last fill should return it within noise (measured 1.10x)"
+    )
+
+
+def test_noise_weight_is_applied_per_tick_not_to_the_accumulator():
+    """SPEC §11 test 25 — W < 0.7 at the noise floor, > 0.99 while moving.
+
+    The weighting only does anything if it is evaluated PER TICK, where the
+    units match: sigma is a per-sample figure in m/s^2 while the accumulators
+    are in m/s^2*s, so evaluating W against the accumulators gives 0.99999 —
+    an exact no-op, and "wUSI" would silently be plain USI. An implementation
+    with that bug reports W == 1 here and fails the first assertion.
+    """
+    rng = np.random.default_rng(23)
+    still, _ = _drive(lambda k: (np.tile([0.0, 9.81, 0.0], (NS, 1))
+                                 + rng.normal(0, 0.02, (NS, 3)),
+                                 np.zeros((NS, 3))), 120)
+    w_floor = still[-1].raw["W"]
+    assert w_floor < 0.7, (
+        f"W = {w_floor:.3f} at the noise floor; a per-tick weighting must "
+        "suppress it there, and W == 1 means it is being applied to the "
+        "accumulators instead"
+    )
+
+    moving, _ = _drive(lambda k: _moving(k), 120)
+    w_move = moving[-1].raw["W"]
+    assert w_move > 0.99, f"W = {w_move:.4f} during movement; must be ~1"
+
+
+# =============================================================================
+# 14. MAX_DEVICES cap, displacement and eviction (SPEC §7.2, test 20).
 # =============================================================================
 
 def _route(registry, device_id, t, n=4):

@@ -167,7 +167,8 @@ All routes require the auth cookie except `POST /api/auth/login` and liveness
 | `last_seen:sensor:{dev}:{src}:{sen}` | string (unix ms) | ingest → api | per-sensor liveness (detects one dead leg) |
 | `ingest:stats` | hash, rewritten 1s | ingest → api (`/api/health`) | per-sensor `rate_hz`, counters: `recv, crc_fail, late_drop, buf_drop, ticks_out, sat_count` |
 | `biomech:diag:{device_id}` | hash, rewritten 1s, TTL `2×SESSION_GAP_S` | ingest → api (`/api/health`) | biomech diagnostics (SPEC §10 item 3), all values formatted `%.6g`: `flags` (comma-separated), signed transmission ratio `R`, `R_base`, signed **`usi_pct`** (`m5`'s pre-normalisation USI, in percent), `dose`, `move_t`, `intensity`, `a_int`, `w_int`, `sat_frac`, `m1_lo`, per-tick noise weight `W`, `demand`, `degradation` — for tuning the provisional reference bounds against real trial data |
-| `biomech:state:{device_id}` | **string (JSON), rewritten 1s, TTL `2×SESSION_GAP_S`** | ingest → **ingest** | **Warm-restart snapshot** (~200 B, SPEC §7.4). A single JSON document, *not* a hash — it is written and read whole, so one `SET` beats a multi-field `HSET`. Fields: `v` (schema version, currently `1` — a mismatch is rejected and the session starts fresh), `dose`, `accL`, `accR`, `move_t`, `R_base`, `session_start_t`, `last_tick_t` (both unix seconds), and `cal` = `{limb_name: {k, gyro_bias[3], sigma}}` **keyed by limb name, never by slot index** (§7.4). Written fire-and-forget; **read only by ingest**, applying elapsed-time decay before use, and discarded when `now − last_tick_t > SESSION_GAP_S`. Without it an ingest restart silently resets a mid-session athlete to zero accumulated load. |
+| `biomech:state:{device_id}` | **string (JSON), rewritten 1s, TTL `2×SESSION_GAP_S`** | ingest → **ingest** | **Warm-restart snapshot** (~200 B, SPEC §7.4). A single JSON document, *not* a hash — it is written and read whole, so one `SET` beats a multi-field `HSET`. Fields: `v` (schema version, currently `1` — a mismatch is rejected and the session starts fresh), `dose`, `accL`, `accR`, `move_t`, `R_base`, `session_start_t`, `last_tick_t` (both unix seconds), `cal` = `{limb_name: {k, gyro_bias[3], sigma}}` **keyed by limb name, never by slot index** (§7.4), and `cal_src` = `{limb_name: "default"\|"carried"\|"measured"}` (calibration provenance, §5). Written fire-and-forget; **read only by ingest**, applying elapsed-time decay before use, and discarded when `now − last_tick_t > SESSION_GAP_S`. Without it an ingest restart silently resets a mid-session athlete to zero accumulated load. |
+| `biomech:cal:{device_id}` | string (JSON), rewritten 1s, **TTL 30 days** | ingest → **ingest** | **Last-known-good calibration, carried BETWEEN sessions** (SPEC §3.8): `{limb_name: {k, gyro_bias[3], sigma}}`, limb-keyed for the same reason as above. Deliberately *not* the §7.4 snapshot, which is discarded after `SESSION_GAP_S` — that is exactly the case this key exists for, an athlete returning the next day. Read once when a device appears and applied immediately, so a device with any history starts calibrated and only refines from there; upgraded in place when a fresh still window lands. Only a device with no history ever runs on defaults. |
 
 `sat_count` counts samples with any axis within 1% of full scale (±16 g / ±2000 °/s). The
 squats log peaks at 1875 °/s against a 2000 °/s ceiling, so saturation is a live risk on
@@ -186,7 +187,8 @@ def compute(frames: dict[str, np.ndarray], state: DeviceState) -> Metrics:
     tick, already time-aligned across limbs. Called at OUTPUT_HZ per device.
     Returns Metrics(m1..m5, composite), all 0..100. `state` persists across calls
     per device and holds the 1 s derived-scalar ring buffers, filter state, and
-    session accumulators (SPEC §7). No calibration input is required."""
+    session accumulators (SPEC §7). No calibration input is required: compute()
+    detects still windows itself and calibrates in place (SPEC §3.8)."""
 
 @dataclass
 class Metrics:
@@ -196,8 +198,22 @@ class Metrics:
     m4: float | None    # Movement Control 0..100 (None while warming up)
     m5: float | None    # L/R Balance     0..100 (None while warming up)
     composite: float    # Injury Risk     0..100  — never None
-    flags: frozenset[str]     # 'warming_up','no_shank','saturated','degraded_sensors'
+    flags: frozenset[str]     # SPEC §10: 'warming_up','partial','no_shank','saturated',
+                              # 'degraded_sensors','unvalidated', and the three
+                              # calibration states below
     raw:   dict[str, float]   # pre-normalisation diagnostics -> biomech:diag:{dev} (§4)
+
+# Calibration flags (SPEC §3.8, §10) — mutually informative, not exclusive:
+#   'uncalibrated'  at least one sensor is on defaults: no history, no still window
+#   'carried_over'  at least one sensor is running last-known-good values from a
+#                   PREVIOUS session (biomech:cal:{dev}, §4) — applied, but not
+#                   measured on this athlete today
+#   'cal_failed'    a still window was found but its k fell outside [0.95, 1.05];
+#                   the correction was refused, last-known-good stands, and the
+#                   search continues
+# Calibration is automatic (still-detection, no trainer action). The transition
+# to calibrated is a visible step in m1/m3 and more in m4/m5, so the UI marks it
+# from these flags rather than presenting it as a change in the athlete.
 
 # backend/common/scaling.py — raw counts to SI (ICM-45686, verified vs example/squats.bin)
 ACCEL_MS2_PER_COUNT = 9.81 / 2048     # ±16 g  -> m/s²
