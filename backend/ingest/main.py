@@ -19,6 +19,7 @@ import signal
 import time
 from collections import deque
 
+from common import packet
 from common.config import get_settings
 from ingest import biomech
 from ingest.publish import Publisher
@@ -123,6 +124,33 @@ class BiomechRestorer:
         await self._client.aclose()
 
 
+_reject_state = {"bad_len": 0, "warned": False}
+
+
+def _warn_if_all_rejected(registry: Registry) -> None:
+    """Say so, loudly, when datagrams arrive but every one is being discarded.
+
+    A real device streamed for a whole session while decode() rejected all of it
+    on a one-byte length mismatch. The only evidence was a counter in
+    /api/health that nobody was watching, so the symptom read as "device not
+    connected". Malformed traffic that produces no devices is a configuration
+    error, not a data-quality statistic — it belongs in the log.
+    """
+    delta = registry.bad_len - _reject_state["bad_len"]
+    _reject_state["bad_len"] = registry.bad_len
+    if delta and not registry.devices:
+        if not _reject_state["warned"]:
+            log.error(
+                "receiving UDP but decoding NOTHING: %d datagrams rejected as "
+                "wrong-length in the last interval (expected %d bytes). Check the "
+                "sender's frame format against common/packet.py.",
+                delta, packet.DGRAM_SIZE,
+            )
+            _reject_state["warned"] = True
+    elif registry.devices:
+        _reject_state["warned"] = False
+
+
 async def stats_loop(registry: Registry, udp_counters: UdpCounters,
                      interval: float = STATS_INTERVAL_S,
                      evict_after_s: float | None = None) -> None:
@@ -131,6 +159,7 @@ async def stats_loop(registry: Registry, udp_counters: UdpCounters,
         if evict_after_s is not None:
             registry.evict_stale(time.time(), evict_after_s)
         registry.update_rates(interval)
+        _warn_if_all_rejected(registry)
         if registry.devices:
             for line in registry.summary_lines():
                 log.info("%s", line)

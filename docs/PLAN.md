@@ -27,8 +27,10 @@ Everything favors simplicity, stubs with stable interfaces, and configuration ov
 
 ## Confirmed facts (from `example/` + user answers — SET IN STONE)
 
-- **Packet format:** 1 UDP datagram = one 21-byte record, identical to the SD-log format
-  in `example/parse_imu.py`: `device_id u8 | source_id u8 | wire[19]` where
+- **Packet format:** 1 UDP datagram = one **22-byte** record — the 21-byte SD-log record
+  in `example/parse_imu.py` **plus a trailing `soc` byte the log omits** (verified by
+  live capture 2026-08-02; assuming 21 made ingest reject every real packet):
+  `device_id u8 | source_id u8 | wire[19] | soc u8` where
   wire = `sync 0xA5 | header(sensor_id bits0-1, version bits2-7) | timestamp_us u32 LE
   (wraps ~71.6 min) | ax,ay,az,gx,gy,gz i16 LE raw | crc8 (poly 0x07, init 0x00, over wire[1..17])`.
 - **Rate:** UDP streams ~600Hz per sensor (decimated from the ~6.6kHz SD-log rate).

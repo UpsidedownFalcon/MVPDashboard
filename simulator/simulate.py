@@ -37,11 +37,14 @@ STREAM_KEYS = ((0, 1), (0, 2), (1, 1), (1, 2))  # (source_id, sensor_id)
 
 def load_streams(path: Path = SQUATS_BIN) -> dict[tuple[int, int], np.ndarray]:
     """squats.bin -> {(source_id, sensor_id): imu int16[n, 6]} sorted by unwrapped ts."""
+    # squats.bin holds 21-byte SD-LOG records, not the 22-byte UDP datagrams this
+    # simulator transmits — decode_log() reads the file, encode() emits the wire form.
+    size = packet.LOG_REC_SIZE
     raw = np.fromfile(str(path), dtype=np.uint8)
-    n = raw.size // packet.REC_SIZE
-    data = raw[: n * packet.REC_SIZE].tobytes()
-    payloads = [data[i * packet.REC_SIZE : (i + 1) * packet.REC_SIZE] for i in range(n)]
-    batch = packet.decode(payloads)
+    n = raw.size // size
+    data = raw[: n * size].tobytes()
+    payloads = [data[i * size : (i + 1) * size] for i in range(n)]
+    batch = packet.decode_log(payloads)
 
     streams: dict[tuple[int, int], np.ndarray] = {}
     native_hz: dict[tuple[int, int], float] = {}

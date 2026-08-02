@@ -40,7 +40,7 @@ def test_round_trip_encode_decode() -> None:
 
     payloads = [packet.encode(r["device_id"], r["source_id"], r["sensor_id"],
                               r["ts_us"], r["imu6"]) for r in records]
-    assert all(len(p) == packet.REC_SIZE for p in payloads)
+    assert all(len(p) == packet.DGRAM_SIZE for p in payloads)
 
     batch = packet.decode(payloads)
     assert batch.n_in == len(records)
@@ -60,8 +60,9 @@ def test_round_trip_encode_decode() -> None:
 @pytest.mark.skipif(not SQUATS_BIN.exists(), reason="example data not present")
 def test_golden_against_example_decode() -> None:
     raw = SQUATS_BIN.read_bytes()
-    payloads = [raw[i * packet.REC_SIZE:(i + 1) * packet.REC_SIZE] for i in range(GOLDEN_N)]
-    batch = packet.decode(payloads)
+    size = packet.LOG_REC_SIZE  # the SD log has no trailing soc byte
+    payloads = [raw[i * size:(i + 1) * size] for i in range(GOLDEN_N)]
+    batch = packet.decode_log(payloads)
 
     with SQUATS_CSV.open(newline="") as f:
         reader = csv.DictReader(f)
@@ -133,11 +134,56 @@ def test_wrong_length_never_raises() -> None:
 
 
 def test_all_bad_returns_empty_batch() -> None:
-    batch = packet.decode([b"short", b"x" * 22])
+    # 21 bytes is the SD-LOG size and must NOT be accepted as a UDP datagram.
+    batch = packet.decode([b"short", b"x" * packet.LOG_REC_SIZE])
     assert batch.n == 0
     assert batch.n_in == 2
     assert batch.n_bad_len == 2
     assert batch.imu.shape == (0, 6)
+
+
+# --- real-hardware capture -----------------------------------------------------
+
+# Captured verbatim from the wearable on UDP 5010. The pipeline was dark for a
+# whole session because decode() required 21 bytes and the device sends 22; this
+# fixture is the regression guard, so a future edit to DGRAM_SIZE or the offsets
+# fails here rather than in a live session.
+REAL_DATAGRAM = bytes.fromhex(
+    "1e 01 a5 06 8c 06 e4 17 21 03 43 fe 2c 07 01 00 01 00 0a 00 38 1e".replace(" ", "")
+)
+
+
+def test_real_device_datagram_decodes() -> None:
+    assert len(REAL_DATAGRAM) == packet.DGRAM_SIZE == 22
+
+    batch = packet.decode([REAL_DATAGRAM])
+    assert batch.n == 1
+    assert batch.n_bad_len == batch.n_bad_sync == batch.n_bad_crc == 0
+
+    assert int(batch.device_id[0]) == 30
+    assert int(batch.source_id[0]) == 1
+    assert int(batch.sensor_id[0]) == 2
+    assert int(batch.version[0]) == packet.VERSION
+    assert int(batch.ts_us[0]) == 0x17E4068C
+    assert batch.imu[0].tolist() == [801, -445, 1836, 1, 1, 10]
+    assert int(batch.soc[0]) == 30
+
+    # encode() must reproduce the captured bytes exactly, soc included.
+    assert packet.encode(30, 1, 2, 0x17E4068C, [801, -445, 1836, 1, 1, 10],
+                         soc=30) == REAL_DATAGRAM
+
+
+def test_log_record_is_the_datagram_without_soc() -> None:
+    """The SD log is the same record minus the trailing byte (parse_imu.py)."""
+    log_rec = REAL_DATAGRAM[: packet.LOG_REC_SIZE]
+    batch = packet.decode_log([log_rec])
+    assert batch.n == 1
+    assert int(batch.device_id[0]) == 30
+    assert int(batch.ts_us[0]) == 0x17E4068C
+    assert batch.imu[0].tolist() == [801, -445, 1836, 1, 1, 10]
+    assert int(batch.soc[0]) == 0  # absent from the log, reported as 0
+    # ...and the log size must be rejected on the UDP path.
+    assert packet.decode([log_rec]).n_bad_len == 1
 
 
 def test_empty_input() -> None:

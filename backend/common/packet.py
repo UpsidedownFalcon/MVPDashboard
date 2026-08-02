@@ -1,7 +1,10 @@
 """Wire-format decoder/encoder — single source of truth for the UDP packet layout.
 
-One datagram = one 21-byte record (TRD §3), identical to the SD-log record in
-example/parse_imu.py:
+TWO layouts exist and they differ by one byte. Keeping them apart is the whole
+point of this module:
+
+  UDP datagram — 22 bytes (DGRAM_SIZE), what the wearable actually transmits
+  SD-log record — 21 bytes (LOG_REC_SIZE), what example/squats.bin contains
 
     [0]      device_id  (u8)
     [1]      source_id  (u8)  — leg MCU, 0 or 1
@@ -11,9 +14,19 @@ example/parse_imu.py:
         [2..5]   timestamp_us  u32 LE (wraps ~71.6 min, monotonic per source)
         [6..17]  ax ay az gx gy gz  (6 × i16 LE, raw counts)
         [18]     crc8          poly=0x07 init=0x00 MSB-first over wire[1..17]
+    [21]     soc  (u8)  — UDP ONLY; absent from the SD log
 
-decode() is vectorized over a payload batch; encode() is its exact inverse for a
-single record (used by the simulator) — kept in this file so they cannot drift.
+The trailing byte is the "SOC byte" that example/parse_imu.py notes is **not
+logged** to SD. It sat unaccounted for until a live capture from the real device
+showed 22-byte datagrams: decode() required exactly 21 and silently rejected
+every packet as bad_len, so the whole pipeline stayed dark with a healthy device
+streaming. It is decoded and reported but never validated, and nothing here
+depends on its meaning — observed live it varies sample to sample (20..30 over
+two captures), which rules out a device-id echo but does not confirm "state of
+charge" either. Treat the name as the SD-logger's intent, not a verified fact.
+
+decode() reads UDP datagrams; decode_log() reads SD-log records; encode() is the
+exact inverse of decode() — all kept in this file so they cannot drift.
 """
 
 from __future__ import annotations
@@ -23,7 +36,9 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-REC_SIZE = 21
+DGRAM_SIZE = 22  # UDP datagram: log record + trailing soc byte
+LOG_REC_SIZE = 21  # SD-log record (example/squats.bin)
+SOC_OFF = 21
 WIRE_OFF = 2
 WIRE_LEN = 19
 SYNC = 0xA5
@@ -81,6 +96,7 @@ class Batch:
     version: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.uint8))
     ts_us: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.uint32))
     imu: np.ndarray = field(default_factory=lambda: np.empty((0, 6), dtype=np.int16))
+    soc: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.uint8))
     n_in: int = 0
     n_bad_len: int = 0
     n_bad_sync: int = 0
@@ -92,15 +108,24 @@ class Batch:
 
 
 def decode(payloads: list[bytes]) -> Batch:
-    """Decode a batch of UDP payloads. Wrong-length payloads never raise."""
+    """Decode a batch of UDP datagrams (22 B). Wrong-length payloads never raise."""
+    return _decode(payloads, DGRAM_SIZE)
+
+
+def decode_log(payloads: list[bytes]) -> Batch:
+    """Decode SD-log records (21 B, no soc byte) — example/squats.bin only."""
+    return _decode(payloads, LOG_REC_SIZE)
+
+
+def _decode(payloads: list[bytes], rec_size: int) -> Batch:
     n_in = len(payloads)
-    valid = [p for p in payloads if len(p) == REC_SIZE]
+    valid = [p for p in payloads if len(p) == rec_size]
     n_bad_len = n_in - len(valid)
     if not valid:
         return Batch(n_in=n_in, n_bad_len=n_bad_len)
 
-    recs = np.frombuffer(b"".join(valid), dtype=np.uint8).reshape(len(valid), REC_SIZE)
-    wire = recs[:, WIRE_OFF:]
+    recs = np.frombuffer(b"".join(valid), dtype=np.uint8).reshape(len(valid), rec_size)
+    wire = recs[:, WIRE_OFF : WIRE_OFF + WIRE_LEN]
 
     sync_ok = wire[:, 0] == SYNC
     n_bad_sync = int(np.count_nonzero(~sync_ok))
@@ -117,9 +142,16 @@ def decode(payloads: list[bytes]) -> Batch:
         [_i16(wire[:, 6 + 2 * k], wire[:, 7 + 2 * k]) for k in range(6)]
     ).astype(np.int16, copy=False)
 
+    soc = (
+        recs[:, SOC_OFF].copy()
+        if rec_size > SOC_OFF
+        else np.zeros(recs.shape[0], dtype=np.uint8)
+    )
+
     return Batch(
         device_id=recs[:, 0].copy(),
         source_id=recs[:, 1].copy(),
+        soc=soc,
         sensor_id=header & 0x03,
         version=header >> 2,
         ts_us=_u32(wire[:, 2], wire[:, 3], wire[:, 4], wire[:, 5]),
@@ -137,10 +169,11 @@ def encode(
     sensor_id: int,
     ts_us: int,
     imu6,
+    soc: int = 0,
 ) -> bytes:
-    """Build one valid 21-byte datagram (correct CRC) — inverse of decode()."""
+    """Build one valid 22-byte UDP datagram (correct CRC) — inverse of decode()."""
     header = ((VERSION << 2) | (sensor_id & 0x03)) & 0xFF
-    rec = bytearray(REC_SIZE)
+    rec = bytearray(DGRAM_SIZE)
     rec[0] = device_id & 0xFF
     rec[1] = source_id & 0xFF
     rec[2] = SYNC
@@ -151,4 +184,5 @@ def encode(
     for b in rec[WIRE_OFF + CRC_FIRST : WIRE_OFF + CRC_LAST + 1]:
         crc = int(_CRC_TABLE[crc ^ b])
     rec[20] = crc
+    rec[SOC_OFF] = soc & 0xFF
     return bytes(rec)

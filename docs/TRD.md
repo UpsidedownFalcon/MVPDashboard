@@ -77,7 +77,12 @@ VPS IP. Nothing except the stage-2 crude UI is throwaway.
 
 ## 3. Wire protocol — SET IN STONE (verified against `example/`)
 
-One UDP datagram = one 21-byte record = one sample from one sensor:
+One UDP datagram = one **22-byte** record = one sample from one sensor.
+⚠️ The **SD log** (`example/squats.bin`) stores the same record **without** the
+trailing byte, i.e. 21 bytes — `packet.decode()` reads datagrams, `decode_log()`
+reads the file. Verified against a live capture from the real device (2026-08-02);
+the earlier "21 bytes on the wire" reading of `parse_imu.py` was wrong and caused
+every datagram to be rejected as `bad_len` with the device streaming normally.
 
 | Offset | Field | Type | Notes |
 |---|---|---|---|
@@ -88,6 +93,7 @@ One UDP datagram = one 21-byte record = one sample from one sensor:
 | 4–7 | timestamp_us | u32 LE | device-local µs, **wraps every ~71.6 min**, monotonic per source only |
 | 8–19 | ax ay az gx gy gz | 6 × i16 LE | raw counts, unscaled |
 | 20 | crc8 | u8 | poly 0x07, init 0x00, MSB-first, over bytes 3..19 of the datagram (= wire[1..17]) |
+| 21 | soc | u8 | **UDP only, absent from the SD log.** Decoded and reported, never validated; meaning unconfirmed (varies sample to sample) |
 
 Decode/CRC logic is ported from `example/parse_imu.py` (vectorized table CRC).
 Datagrams failing sync or CRC are dropped and counted. Sensor key = `(device_id,
