@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>MVP Dashboard — /debug</title>
+<script src="https://unpkg.com/uplot@1.6.30/dist/uPlot.iife.min.js"></script>
+<link rel="stylesheet" href="https://unpkg.com/uplot@1.6.30/dist/uPlot.min.css">
+<style>
+  :root { color-scheme: dark; }
+  body { background:#111; color:#ddd; font:13px/1.4 system-ui, sans-serif; margin:12px; }
+  h1 { font-size:16px; margin:0 0 10px; }
+  #conn { font-weight:600; }
+  .ok { color:#4c1; } .bad { color:#e33; }
+  .device { border:1px solid #333; border-radius:8px; padding:10px; margin-bottom:14px; }
+  .devhead { display:flex; gap:14px; align-items:center; margin-bottom:6px; flex-wrap:wrap; }
+  .devhead b { font-size:15px; }
+  .badge { padding:1px 8px; border-radius:10px; font-size:12px; }
+  .online  { background:#173; color:#cfc; }
+  .offline { background:#722; color:#fdd; }
+  .held    { background:#640; color:#fda; display:none; }
+  .charts { display:grid; grid-template-columns: 2fr 1fr 1fr 1fr; gap:8px; }
+  .comp { grid-row: span 2; }
+  .chart-title { font-size:11px; color:#999; margin:0 0 2px 2px; }
+  .sensors { font-size:11px; color:#8ab; }
+  .u-legend { display:none; }
+</style>
+</head>
+<body>
+<h1>MVP Dashboard debug viewer — <span id="conn" class="bad">connecting…</span></h1>
+<div id="devices"></div>
+
+<script>
+"use strict";
+const WINDOW_S = 30, OUT_HZ = 60, MAXPTS = WINDOW_S * OUT_HZ + 60;
+const METRICS = ["m1","m2","m3","m4","m5"];
+const panels = new Map();   // dev -> panel
+
+function mkChart(el, title, height, color) {
+  const wrap = document.createElement("div");
+  if (title !== "composite") { const t = document.createElement("div");
+    t.className = "chart-title"; t.textContent = title; wrap.appendChild(t); }
+  el.appendChild(wrap);
+  const opts = {
+    width: 10, height,
+    scales: { x: { time: true }, y: { range: [0, 1] } },
+    axes: [
+      { stroke:"#777", grid:{stroke:"#222"}, ticks:{stroke:"#333"} },
+      { stroke:"#777", grid:{stroke:"#222"}, ticks:{stroke:"#333"} },
+    ],
+    series: [ {}, { stroke: color, width: title === "composite" ? 2 : 1 } ],
+    legend: { show: false }, cursor: { show: false },
+  };
+  const u = new uPlot(opts, [[], []], wrap);
+  return u;
+}
+
+function mkPanel(dev) {
+  const root = document.createElement("div");
+  root.className = "device";
+  root.innerHTML = `
+    <div class="devhead">
+      <b>device ${dev}</b>
+      <span class="badge offline" data-r="badge">offline</span>
+      <span class="badge held" data-r="held">HELD</span>
+      <span data-r="q">q: –</span>
+      <span class="sensors" data-r="sensors"></span>
+    </div>
+    <div class="charts">
+      <div class="comp"><div class="chart-title">composite</div><div data-r="comp"></div></div>
+      ${METRICS.map(m => `<div data-r="${m}"></div>`).join("")}
+    </div>`;
+  document.getElementById("devices").appendChild(root);
+
+  const q = sel => root.querySelector(`[data-r="${sel}"]`);
+  const data = { t: [], c: [], m: METRICS.map(() => []) };
+  const panel = {
+    root, data, dirty: false,
+    badge: q("badge"), held: q("held"), qEl: q("q"), sensorsEl: q("sensors"),
+    comp: mkChart(q("comp"), "composite", 180, "#fa0"),
+    minis: METRICS.map((m, i) => mkChart(q(m), m, 80, "#4af")),
+  };
+  const resize = () => {
+    const w = q("comp").clientWidth || 300;
+    panel.comp.setSize({ width: w, height: 180 });
+    METRICS.forEach((m, i) =>
+      panel.minis[i].setSize({ width: q(m).clientWidth || 150, height: 80 }));
+  };
+  requestAnimationFrame(resize);
+  window.addEventListener("resize", resize);
+  panels.set(dev, panel);
+  return panel;
+}
+
+function onTick(msg) {
+  const p = panels.get(msg.dev) || mkPanel(msg.dev);
+  const d = p.data, t = Date.parse(msg.t) / 1000;
+  d.t.push(t); d.c.push(msg.c);
+  METRICS.forEach((_, i) => d.m[i].push(msg.m[i]));
+  while (d.t.length > MAXPTS) { d.t.shift(); d.c.shift(); d.m.forEach(a => a.shift()); }
+  p.qEl.textContent = `q: ${(msg.q * 100).toFixed(0)}%`;
+  p.held.style.display = msg.q === 0 ? "inline" : "none";
+  p.badge.textContent = "online"; p.badge.className = "badge online";
+  p.dirty = true;
+}
+
+function onStatus(msg) {
+  const p = panels.get(msg.dev) || mkPanel(msg.dev);
+  p.badge.textContent = msg.online ? "online" : "offline";
+  p.badge.className = "badge " + (msg.online ? "online" : "offline");
+}
+
+// redraw at display rate, not per message
+(function raf() {
+  for (const p of panels.values()) {
+    if (!p.dirty) continue;
+    p.dirty = false;
+    p.comp.setData([p.data.t, p.data.c]);
+    METRICS.forEach((_, i) => p.minis[i].setData([p.data.t, p.data.m[i]]));
+  }
+  requestAnimationFrame(raf);
+})();
+
+function connect() {
+  const ws = new WebSocket(`ws://${location.host}/ws/live`);
+  const conn = document.getElementById("conn");
+  ws.onopen = () => { conn.textContent = "live"; conn.className = "ok"; };
+  ws.onclose = () => { conn.textContent = "disconnected — retrying"; conn.className = "bad";
+                       setTimeout(connect, 1000); };
+  ws.onmessage = ev => {
+    const msg = JSON.parse(ev.data);
+    if (msg.type === "tick") onTick(msg);
+    else if (msg.type === "status") onStatus(msg);
+  };
+}
+connect();
+
+// per-sensor Hz from /api/health every 2s
+setInterval(async () => {
+  try {
+    const h = await (await fetch("/api/health")).json();
+    const bySensor = new Map();
+    for (const [k, v] of Object.entries(h.ingest || {})) {
+      const m = k.match(/^sensor:(\d+):(\d+):(\d+):rate_hz$/);
+      if (!m) continue;
+      const dev = m[1];
+      if (!bySensor.has(dev)) bySensor.set(dev, []);
+      bySensor.get(dev).push(`(${m[2]},${m[3]}) ${Math.round(v)}Hz`);
+    }
+    for (const [dev, parts] of bySensor) {
+      const p = panels.get(dev);
+      if (p) p.sensorsEl.textContent = parts.sort().join("  ");
+    }
+  } catch (e) { /* api restarting */ }
+}, 2000);
+</script>
+</body>
+</html>
