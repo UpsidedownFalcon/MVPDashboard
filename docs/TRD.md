@@ -212,7 +212,8 @@ Duration syntax everywhere: `<int><s|m|h|d|w>`.
 - Caddy: serves `frontend/dist`, proxies `/api/*` and `/ws/*` to `api:8000`, auto-TLS.
 - Deploy flow: Windows dev (Docker Desktop/WSL2) → push to GitHub → `deploy/deploy.sh`
   = `ssh vps 'cd app && git pull && docker compose up -d --build'`. `.gitattributes`
-  forces LF for `*.sh`, Caddyfile, `*.sql`.
+  forces LF for `*.sh`, Caddyfile, `*.sql`; `*.pdf` marked binary (auto-detection
+  misclassifies the example PDF as text).
 - Docker UDP: published port via Docker NAT is fine at 12k pkt/s; if drops appear,
   switch ingest to `network_mode: host` (one-line change).
 

@@ -25,7 +25,9 @@ Steps:
 2. `.gitignore`: `.env`, `__pycache__/`, `*.pyc`, `.venv/`, `node_modules/`, `dist/`,
    `.pytest_cache/`, `caddy_data/`.
 3. `.gitattributes`: `* text=auto` + `*.sh text eol=lf`, `*.sql text eol=lf`,
-   `Caddyfile text eol=lf`.
+   `Caddyfile text eol=lf`, `*.pdf binary` (git's text auto-detection misclassifies
+   `example/biometrics_model_rationale.pdf` as text, which would corrupt it on
+   CRLF-normalizing checkouts).
 4. `.env.example` with **every** key + test default from [../TRD.md](../TRD.md) §7
    (DB/JWT keys included now, unused until stage 2/3). Comment each key in one line.
 5. `README.md`: one-paragraph project summary + "read docs/PLAN.md first" + quickstart
