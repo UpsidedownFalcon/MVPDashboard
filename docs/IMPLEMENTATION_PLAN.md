@@ -92,6 +92,9 @@ signups) — don't hand those to unattended agents.
 ```
 MVPDashboard/
   .env.example  .gitattributes  .gitignore  docker-compose.yml  README.md
+  pyproject.toml  uv.lock  .python-version   (uv workspace root: makes
+                `uv run pytest backend/...` work from the repo root; the
+                installable package itself is backend/ — S1-T02)
   docs/  (this suite + tasks/ + biomech/ + ACCEPTANCE.md)
   deploy/(Caddyfile, provision.sh, deploy.sh)
   example/      (existing sample data + parser — read-only reference)

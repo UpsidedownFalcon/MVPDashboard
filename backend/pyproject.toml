@@ -1,0 +1,32 @@
+[project]
+name = "backend"
+version = "0.1.0"
+description = "MVP Dashboard backend: ingest + api services (shared package)"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "redis>=5",
+    "numpy",
+    "pydantic-settings",
+    "orjson",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "httpx",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# Flat layout: common/, ingest/, api/ are top-level importable packages, matching
+# the in-container layout (workdir = backend/, `python -m ingest.main`).
+[tool.hatch.build.targets.wheel]
+packages = ["common", "ingest", "api"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

@@ -1,0 +1,24 @@
+# uv workspace root — exists so `uv run pytest backend/tests/...` works from the
+# repo root (uv only discovers projects in cwd/parents). The installable package
+# is backend/ (see backend/pyproject.toml); this root is not itself a package.
+[project]
+name = "mvpdashboard"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["backend"]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "httpx",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["backend"]
+
+[tool.uv.sources]
+backend = { workspace = true }
