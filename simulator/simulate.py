@@ -108,13 +108,16 @@ class DeviceSim:
     """Emits payloads for one device's 4 streams; pure logic, no sockets."""
 
     def __init__(self, device_id: int, streams: dict[tuple[int, int], np.ndarray],
-                 rate: float, drift_ppm: float, rng: random.Random, start: float) -> None:
+                 rate: float, drift_ppm: float, rng: random.Random, start: float,
+                 dead_sensors: frozenset[tuple[int, int]] = frozenset()) -> None:
         self.device_id = device_id
         self.stats = DeviceStats()
         self._streams: list[_Stream] = []
         # one µs counter per (device, source): both sensors of a leg MCU share it
         source_ts0 = {src: float(rng.randrange(0, 2**32)) for src in (0, 1)}
         for src, sen in STREAM_KEYS:
+            if (src, sen) in dead_sensors:
+                continue          # simulated sensor failure: this stream never sends
             # legs drift apart: source 0 runs fast, source 1 slow by drift_ppm/2 each
             skew = 1.0 + (drift_ppm * 1e-6 / 2.0) * (1 if src == 0 else -1)
             period_s = 1.0 / rate
@@ -162,7 +165,14 @@ async def run(args: argparse.Namespace) -> None:
     loop = asyncio.get_running_loop()
     start = loop.time()
 
-    devices = [DeviceSim(args.base_id + d, streams, args.rate, args.drift, rng, start)
+    dead = frozenset(
+        (int(pair.split(":")[0]), int(pair.split(":")[1]))
+        for pair in (x.strip() for x in args.dead_sensors.split(",")) if pair
+    )
+    if dead:
+        print(f"simulating dead sensors (src,sen): {sorted(dead)}")
+    devices = [DeviceSim(args.base_id + d, streams, args.rate, args.drift, rng, start,
+                         dead_sensors=dead)
                for d in range(args.devices)]
     delayed: list[tuple[float, int, bytes, int]] = []  # (release_time, seq, payload, dev_idx)
     seq = 0
@@ -223,6 +233,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="clock skew (ppm) split between the two sources (legs drift apart)")
     p.add_argument("--seed", type=int, default=None, help="RNG seed for reproducibility")
     p.add_argument("--duration", type=float, default=None, help="stop after N seconds (default: run forever)")
+    p.add_argument("--dead-sensors", default="",
+                   help="simulate sensor failure: comma-separated src:sen pairs that "
+                        "never transmit, e.g. '0:1' or '0:1,0:2'. Exercises the biomech "
+                        "degradation ladder (docs/biomech/SPEC.md §8) on live traffic.")
     return p
 
 

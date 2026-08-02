@@ -27,14 +27,22 @@ docker compose up -d --build
 # 3. feed it data — replay recorded squats as N wearable devices
 uv run python simulator/simulate.py --devices 5
 #    knobs: --loss 5 --reorder 5 --jitter 20 --drift 200 --rate 600 --seed 1
+#    --dead-sensors 0:1     simulate a failed sensor (biomech degradation ladder)
 
 # 4. watch it live
 Start-Process http://localhost:8000/debug
 ```
 
 Every device panel shows the composite + m1..m5 charts at 60Hz, quality %,
-online badge and per-sensor input rates. `GET localhost:8000/api/health` is the
-first place to look when anything misbehaves.
+online badge, active flags and per-sensor input rates. All six metrics are
+**0–100** ([docs/biomech/SPEC.md](docs/biomech/SPEC.md)).
+`GET localhost:8000/api/health` is the first place to look when anything
+misbehaves; it also carries the per-device `biomech` diagnostics block.
+
+Expect **`m4` (control) and `m5` (balance) to be blank at first** — they need
+60 s and 30 s of *movement* respectively before they emit, and they go blank
+again whenever a leg loses a sensor. Blank means "no data", never zero. Both
+carry an `unvalidated` flag: they have no real-data validation yet (SPEC §11.1).
 
 Tests and the stage-1 validation matrix:
 
