@@ -28,6 +28,11 @@ export default function App() {
   )
 }
 
+// Devices offline longer than this vanish from the page entirely (user
+// decision 2026-08-02). The 2s ONLINE/OFFLINE badge flip still shows in the
+// 2-10s window, so brief radio dropouts don't collapse the layout.
+const OFFLINE_HIDE_MS = 10_000
+
 function Devices() {
   const devices = useQuery({
     queryKey: ['devices'],
@@ -41,12 +46,28 @@ function Devices() {
   const live = useLive(ids)
   if (devices.isLoading) return <p>loading devices…</p>
   if (devices.isError) return <p>failed to load devices: {String(devices.error)}</p>
-  if (!devices.data!.length) return <p>no devices yet — start streaming.</p>
+  // useLive's 300ms snapshot re-renders this component, so the age check below
+  // keeps evaluating between the 10s registry refetches.
+  const now = Date.now()
+  const visible = (devices.data ?? []).filter(
+    (d) => d.last_seen != null && now - Date.parse(d.last_seen) <= OFFLINE_HIDE_MS,
+  )
+  const hidden = devices.data!.length - visible.length
+  if (!visible.length)
+    return (
+      <p>
+        no devices online — start streaming.
+        {hidden > 0 && <small> ({hidden} offline device{hidden > 1 ? 's' : ''} hidden)</small>}
+      </p>
+    )
   return (
     <>
-      {devices.data!.map((d) => (
+      {visible.map((d) => (
         <DeviceSection key={d.device_id} device={d} buffer={live[d.device_id]} />
       ))}
+      {hidden > 0 && (
+        <p><small>{hidden} offline device{hidden > 1 ? 's' : ''} hidden</small></p>
+      )}
     </>
   )
 }

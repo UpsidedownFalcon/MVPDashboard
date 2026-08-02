@@ -82,6 +82,14 @@ auto-register on their first packet and appear on `/debug` within seconds.
 
 ### Gotchas
 
+- **Never run the simulator against the production VPS with default IDs.** Its
+  default `--base-id 30` collides with the real wearable fleet (the real device
+  is 30), which mixes simulated rows into a real athlete's history — and
+  `metrics` rows carry no marker to separate them again. For any test against
+  prod: use `--base-id 100` (IDs ≥ 100 are never real hardware), always pass a
+  bounded `--duration`, and delete the test devices' registry/metric rows
+  afterwards. This bit us on 2026-08-02 (devices 30-32 from the S2-T10 WAN
+  check; history wiped as cleanup).
 - **UDP stops arriving after `docker compose up -d` recreates the ingest
   container** (Docker Desktop's UDP port proxy can go stale): run
   `docker compose restart ingest` once and traffic flows again.
