@@ -295,8 +295,8 @@ Everything that connects components lives in **one root `.env`** (template:
 | `OFFLINE_AFTER_S` | 2 | online/offline threshold |
 | `RESET_OFFSET_JUMP_S` | 5 | offset jump ⇒ reboot, reset source buffers (§4 step 3) |
 | `SESSION_GAP_S` | 300 | gap after which biomech resets accumulated load/baselines (biomech SPEC §7); deliberately ≫ `OFFLINE_AFTER_S` |
-| `PAST_WINDOWS` | `5m,30m,2h` | **3 durations; deployment e.g. `1h,1d,3d`** |
-| `FUTURE_HORIZONS` | `10m,30m,1h` | deployment e.g. `1d,3d,1w` |
+| `PAST_WINDOWS` | `5m,30m,2h` | **3 durations. Deployment: `1h,1d,7d` recommended** (1 h ≈ the session scale at 1.3 dose half-lives, 1 d the day, 7 d a training week; 3 d is neither) — [ANALYTICS.md](ANALYTICS.md) §7. Provisional: no multi-day data exists yet |
+| `FUTURE_HORIZONS` | `10m,30m,1h` | ⚠️ **Keep these in production; the earlier `1d,3d,1w` is struck.** Accumulated dose has a 45-min half-life, so by 1 day it has decayed to ~10⁻⁴ and the "forecast" is only "returns to baseline"; the acute term is not forecastable beyond persistence at all. Forecasting this composite a week ahead is not defensible under biomech SPEC §2 — [ANALYTICS.md](ANALYTICS.md) §7 |
 | `PREDICT_INTERVAL_S` / `PREDICT_TRAIN_WINDOW` | 300 / 2h | |
 | `INSIGHT_WARN_THRESHOLD` / `INSIGHT_ALERT_THRESHOLD` | 85 / 92 | composite 0–100. Raised from 70/85 after the SPEC §6.1 rescale: a measured hard interval session reads ~77, so 70 warned during ordinary hard training. At 85 acute effort alone does not fire — accumulated dose is what raises the flag |
 | `INSIGHT_INTERVAL_S` / `INSIGHT_COOLDOWN_S` | 60 / 600 | |
@@ -356,8 +356,9 @@ required 21 read exactly like "device not connected" (§3).
 |---|---|---|
 | ~~5 primitives + composite definitions, units, calibration~~ | **DECIDED** — [biomech/SPEC.md](biomech/SPEC.md) (S1-T14) | — implemented in S1-T15 |
 | Asymmetry full-scale threshold (`SI_FULL_SCALE`) + reference-bound calibration | biomech SPEC §13 open items | 15%; provisional bounds |
-| Prediction model + CI method | prediction session (stage 2+) | linear regression stub |
-| Insight rule catalogue + thresholds | insights session (stage 2+) | 2 starter rules |
+| ~~Prediction model + CI method~~ | **DECIDED** — [ANALYTICS.md](ANALYTICS.md) §2, `model_version='dose-scenario-1'` | — two-component dose+activity model with a scenario band |
+| Insight rule catalogue + thresholds | insights session (stage 2+) | 3 starter rules. ⚠️ `composite_high`'s 85/92 are **miscalibrated**: chosen against *instantaneous* composite but applied to a window **mean** ([ANALYTICS.md](ANALYTICS.md) §4). Re-calibration is gated on data that does not exist |
+| Window statistic choice (mean vs peak/percentile) | needs a `metrics_1m` rebuild | ⚠️ m1/m2 are peak-hold extremes reported as **means**, m3 is an accumulator reported as a **mean** ([ANALYTICS.md](ANALYTICS.md) §5). Free to fix now (712 rows), impossible later for old buckets |
 | Final UI design | **stage 3** frontend session (`mockup/`) | stage-2 crude disposable UI |
 | Production window/horizon durations | config flip at deploy | test durations |
 | Per-packet auth (HMAC) | post-MVP | open UDP + validation |

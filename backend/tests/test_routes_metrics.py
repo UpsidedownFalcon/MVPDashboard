@@ -109,12 +109,52 @@ async def test_windows_math_and_trend(api_app) -> None:
     assert w["10m"]["m"][0] == pytest.approx(15.0)
     assert w["10m"]["trend"] == "flat"             # preceding 10m empty
 
-    # hand-run SQL cross-check for the 10m entry
+    # hand-run SQL cross-check for the 10m entry. This MUST be the n-weighted
+    # form: an unweighted avg(composite) over metrics_1m is the estimator the
+    # endpoint used to compute, so cross-checking against it asserted the bug
+    # rather than the maths. It happens to agree here (every seeded bucket holds
+    # exactly 10 rows, so weighted == unweighted) -- which is precisely why
+    # test_windows_weighted_by_bucket_rows below seeds unequal buckets.
     sql_avg = await conn.fetchval(
-        """SELECT avg(composite) FROM metrics_1m
+        """SELECT sum(composite * n) / sum(n) FROM metrics_1m
            WHERE device_id='30' AND bucket >= now() - interval '10 minutes'"""
     )
     assert w["10m"]["composite"]["avg"] == pytest.approx(float(sql_avg))
+
+
+async def test_windows_weighted_by_bucket_rows(api_app) -> None:
+    """A window mean must weight each 1-minute bucket by the number of 60Hz
+    samples in it. Unweighted, a short partial bucket counts the same as a full
+    one -- measured at 11% error on the 712 real rows in the local database
+    (buckets n=300 and n=412: unweighted 13.688 vs weighted 12.348).
+
+    Seeded here: composite 90 over 5 rows, 30 over 45 rows. The correct
+    (weighted) mean is (90*5 + 30*45) / 50 = 36.0; the unweighted mean of the
+    two per-bucket averages is 60.0. The gap is the bug.
+    """
+    app, client, conn = api_app
+    await conn.execute("INSERT INTO devices (device_id, display_name) VALUES ('30','30')")
+    m_now = (await conn.fetchrow("SELECT date_trunc('minute', now()) AS m"))["m"]
+    rows = []
+    for minute, comp, count in ((6, 90.0, 5), (5, 30.0, 45)):
+        base = m_now - timedelta(minutes=minute)
+        for i in range(count):
+            rows.append((base + timedelta(milliseconds=1000 * i), "30",
+                         None, None, None, None, None, comp, 1.0))
+    await conn.copy_records_to_table(
+        "metrics", records=rows,
+        columns=("time", "device_id", "m1", "m2", "m3", "m4", "m5",
+                 "composite", "quality"),
+    )
+    await conn.execute("CALL refresh_continuous_aggregate('metrics_1m', NULL, NULL)")
+
+    resp = await client.get("/api/metrics/windows", params={"device": "30"})
+    w = {e["window"]: e for e in resp.json()["windows"]}
+    assert w["10m"]["composite"]["avg"] == pytest.approx(36.0)
+    assert w["10m"]["composite"]["avg"] != pytest.approx(60.0)
+    # extremes are decomposable and stay exact
+    assert w["10m"]["composite"]["min"] == pytest.approx(30.0)
+    assert w["10m"]["composite"]["max"] == pytest.approx(90.0)
 
 
 async def test_recent_shape(api_app) -> None:

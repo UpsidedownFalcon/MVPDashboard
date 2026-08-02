@@ -25,6 +25,15 @@ Steps:
 
 **Done check:** user approves the updated UIUX.md in that session.
 
+> **DONE 2026-08-03** — design session held; UIUX.md rewritten as the binding spec
+> (brand tokens from `mockup/visual_guidelines`, validated chart palette, screen
+> specs). Decisions: 5 primitives confirmed; new `GET /api/metrics/history`
+> endpoint + `insights.action`/`rationale` fields (BACKEND_SCHEMA.md updated,
+> implemented by S3-T10); Inter as UI typeface (TT Hoves is trial-licensed, logo
+> assets only); offline devices hidden >10 s; per-sensor detail on both screens;
+> forecasts stay composite-only. User approved the plan and mandated auto-execution
+> through S3-T07 + deploy.
+
 ## S3-T02 — Frontend foundation
 
 **Goal:** clean app skeleton the screens plug into (replaces crude UI codebase —
@@ -64,16 +73,18 @@ rename persists; badges flip ≤2s.
 
 ## S3-T04 — Device detail screen
 
-**Goal:** UIUX §4 for real.
-**Depends:** ⛓ S3-T03 (shares components).
+**Goal:** UIUX §4 for real (live left column + Insights/History/Projections tabs).
+**Depends:** ⛓ S3-T03 (shares components), ⛓ S3-T10 (history endpoint + insight fields).
 **Files:** `src/pages/Device.tsx`, `src/components/LiveChart.tsx`,
-`WindowCards.tsx`, `ForecastChart.tsx`, `InsightFeed.tsx`.
+`HistoryBars.tsx`, `ForecastChart.tsx`, `InsightFeed.tsx`, `Tabs.tsx`.
 
-Steps: large composite live chart + stacked primitives (backfill-then-splice per
-UIUX §5, ~250ms render delay, rAF batched); window cards generated from config
-labels with trend arrows and "collecting…" states; ECharts forecast chart (recent
-actuals + per-horizon points with CI band + made-at stamp); insight feed with
-severity chips + evidence expander; offline overlay with last-seen.
+Steps: live column — data-driven humanoid figure + current-risk hero + large
+composite chart + stacked primitives (backfill-then-splice per UIUX §5, ~250ms
+render delay, rAF batched); right column pill tabs per UIUX §4: Insights
+(action-first cards + evidence expander), History (six small-multiple bar charts
+from `GET /api/metrics/history`, period selector from `PAST_WINDOWS`, table-view
+toggle), Projections (composite-only ECharts: recent actuals + per-horizon points
+with CI band + made-at stamp, table-view toggle); offline overlay with last-seen.
 **Done check:** UIUX §§4–7 behaviors verified live, incl. hidden-tab pause/resume
 and WS-reconnect backfill (dev-tools network throttle test).
 
@@ -83,7 +94,8 @@ and WS-reconnect backfill (dev-tools network throttle test).
 **Depends:** ∥ S3-T02+ (backend work, parallel to frontend). ⛓ stage 2.
 **Files:** `backend/api/auth.py`, `backend/api/deps.py`,
 `backend/api/routes/auth.py`, `backend/api/seed_users.py`,
-`backend/tests/test_auth.py`; pyproject: add `passlib[bcrypt]`, `pyjwt`.
+`backend/tests/test_auth.py`; pyproject: add `bcrypt`, `pyjwt` (bcrypt directly,
+not `passlib[bcrypt]` — passlib is unmaintained and breaks against bcrypt ≥ 4.1).
 
 Steps:
 1. `seed_users.py`: idempotent, parses `SEED_USERS="alice:pw1,bob:pw2"` → bcrypt
@@ -137,6 +149,32 @@ Steps: walk PRD §5 F1–F10 one by one against the production deployment with t
 simulator (loss/reorder on) AND real wearables; record pass/fail + evidence in
 `docs/ACCEPTANCE.md` (created by this task). Fix and re-run any failures.
 **Done check:** all ten green in `docs/ACCEPTANCE.md`; user sign-off.
+
+## S3-T10 — Stage-3 backend additions (history endpoint + insight actions)
+
+**Goal:** the two API extensions the S3-T01 design requires
+(BACKEND_SCHEMA §1 migration 002, §3 `/api/metrics/history`).
+**Depends:** ⛓ stage 2. ∥ parallel to S3-T02+ frontend work.
+**Files:** `backend/migrations/002_insight_actions.sql`,
+`backend/api/routes/metrics.py` (history route), `backend/common/queries.py`
+(bucketed query helper), `backend/api/jobs/insights.py` (rules emit
+`action`/`rationale`), `backend/tests/test_history.py`, tests for insight fields.
+
+Steps:
+1. Migration 002: `ALTER TABLE insights ADD COLUMN action TEXT, ADD COLUMN rationale TEXT;`
+   (idempotent guard, runner picks it up after 001).
+2. `GET /api/metrics/history?device&window&buckets` per BACKEND_SCHEMA §3: validate
+   `window ∈ PAST_WINDOWS` (400 otherwise), `buckets` 1–96 default 24; bucket with
+   `time_bucket(span, …)` over `metrics_1m` (or `metrics` when window < 5m — same
+   source rule as `/windows`); rows→fixed-length bucket array, missing buckets `null`.
+3. Starter rules updated to emit `action` (imperative) + `rationale` (why, with the
+   numbers); `message` unchanged as the standalone summary. Ongoing stage-2 insight
+   refinement extends the same fields.
+4. Tests: window validation, bucket math vs SQL spot-check, null buckets, insight
+   rows carry the new fields end-to-end.
+
+**Done check:** `pytest` green; `curl /api/metrics/history?device=X&window=<PAST_WINDOWS[0]>`
+returns the documented shape with correct bucket count against live data.
 
 ## S3-T09 — Hardening backlog (scheduled, not gating MVP)
 

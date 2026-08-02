@@ -19,6 +19,10 @@ dependencies = [
     "asyncpg",
     # stage 2: predict.fit()'s stable interface takes a DataFrame (schema §5)
     "pandas",
+    # stage 3 auth (S3-T05): bcrypt used directly — passlib is unmaintained and
+    # breaks against bcrypt >= 4.1; pyjwt for the HS256 session cookie
+    "bcrypt",
+    "pyjwt",
 ]
 
 [dependency-groups]

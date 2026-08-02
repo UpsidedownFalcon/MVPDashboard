@@ -19,17 +19,23 @@ RULE = {r.rule_id: r for r in RULES}
 
 
 def make_ctx(comp_avg=50.0, quality=1.0, mid_trend="flat",
-             forecasts=None, name="Alice") -> Ctx:
-    def window(label, avg, trend):
+             forecasts=None, name="Alice", baseline_quality=None) -> Ctx:
+    """`baseline_quality` sets the LONGEST window's quality independently, so
+    the relative data_quality rule can be exercised. Default: same as `quality`,
+    i.e. a device whose link has been uniformly this good (or bad) throughout."""
+    if baseline_quality is None:
+        baseline_quality = quality
+
+    def window(label, avg, trend, q):
         return {"window": label, "from": "2026-08-02T12:00:00.000Z",
                 "m": [None] * 5,
                 "composite": {"avg": avg, "min": avg, "max": avg},
-                "quality": quality, "trend": trend}
+                "quality": q, "trend": trend}
     return Ctx(
         device_id="30", display_name=name,
-        windows=[window("5m", comp_avg, "flat"),
-                 window("30m", comp_avg, mid_trend),
-                 window("2h", comp_avg, "flat")],
+        windows=[window("5m", comp_avg, "flat", quality),
+                 window("30m", comp_avg, mid_trend, quality),
+                 window("2h", comp_avg, "flat", baseline_quality)],
         forecasts=forecasts,
         settings=Settings(_env_file=None),
     )
@@ -77,13 +83,37 @@ def test_rising_risk_needs_trend_and_forecast() -> None:
     assert ev["horizon"] == "10m"
 
 
-def test_data_quality_info() -> None:
+def test_data_quality_reports_a_drop_not_an_absolute_level() -> None:
+    """The rule tests quality against the device's OWN longest-window baseline,
+    not an absolute 0.8.
+
+    The absolute form fired forever on the current hardware (measured link
+    quality averaged 0.35 over an 11-minute worn session at 47-73% UDP loss), so
+    it carried no information — and `quality` is a ratio against the CONFIGURED
+    EXPECTED_INPUT_HZ, so an absolute threshold partly tests that constant
+    rather than the link.
+    """
     rule = RULE["data_quality"]
-    assert rule.evaluate(make_ctx(quality=0.95)) is None
-    ev = rule.evaluate(make_ctx(quality=0.5))
-    assert ev["quality"] == pytest.approx(0.5)
     assert rule.severity == "info"
-    assert "check sensor fit" in rule.message(make_ctx(), ev)
+
+    # healthy and steady -> silent
+    assert rule.evaluate(make_ctx(quality=0.95)) is None
+    # uniformly POOR but steady -> still silent: nothing has changed, and the
+    # absolute figure is already on screen as the quality badge.
+    assert rule.evaluate(make_ctx(quality=0.35)) is None
+    assert rule.evaluate(make_ctx(quality=0.5)) is None
+    # a real degradation against the device's own baseline -> fires
+    ev = rule.evaluate(make_ctx(quality=0.5, baseline_quality=0.9))
+    assert ev["quality"] == pytest.approx(0.5)
+    assert ev["baseline_quality"] == pytest.approx(0.9)
+    assert ev["ratio"] == pytest.approx(0.556, abs=1e-3)
+    msg = rule.message(make_ctx(quality=0.5, baseline_quality=0.9), ev)
+    assert "check sensor fit" in msg and "50%" in msg and "90%" in msg
+    # a drop smaller than the ratio does not fire (0.75 >= 0.8 * 0.9 = 0.72)
+    assert rule.evaluate(make_ctx(quality=0.75, baseline_quality=0.9)) is None
+    # missing data never fires
+    assert rule.evaluate(make_ctx(quality=None, baseline_quality=0.9)) is None
+    assert rule.evaluate(make_ctx(quality=0.2, baseline_quality=None)) is None
 
 
 # --- engine against a scratch db ---------------------------------------------
@@ -113,9 +143,16 @@ async def test_job_fires_once_per_cooldown_and_endpoint(scratch_app) -> None:
     await conn.execute(
         "INSERT INTO devices (device_id, display_name) VALUES ('30','Renamed Athlete')"
     )
-    # 2 minutes of composite 90 (above alert threshold 85), quality 0.5 (<0.8)
+    # Recent 2 minutes: composite 95 (above alert threshold 92) at quality 0.5.
+    # Preceded by 23 minutes of quiet, GOOD-quality data, which is what the
+    # data_quality rule now measures the drop against — a uniformly poor link no
+    # longer fires it (see test_data_quality_reports_a_drop_not_an_absolute_level).
     m_now = (await conn.fetchrow("SELECT date_trunc('minute', now()) AS m"))["m"]
     rows = []
+    for minute in range(25, 2, -1):
+        for i in range(10):
+            t = m_now - timedelta(minutes=minute) + timedelta(seconds=6 * i)
+            rows.append((t, "30", None, None, None, None, None, 30.0, 0.95))
     for minute in (2, 1):
         for i in range(10):
             t = m_now - timedelta(minutes=minute) + timedelta(seconds=6 * i)
@@ -125,6 +162,8 @@ async def test_job_fires_once_per_cooldown_and_endpoint(scratch_app) -> None:
         columns=("time", "device_id", "m1", "m2", "m3", "m4", "m5",
                  "composite", "quality"),
     )
+    # the 30m baseline window reads metrics_1m, which is materialized-only
+    await conn.execute("CALL refresh_continuous_aggregate('metrics_1m', NULL, NULL)")
 
     job = InsightJob(settings, pool)
     assert await job.run_once() == 2      # composite_high (alert) + data_quality
@@ -146,3 +185,46 @@ async def test_job_fires_once_per_cooldown_and_endpoint(scratch_app) -> None:
     assert body[0]["insight_id"] >= body[1]["insight_id"]
     assert len((await client.get("/api/insights", params={"limit": 1})).json()) == 1
     assert (await client.get("/api/insights", params={"device": "99"})).json() == []
+
+
+async def test_cooldown_lets_severity_escalate_but_not_regress(scratch_app) -> None:
+    """A warning must NOT swallow a genuine alert.
+
+    The cooldown originally keyed on (device_id, rule_id) alone, so a
+    `composite_high` WARNING suppressed an ALERT arriving seconds later for the
+    full INSIGHT_COOLDOWN_S — the escalation a trainer most needs to see was the
+    one case guaranteed to be dropped. Ranking suppresses in one direction only:
+    up is allowed through, down and sideways are not.
+    """
+    settings, conn, pool, client = scratch_app
+    await conn.execute("INSERT INTO devices (device_id, display_name) VALUES ('30','A')")
+    m_now = (await conn.fetchrow("SELECT date_trunc('minute', now()) AS m"))["m"]
+
+    async def set_composite(value: float) -> None:
+        await conn.execute("DELETE FROM metrics WHERE device_id='30'")
+        rows = [
+            (m_now - timedelta(minutes=minute) + timedelta(seconds=6 * i),
+             "30", None, None, None, None, None, value, 1.0)
+            for minute in (2, 1) for i in range(10)
+        ]
+        await conn.copy_records_to_table(
+            "metrics", records=rows,
+            columns=("time", "device_id", "m1", "m2", "m3", "m4", "m5",
+                     "composite", "quality"),
+        )
+
+    job = InsightJob(settings, pool)
+
+    await set_composite(88.0)                      # warn 85 <= 88 < alert 92
+    assert await job.run_once() == 1
+    await set_composite(88.0)
+    assert await job.run_once() == 0               # same severity -> suppressed
+
+    await set_composite(95.0)                      # escalation to alert
+    assert await job.run_once() == 1, "an alert must not be swallowed by a warning"
+
+    await set_composite(88.0)                      # de-escalation
+    assert await job.run_once() == 0, "a warning must not re-fire under an alert"
+
+    rows = (await client.get("/api/insights", params={"device": "30"})).json()
+    assert [r["severity"] for r in rows] == ["alert", "warning"]   # newest first

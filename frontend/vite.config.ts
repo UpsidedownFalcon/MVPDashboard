@@ -1,10 +1,22 @@
-import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import { defineConfig } from 'vite'
 
-// Dev proxy to the api container; production is served by Caddy which proxies
-// the same paths (TRD §8), so the app always uses same-origin URLs.
+// Dev server proxies /api and /ws to a locally running api service so
+// `npm run dev` works against the real backend. Production is built static
+// and served by Caddy, which does the same proxying (deploy/Caddyfile).
 export default defineConfig({
   plugins: [react()],
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          echarts: ['echarts'],
+          react: ['react', 'react-dom', 'react-router-dom', '@tanstack/react-query'],
+          uplot: ['uplot'],
+        },
+      },
+    },
+  },
   server: {
     proxy: {
       '/api': 'http://localhost:8000',

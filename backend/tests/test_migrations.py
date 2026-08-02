@@ -58,7 +58,17 @@ async def test_migrate_idempotent_and_cagg(scratch_db) -> None:
     conn, settings = scratch_db
 
     applied = await apply_migrations(conn, settings)
-    assert applied == ["001_init.sql"]
+    assert applied == ["001_init.sql", "002_insight_actions.sql"]
+
+    # 002: action-first insight columns exist (nullable TEXT)
+    insight_cols = {
+        r["column_name"]
+        for r in await conn.fetch(
+            """SELECT column_name FROM information_schema.columns
+               WHERE table_name = 'insights'"""
+        )
+    }
+    assert {"action", "rationale"} <= insight_cols
 
     # all tables exist
     tables = {

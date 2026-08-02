@@ -30,3 +30,23 @@ async def metrics_windows(request: Request, device: str = Query(...)) -> dict:
     return await queries.windows(
         request.app.state.pool, request.app.state.settings, device
     )
+
+
+@router.get("/api/metrics/history")
+async def metrics_history(
+    request: Request,
+    device: str = Query(...),
+    window: str = Query(...),
+    buckets: int = Query(24, ge=1, le=96),
+) -> dict:
+    settings = request.app.state.settings
+    labels = [w.strip() for w in settings.past_windows_raw.split(",")]
+    if window not in labels:
+        raise HTTPException(
+            status_code=400,
+            detail=f"window must be one of PAST_WINDOWS: {', '.join(labels)}",
+        )
+    await _require_device(request, device)
+    return await queries.history(
+        request.app.state.pool, settings, device, window, buckets
+    )

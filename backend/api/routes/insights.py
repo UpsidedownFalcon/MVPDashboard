@@ -21,7 +21,7 @@ async def list_insights(
     if device is not None:
         rows = await pool.fetch(
             """SELECT insight_id, created_at, device_id, severity, rule_id,
-                      message, context
+                      message, context, action, rationale
                FROM insights WHERE device_id = $1
                ORDER BY created_at DESC, insight_id DESC LIMIT $2""",
             device, limit,
@@ -29,7 +29,7 @@ async def list_insights(
     else:
         rows = await pool.fetch(
             """SELECT insight_id, created_at, device_id, severity, rule_id,
-                      message, context
+                      message, context, action, rationale
                FROM insights
                ORDER BY created_at DESC, insight_id DESC LIMIT $1""",
             limit,
@@ -43,6 +43,8 @@ async def list_insights(
             "rule_id": r["rule_id"],
             "message": r["message"],
             "context": json.loads(r["context"]) if r["context"] else None,
+            "action": r["action"],
+            "rationale": r["rationale"],
         }
         for r in rows
     ]

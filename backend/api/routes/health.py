@@ -6,7 +6,9 @@ from __future__ import annotations
 
 import asyncio
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
+
+from api.deps import require_user
 
 router = APIRouter()
 
@@ -32,7 +34,9 @@ def _job_health(job) -> dict:
     }
 
 
-@router.get("/api/health")
+# Guarded here (not at include_router) so /api/health/live above can stay the
+# open liveness probe while the full diagnostic dump requires auth (S3-T05).
+@router.get("/api/health", dependencies=[Depends(require_user)])
 async def health(request: Request) -> dict:
     state = request.app.state
     hub = state.hub

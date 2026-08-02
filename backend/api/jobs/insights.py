@@ -26,6 +26,13 @@ log = logging.getLogger("api.jobs.insights")
 
 Evidence = dict   # JSONB-serializable values that fired the rule
 
+# Ordering for cooldown escalation (see InsightJob._in_cooldown). The DDL
+# constrains `severity` to exactly these three (BACKEND_SCHEMA.md §1).
+SEVERITY_RANK = {"info": 1, "warning": 2, "alert": 3}
+_SEVERITY_RANK_SQL = (
+    "CASE severity WHEN 'alert' THEN 3 WHEN 'warning' THEN 2 ELSE 1 END"
+)
+
 
 @dataclass
 class Ctx:
@@ -44,6 +51,10 @@ class Ctx:
     def mid(self) -> dict | None:
         return self.windows[1] if len(self.windows) > 1 else None
 
+    @property
+    def longest(self) -> dict | None:
+        return self.windows[-1] if self.windows else None
+
 
 @dataclass
 class Rule:
@@ -51,6 +62,12 @@ class Rule:
     severity: str                                  # default; evidence may override
     evaluate: Callable[[Ctx], Evidence | None]
     message: Callable[[Ctx, Evidence], str]
+    # S3-T10 (BACKEND_SCHEMA §1 migration 002): action-first rendering. `action`
+    # is a short imperative ("Reduce intensity"); `rationale` is the why, with
+    # the numbers. Optional so third-party/legacy rules keep working — the UI
+    # falls back to `message` when they are null.
+    action: Callable[[Ctx, Evidence], str] | None = None
+    rationale: Callable[[Ctx, Evidence], str] | None = None
 
 
 # --- starter rules (catalogue TBD in a later session) -------------------------
@@ -88,12 +105,33 @@ def _rising_risk(ctx: Ctx) -> Evidence | None:
             "threshold": threshold}
 
 
+# `quality` is a ratio against the CONFIGURED constant EXPECTED_INPUT_HZ, not
+# against anything measured, so an absolute threshold tests the constant as much
+# as the link: a live 0.35 is equally consistent with 65% packet loss and with
+# EXPECTED_INPUT_HZ being wrong. Worse, an absolute rule on hardware that sits
+# permanently below the line re-fires every cooldown forever, which is feed noise
+# rather than information -- and the absolute figure is already on screen
+# continuously as the quality badge and in /api/health.
+#
+# So the rule now reports a CHANGE against the device's own longest window: data
+# quality that has dropped materially below this device's own recent baseline is
+# actionable (a strap moved, a sensor is failing) and self-clears when it
+# recovers. A uniformly poor link no longer spams the feed.
+QUALITY_DROP_RATIO = 0.8
+
+
 def _data_quality(ctx: Ctx) -> Evidence | None:
-    w = ctx.shortest
-    quality = w and w["quality"]
-    if quality is None or quality >= 0.8:
+    w, base = ctx.shortest, ctx.longest
+    if w is None or base is None or w is base:
         return None
-    return {"window": w["window"], "quality": round(quality, 3)}
+    quality, baseline = w["quality"], base["quality"]
+    if quality is None or baseline is None or baseline <= 0.0:
+        return None
+    if quality >= QUALITY_DROP_RATIO * baseline:
+        return None
+    return {"window": w["window"], "quality": round(quality, 3),
+            "baseline_window": base["window"], "baseline_quality": round(baseline, 3),
+            "ratio": round(quality / baseline, 3)}
 
 
 RULES: list[Rule] = [
@@ -105,6 +143,12 @@ RULES: list[Rule] = [
             f"{ctx.display_name}: sustained high load (composite {ev['composite_avg']:.0f}"
             f" over last {ev['window']}) — consider reducing intensity."
         ),
+        action=lambda ctx, ev: "Reduce training intensity",
+        rationale=lambda ctx, ev: (
+            f"Injury-risk load averaged {ev['composite_avg']:.0f} over the last"
+            f" {ev['window']}, above the {ev['threshold']:.0f} threshold. Sustained"
+            f" levels this high reflect accumulated dose, not just a momentary effort."
+        ),
     ),
     Rule(
         rule_id="rising_risk",
@@ -114,6 +158,12 @@ RULES: list[Rule] = [
             f"{ctx.display_name}: risk rising and projected to reach {ev['pred']:.0f}"
             f" within {ev['horizon']} — schedule rest."
         ),
+        action=lambda ctx, ev: "Schedule rest before the next block",
+        rationale=lambda ctx, ev: (
+            f"Risk has been trending up over the last {ev['window']} and is projected"
+            f" to reach {ev['pred']:.0f} within {ev['horizon']}"
+            f" (alert threshold {ev['threshold']:.0f})."
+        ),
     ),
     Rule(
         rule_id="data_quality",
@@ -121,7 +171,14 @@ RULES: list[Rule] = [
         evaluate=_data_quality,
         message=lambda ctx, ev: (
             f"{ctx.display_name}: data quality {ev['quality']:.0%} over last"
-            f" {ev['window']} — check sensor fit."
+            f" {ev['window']}, down from {ev['baseline_quality']:.0%} over"
+            f" {ev['baseline_window']} — check sensor fit."
+        ),
+        action=lambda ctx, ev: "Check sensor fit",
+        rationale=lambda ctx, ev: (
+            f"Data quality over the last {ev['window']} is {ev['quality']:.0%}, down"
+            f" from {ev['baseline_quality']:.0%} over {ev['baseline_window']} — a"
+            f" strap may have moved or a sensor may be failing."
         ),
     ),
 ]
@@ -197,17 +254,20 @@ class InsightJob:
                     evidence = rule.evaluate(ctx)
                     if evidence is None:
                         continue
-                    if await self._in_cooldown(device_id, rule.rule_id):
+                    severity = evidence.get("severity", rule.severity)
+                    if await self._in_cooldown(device_id, rule.rule_id, severity):
                         continue
                     await self._pool.execute(
                         """INSERT INTO insights (device_id, severity, rule_id,
-                                                 message, context)
-                           VALUES ($1, $2, $3, $4, $5::jsonb)""",
+                                                 message, context, action, rationale)
+                           VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)""",
                         device_id,
-                        evidence.get("severity", rule.severity),
+                        severity,
                         rule.rule_id,
                         rule.message(ctx, evidence),
                         json.dumps(evidence),
+                        rule.action(ctx, evidence) if rule.action else None,
+                        rule.rationale(ctx, evidence) if rule.rationale else None,
                     )
                     inserted += 1
             except Exception as exc:  # noqa: BLE001 — isolate per device
@@ -217,13 +277,26 @@ class InsightJob:
         self.runs += 1
         return inserted
 
-    async def _in_cooldown(self, device_id: str, rule_id: str) -> bool:
-        return await self._pool.fetchval(
-            """SELECT EXISTS (
-                 SELECT 1 FROM insights
-                 WHERE device_id = $1 AND rule_id = $2
-                   AND created_at > now() - $3::interval
-               )""",
+    async def _in_cooldown(self, device_id: str, rule_id: str, severity: str) -> bool:
+        """Suppress unless this firing is STRICTLY MORE SEVERE than anything
+        already recorded for (device, rule) inside the cooldown window.
+
+        Keying on (device, rule) alone -- the original -- meant a `composite_high`
+        WARNING silently swallowed a genuine ALERT arriving 60 s later for the
+        full 600 s cooldown: the escalation a trainer most needs to see was the
+        one case guaranteed to be dropped.
+
+        Keying on (device, rule, severity) instead would fix that but introduce
+        the reverse noise, letting a warning re-fire in the shadow of a recent
+        alert. Ranking is the form that suppresses in one direction only.
+        """
+        max_rank = await self._pool.fetchval(
+            f"""SELECT max({_SEVERITY_RANK_SQL}) FROM insights
+                WHERE device_id = $1 AND rule_id = $2
+                  AND created_at > now() - $3::interval""",
             device_id, rule_id,
             timedelta(seconds=self._settings.insight_cooldown_s),
         )
+        if max_rank is None:
+            return False
+        return SEVERITY_RANK.get(severity, 0) <= int(max_rank)

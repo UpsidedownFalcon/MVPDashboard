@@ -105,6 +105,9 @@ class _Publisher(threading.Thread):
 def app_client(monkeypatch: pytest.MonkeyPatch):
     _redis_or_skip()
     monkeypatch.setenv("REDIS_URL", TEST_REDIS_URL)
+    # S3-T05: create_app refuses to start without a secret, and /ws/live
+    # closes 4401 without a valid session cookie (see _cookie_headers)
+    monkeypatch.setenv("JWT_SECRET", "test-ws-secret-0123456789abcdef")
     from common.config import get_settings
     get_settings.cache_clear()
     from api.main import create_app
@@ -113,13 +116,21 @@ def app_client(monkeypatch: pytest.MonkeyPatch):
     get_settings.cache_clear()
 
 
+def _cookie_headers() -> dict[str, str]:
+    """Valid session cookie for the WS handshake (auth is S3-T05)."""
+    from api.auth import mint_token
+    from common.config import get_settings
+    token, _ = mint_token(get_settings(), "tester", "trainer")
+    return {"cookie": f"session={token}"}
+
+
 def test_ws_throughput_and_schema(app_client: TestClient) -> None:
     r = _redis_or_skip()
     publisher = _Publisher(r)
 
     counts = {dev: 0 for dev in DEVICES}
     first: dict | None = None
-    with app_client.websocket_connect("/ws/live") as ws:
+    with app_client.websocket_connect("/ws/live", headers=_cookie_headers()) as ws:
         publisher.start()
         deadline = time.perf_counter() + DURATION_S
         while time.perf_counter() < deadline:
@@ -153,7 +164,7 @@ def test_ws_device_filter(app_client: TestClient) -> None:
     r = _redis_or_skip()
     publisher = _Publisher(r)
     seen: set[str] = set()
-    with app_client.websocket_connect("/ws/live?devices=31") as ws:
+    with app_client.websocket_connect("/ws/live?devices=31", headers=_cookie_headers()) as ws:
         publisher.start()
         deadline = time.perf_counter() + 1.5
         while time.perf_counter() < deadline:

@@ -82,10 +82,19 @@ CREATE TABLE insights (
     severity    TEXT NOT NULL CHECK (severity IN ('info','warning','alert')),
     rule_id     TEXT NOT NULL,
     message     TEXT NOT NULL,                    -- plain language for the trainer
-    context     JSONB                             -- evidence: values that fired it
+    context     JSONB,                            -- evidence: values that fired it
+    action      TEXT,                             -- migration 002: short imperative
+    rationale   TEXT                              -- migration 002: the why, from metrics
 );
 CREATE INDEX ON insights (device_id, created_at DESC);
 ```
+
+**Migration `002_insight_actions.sql`** (stage 3, S3-T01 decision 2026-08-03): adds
+nullable `action` (short imperative, e.g. "Reduce landing volume") and `rationale`
+(plain-language why, grounded in the measured metrics) to `insights`. The UI renders
+`action` as the card headline and `rationale` beneath it, falling back to `message`
+when null (rows from pre-refinement rules). Rules SHOULD populate both; `message`
+remains required as the self-contained plain-language summary.
 
 Notes: window aggregates and forecasts are **not** columns on `metrics` (different
 cadence/keys/retention — TRD §6). If sub-minute test windows ever need finer
@@ -152,8 +161,9 @@ All routes require the auth cookie except `POST /api/auth/login` and liveness
 | PATCH `/api/devices/{id}` | `{"display_name"}` | updated device object |
 | GET `/api/metrics/recent` | `?device=30&seconds=30` | `{"device_id","t0",…,"rows":[[t_offset_ms,m1..m5,c,q],…]}` (compact arrays for chart backfill) |
 | GET `/api/metrics/windows` | `?device=30` | `{"windows":[{"window":"5m","from":ts,"m":[…5 avgs],"composite":{"avg","min","max"},"quality":num,"trend":"up\|down\|flat"},…]}` — one entry per `PAST_WINDOWS`, `trend` vs the preceding equal-length window |
+| GET `/api/metrics/history` | `?device=30&window=30m&buckets=24` | `{"device_id","window","from":ts,"bucket_s":int,"buckets":[{"t":ts,"m":[…5 avgs\|null],"composite":{"avg","min","max"},"quality":num}\|null,…]}` — stage-3 (S3-T01): time-bucketed series for the History tab. `window` MUST be one of `PAST_WINDOWS` (400 otherwise); `buckets` 1–96, default 24; bucket span = window/buckets, clamped to ≥1m when reading `metrics_1m` (bucket count shrinks accordingly — the response's `bucket_s` is authoritative). Buckets are aligned to `from`. Reads `metrics_1m` (or `metrics` for windows ≤5m, same source rule as `/windows`); a bucket with no rows is `null` (chart gap, never 0) |
 | GET `/api/forecasts/latest` | `?device=30` | `{"made_at":ts,"model_version","points":[{"horizon":"10m","target_time":ts,"pred","ci_low","ci_high"},…]}` (404-shaped empty if no run yet) |
-| GET `/api/insights` | `?device=30&limit=20` (device optional) | `[{"insight_id","created_at","device_id","severity","rule_id","message","context"},…]` newest first |
+| GET `/api/insights` | `?device=30&limit=20` (device optional) | `[{"insight_id","created_at","device_id","severity","rule_id","message","context","action":str\|null,"rationale":str\|null},…]` newest first (`action`/`rationale`: migration 002, §1) |
 | GET `/api/health` | — | `{"status","db":bool,"redis":bool,"ingest":{per-device/sensor rates, last_seen, drop counters},"api":{"ws_clients","ws_dropped","db_buffer","db_dropped"}}` |
 | GET `/api/health/live` | — | `{"status":"ok"}` (unauthenticated liveness) |
 | **WS** `/ws/live` | `?devices=30,31` (omit = all) — cookie-authed handshake | server→client stream of `tick` and `status` messages; closes 4401 on auth expiry |
@@ -219,10 +229,22 @@ class Metrics:
 ACCEL_MS2_PER_COUNT = 9.81 / 2048     # ±16 g  -> m/s²
 GYRO_DPS_PER_COUNT  = 1.0 / 16.384    # ±2000 °/s -> °/s
 
-# backend/api/jobs/predict.py — REPLACED by the real model later
+# backend/api/jobs/predict.py — signature is STABLE; the model lives inside it
 def fit(history: pd.DataFrame, horizons: list[timedelta]) -> dict[timedelta, Forecast]:
-    """history: metrics_1m rows (bucket, composite, …) over PREDICT_TRAIN_WINDOW.
-    Returns per-horizon Forecast(pred, ci_low, ci_high)."""
+    """history: metrics_1m rows (bucket, composite, m3, …) over
+    PREDICT_TRAIN_WINDOW. Returns per-horizon Forecast(pred, ci_low, ci_high)."""
+
+# ⚠️ Under model_version 'dose-scenario-1' (docs/ANALYTICS.md), `ci_low`/`ci_high`
+# carry a SCENARIO BAND, not a confidence interval:
+#     ci_low  = "if they stop now"                     -> the decaying dose floor
+#     pred    = "if recent load continues"
+#     ci_high = "if load returns to this session's hardest"
+# The columns are unchanged (they are just numbers) but the MEANING follows
+# model_version, and the frontend must label it accordingly — calling two
+# counterfactuals a "CI" asserts a 95% probability that the truth lies between
+# them, which biomech SPEC §2 forbids. Consumers that cannot read model_version
+# must not present these as uncertainty. 'linreg-stub-1' rows (a plain OLS
+# prediction interval) may still exist in `forecasts` from before the change.
 
 # backend/api/jobs/insights.py — rule list is the extension point
 RULES: list[Rule]  # Rule(rule_id, severity, predicate(WindowData, ForecastData) -> Evidence | None, message_fn)

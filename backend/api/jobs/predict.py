@@ -1,9 +1,45 @@
 """Forecast job (S2-T04): composite-only predictions per configured horizon.
 
-`fit()` is the STABLE INTERFACE (BACKEND_SCHEMA.md §5) — the real model from a
-later dedicated session replaces only that function. Tonight's stub: numpy
-linear fit on (minutes_from_start, composite avg from metrics_1m), CI from
-residual std × sqrt(1 + h/train_span).
+`fit()` is the STABLE INTERFACE (BACKEND_SCHEMA.md §5) — its signature does not
+move; the model lives entirely inside it.
+
+THE MODEL: the composite is EXACTLY separable, which is what this file exploits.
+With `floor = 0.50*m3` (biomech SPEC §6.1):
+
+    composite = floor + (100 - floor) * acute/100
+
+so, defining headroom `H = 1 - composite/100`,
+
+    H = (1 - 0.005*m3) * (1 - acute/100)                    <- exact, not a fit
+
+i.e. the composite is the noisy-OR of a SLOW accumulated-dose term and a FAST
+activity term, and log H is additive in the two. That matters because the two
+halves have completely different forecastability:
+
+  * The dose term is CLOSED FORM. `dose` obeys d(dose)/dt = -lambda*dose + S
+    with a 45-minute half-life, so at rest m3 falls LINEARLY at
+    M3_DECAY_PTS_PER_MIN and under continued load it approaches S/lambda
+    exponentially. No regression is needed or wanted.
+  * The acute term is NOT forecastable beyond persistence. It is driven by what
+    the athlete chooses to do next.
+
+Fitting one straight line to their SUM -- which is what `linreg-stub-1` did --
+therefore fits a mixture of a knowable and an unknowable quantity. Worse, OLS
+over a session fits the RISING LIMB, so the post-session decay tail cannot pull
+the slope down: a device that had stopped streaming was observed forecasting
+35 -> 46.7 -> 64.3 with widening bands off a stale trend.
+
+So the band this model reports is a SCENARIO BAND, not a confidence interval:
+  ci_low   "if they stop now"          -> acute -> 0, dose decays. The composite
+                                          settles onto the dose floor 0.50*m3.
+  pred     "if recent load continues"  -> dose follows the observed source term,
+                                          acute held at its recent mean.
+  ci_high  "if the recent hard part continues" -> acute held at its recent p90.
+
+They reuse the `ci_low`/`ci_high` columns because those are just numbers, but
+they are two counterfactuals rather than a statement about estimator error --
+the frontend switches its label on `model_version` so no 95%-probability claim
+is made about them (biomech SPEC §2 forbids it).
 """
 
 from __future__ import annotations
@@ -22,8 +58,28 @@ from common.config import Settings
 
 log = logging.getLogger("api.jobs.predict")
 
-MODEL_VERSION = "linreg-stub-1"
+MODEL_VERSION = "dose-scenario-1"
 MIN_BUCKETS = 10
+
+# --- dose-model constants -----------------------------------------------------
+# Deliberately restated here rather than imported from ingest.biomech: the api
+# process does not otherwise depend on the ingest package, and this file must
+# not be the thing that couples them. test_predict.py asserts every one of these
+# against the biomech module, so a retune there fails the suite rather than
+# silently desynchronising the forecast.
+M3_LO, M3_HI = 0.01, 60.0            # biomech M3_LO / M3_HI (dose-minutes)
+DOSE_HALFLIFE_MIN = 45.0             # biomech DOSE_HALFLIFE_S / 60
+FLOOR_FACTOR = 0.50                  # biomech FLOOR_FACTOR
+
+LN_M3_SPAN = math.log(M3_HI / M3_LO)                        # ln(6000) = 8.699515
+LAMBDA_PER_MIN = math.log(2.0) / DOSE_HALFLIFE_MIN          # 0.0154033 / min
+# m3 is a LOG score of an exponentially decaying quantity, so at rest it falls
+# LINEARLY: 100*ln2/ln(6000) = 7.9677 points per half-life = 0.1771 pts/min.
+M3_DECAY_PTS_PER_MIN = 100.0 * math.log(2.0) / LN_M3_SPAN / DOSE_HALFLIFE_MIN
+
+# Buckets at the end of the training window used to estimate "recent" load.
+RECENT_BUCKETS = 10
+ACUTE_HIGH_PCT = 10.0    # 10th pct of the headroom factor == 90th pct of acute
 
 
 @dataclass
@@ -33,10 +89,77 @@ class Forecast:
     ci_high: float
 
 
+def _dose_of_m3(m3: float) -> float:
+    """Invert biomech's log_score. m3 == 0 is the CLAMP, not a measurement, so
+    this returns the clamp boundary -- all we honestly know is dose <= M3_LO."""
+    return M3_LO * math.exp(max(m3, 0.0) / 100.0 * LN_M3_SPAN)
+
+
+def _m3_of_dose(dose: float) -> float:
+    if dose <= M3_LO:
+        return 0.0
+    return min(100.0, 100.0 * math.log(dose / M3_LO) / LN_M3_SPAN)
+
+
+def _compose(m3: float, acute_factor: float) -> float:
+    """The exact identity, run forwards: composite = 100*(1 - D*A)."""
+    return float(np.clip(100.0 * (1.0 - (1.0 - 0.005 * m3) * acute_factor), 0.0, 100.0))
+
+
+def _fit_linear_fallback(x, y, horizons) -> dict[timedelta, Forecast]:
+    """Degenerate branch: no usable m3, so the decomposition is unavailable and
+    there is nothing to do but extrapolate the composite itself. Kept honest
+    with a CORRECT OLS prediction interval -- the old one was
+    `1.96*sigma*sqrt(1 + h/span)`, whose leverage term is linear in h where the
+    truth is quadratic, and which has no dependence on n at all (so it never
+    narrowed as data accumulated). At n = MIN_BUCKETS that was ~38% too narrow
+    before autocorrelation is even considered.
+    """
+    n = len(x)
+    slope, intercept = np.polyfit(x, y, deg=1)
+    resid = y - (intercept + slope * x)
+    # ddof=2 is the correct unbiased sigma-hat for a 2-parameter fit.
+    sigma = float(resid.std(ddof=2)) if n > 2 else 0.0
+    xbar = float(x.mean())
+    sxx = float(((x - xbar) ** 2).sum()) or 1.0
+    t_end = float(x[-1])
+    # Student t, not the normal 1.96: at n=10, t(.975, 8) = 2.306 is 18% larger.
+    tq = _t_quantile_975(max(n - 2, 1))
+
+    out: dict[timedelta, Forecast] = {}
+    for h in horizons:
+        h_min = h.total_seconds() / 60.0
+        x_star = t_end + h_min
+        pred = float(np.clip(intercept + slope * x_star, 0.0, 100.0))
+        se = sigma * math.sqrt(1.0 + 1.0 / n + (x_star - xbar) ** 2 / sxx)
+        ci = tq * se
+        out[h] = Forecast(
+            pred=pred,
+            ci_low=float(np.clip(pred - ci, 0.0, 100.0)),
+            ci_high=float(np.clip(pred + ci, 0.0, 100.0)),
+        )
+    return out
+
+
+# t(.975, df) for small df; beyond the table the normal limit is close enough
+# (t(.975, 30) = 2.042 vs 1.960, and df is >= n-2 with n >= MIN_BUCKETS = 10).
+_T975 = {1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571, 6: 2.447, 7: 2.365,
+         8: 2.306, 9: 2.262, 10: 2.228, 11: 2.201, 12: 2.179, 13: 2.160,
+         14: 2.145, 15: 2.131, 16: 2.120, 17: 2.110, 18: 2.101, 19: 2.093,
+         20: 2.086, 25: 2.060, 30: 2.042, 40: 2.021, 60: 2.000, 120: 1.980}
+
+
+def _t_quantile_975(df: int) -> float:
+    if df in _T975:
+        return _T975[df]
+    keys = [k for k in sorted(_T975) if k <= df]
+    return _T975[keys[-1]] if keys else 12.706
+
+
 def fit(history: pd.DataFrame, horizons: list[timedelta]) -> dict[timedelta, Forecast]:
-    """history: metrics_1m rows (`bucket`, `composite`, …) over
-    PREDICT_TRAIN_WINDOW. Returns per-horizon Forecast(pred, ci_low, ci_high).
-    Values are 0-100 (composite scale); predictions are clipped to that range.
+    """history: metrics_1m rows (`bucket`, `composite`, `m3`, …) over
+    PREDICT_TRAIN_WINDOW. Returns per-horizon Forecast(pred, ci_low, ci_high),
+    all 0-100 on the composite scale. See the module docstring for the model.
     """
     df = history.dropna(subset=["composite"]).sort_values("bucket")
     if len(df) < 2:
@@ -44,22 +167,82 @@ def fit(history: pd.DataFrame, horizons: list[timedelta]) -> dict[timedelta, For
     t0 = df["bucket"].iloc[0]
     x = ((df["bucket"] - t0).dt.total_seconds() / 60.0).to_numpy(dtype=float)
     y = df["composite"].to_numpy(dtype=float)
-    slope, intercept = np.polyfit(x, y, deg=1)
-    resid = y - (intercept + slope * x)
-    resid_std = float(resid.std(ddof=2)) if len(df) > 2 else 0.0
-    train_span = float(x[-1] - x[0]) or 1.0
-    t_end = float(x[-1])
+
+    # m3 absent or entirely null: the decomposition cannot be formed. Fall back
+    # explicitly rather than treating a missing dose as m3 = 0, which would
+    # silently assert "this athlete has no accumulated load".
+    if "m3" not in df.columns or df["m3"].isna().all():
+        return _fit_linear_fallback(x, y, horizons)
+
+    m3_series = df["m3"].to_numpy(dtype=float)
+    # A bucket with composite but no m3 is a gap in the dose channel, not a
+    # zero; carry the last known value forward across it.
+    m3_series = pd.Series(m3_series).ffill().bfill().to_numpy(dtype=float)
+
+    # Recover the per-bucket acute factor A = H / D. This is exact per tick and
+    # very slightly approximate per bucket (both factors are bucket-averaged
+    # separately, so the covariance term is dropped) -- test_predict.py bounds
+    # that error empirically rather than assuming it away.
+    headroom = np.clip(1.0 - y / 100.0, 0.0, 1.0)
+    dose_factor = 1.0 - 0.005 * np.clip(m3_series, 0.0, 100.0)
+    acute_factor = np.clip(headroom / dose_factor, 1e-9, 1.0)
+
+    k = min(RECENT_BUCKETS, len(df))
+    a_central = float(acute_factor[-k:].mean())       # persistence of recent load
+    # The upper scenario is deliberately taken over the WHOLE training window,
+    # not just the recent tail: "if load returns to the hardest level of this
+    # session". Off the tail alone the band collapses to zero width whenever the
+    # athlete happens to be resting at prediction time, which renders as false
+    # precision -- the exact failure this model was meant to remove.
+    a_high = float(np.percentile(acute_factor, ACUTE_HIGH_PCT))
+
+    m3_end = float(m3_series[-1])
+    dose_end = _dose_of_m3(m3_end)
+    dose_series = np.array([_dose_of_m3(v) for v in m3_series], dtype=float)
+
+    # Estimate the dose SOURCE term S from the observed trajectory rather than
+    # assuming an intensity: d(dose)/dt = -lambda*dose + S, so
+    # S = d(dose)/dt + lambda*dose. Clamped at 0 -- a negative source is just
+    # decay, and extrapolating one would drive dose below zero.
+    x_recent, dose_recent = x[-k:], dose_series[-k:]
+    if k >= 3 and (x_recent[-1] - x_recent[0]) > 0:
+        d_slope = float(np.polyfit(x_recent, dose_recent, deg=1)[0])
+    else:
+        d_slope = 0.0
+    source_now = max(0.0, d_slope + LAMBDA_PER_MIN * float(dose_recent.mean()))
+
+    # ...and the hardest accumulation rate seen this session, for the upper
+    # scenario, so that branch is internally consistent: if the acute term
+    # returns to its session peak then dose accumulates at that rate too.
+    dt = np.diff(x)
+    ok = dt > 0
+    if ok.any():
+        pointwise = (np.diff(dose_series)[ok] / dt[ok]
+                     + LAMBDA_PER_MIN * (dose_series[:-1][ok] + dose_series[1:][ok]) / 2.0)
+        source_high = max(source_now, float(np.percentile(pointwise, 90.0)), 0.0)
+    else:
+        source_high = source_now
+
+    def _dose_at(h_min: float, source: float) -> float:
+        """First-order approach to dose_eq = S/lambda. Reduces EXACTLY to pure
+        decay when source == 0."""
+        dose_eq = source / LAMBDA_PER_MIN
+        return dose_eq + (dose_end - dose_eq) * math.exp(-LAMBDA_PER_MIN * h_min)
 
     out: dict[timedelta, Forecast] = {}
     for h in horizons:
         h_min = h.total_seconds() / 60.0
-        pred = float(np.clip(intercept + slope * (t_end + h_min), 0.0, 100.0))
-        ci = 1.96 * resid_std * math.sqrt(1.0 + h_min / train_span)
-        out[h] = Forecast(
-            pred=pred,
-            ci_low=float(np.clip(pred - ci, 0.0, 100.0)),
-            ci_high=float(np.clip(pred + ci, 0.0, 100.0)),
-        )
+        # "they stop now": pure decay. m3 is a log score of an exponential, so
+        # this is a straight ramp -- CLAMPED at 0, or it predicts negative dose.
+        m3_stop = float(np.clip(m3_end - M3_DECAY_PTS_PER_MIN * h_min, 0.0, 100.0))
+
+        lo = _compose(m3_stop, 1.0)          # acute -> 0: the dose floor, 0.50*m3
+        mid = _compose(_m3_of_dose(_dose_at(h_min, source_now)), a_central)
+        hi = _compose(_m3_of_dose(_dose_at(h_min, source_high)), a_high)
+        # Monotone in load by construction, but bucket averaging can invert them
+        # by a hair; order defensively so the band is never reported inverted.
+        lo, mid, hi = min(lo, mid, hi), sorted((lo, mid, hi))[1], max(lo, mid, hi)
+        out[h] = Forecast(pred=mid, ci_low=lo, ci_high=hi)
     return out
 
 
@@ -100,8 +283,13 @@ class PredictJob:
         made_at = datetime.now(tz=timezone.utc)
         train_window = self._settings.predict_train_window
         horizons = self._settings.future_horizons
+        # SESSION_GAP_S is the model's own session boundary: past it,
+        # biomech.compute() resets `dose` to 0 on reconnect (SPEC §7.4), so any
+        # dose trajectory projected across that gap describes a state the model
+        # will never actually produce.
+        max_staleness = timedelta(seconds=self._settings.session_gap_s)
         rows = await self._pool.fetch(
-            """SELECT device_id, bucket, composite
+            """SELECT device_id, bucket, composite, m3
                FROM metrics_1m
                WHERE bucket >= $1
                ORDER BY device_id, bucket""",
@@ -117,10 +305,21 @@ class PredictJob:
                 log.info("skip %s: only %d/%d buckets in train window",
                          device_id, len(dev_rows), MIN_BUCKETS)
                 continue
+            # MIN_BUCKETS is a raw count over the whole train window: it says
+            # nothing about RECENCY, so a device that streamed for 20 minutes
+            # and then went offline an hour ago still passes it. Without this
+            # gate such a device kept producing a fresh rising forecast every
+            # PREDICT_INTERVAL_S off a dead trend.
+            t_end = dev_rows[-1]["bucket"]
+            if made_at - t_end > max_staleness:
+                log.info("skip %s: newest bucket is %s old (> %s)",
+                         device_id, made_at - t_end, max_staleness)
+                continue
             try:
                 history = pd.DataFrame(
                     {"bucket": [r["bucket"] for r in dev_rows],
-                     "composite": [r["composite"] for r in dev_rows]}
+                     "composite": [r["composite"] for r in dev_rows],
+                     "m3": [r["m3"] for r in dev_rows]}
                 )
                 forecasts = fit(history, horizons)
                 await self._pool.executemany(
@@ -129,7 +328,13 @@ class PredictJob:
                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                        ON CONFLICT DO NOTHING""",
                     [
-                        (made_at, device_id, h, made_at + h,
+                        # target_time is anchored on the LAST OBSERVED BUCKET,
+                        # not on made_at. fit() extrapolates from the end of the
+                        # data, and metrics_1m runs at least a minute behind
+                        # (end_offset = 1 minute plus refresh lag), so labelling
+                        # these `made_at + h` overstated every horizon by the
+                        # size of that lag.
+                        (made_at, device_id, h, t_end + h,
                          f.pred, f.ci_low, f.ci_high, MODEL_VERSION)
                         for h, f in forecasts.items()
                     ],

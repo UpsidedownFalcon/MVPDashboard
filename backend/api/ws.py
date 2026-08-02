@@ -168,7 +168,7 @@ class Hub:
 
     # --- endpoint ---------------------------------------------------------------
 
-    async def handle_client(self, ws: WebSocket) -> None:
+    async def handle_client(self, ws: WebSocket, expires_at: float | None = None) -> None:
         devices_param = ws.query_params.get("devices")
         devices = (
             {d.strip() for d in devices_param.split(",") if d.strip()}
@@ -187,7 +187,19 @@ class Hub:
             while True:
                 await ws.receive_text()
 
-        reader_task = asyncio.create_task(reader())
+        async def expiry_watch() -> None:
+            # S3-T05: mid-connection cookie-expiry check each 60s — a browser
+            # left open past JWT_EXPIRE_HOURS gets 4401 (frontend -> /login),
+            # not a silently immortal stream.
+            while True:
+                await asyncio.sleep(60)
+                if time.time() >= expires_at:  # type: ignore[operator]
+                    await ws.close(code=4401)
+                    return
+
+        tasks = [asyncio.create_task(reader())]
+        if expires_at is not None:
+            tasks.append(asyncio.create_task(expiry_watch()))
         try:
             while True:
                 payload = await client.queue.get()
@@ -195,7 +207,8 @@ class Hub:
         except (WebSocketDisconnect, RuntimeError):
             pass
         finally:
-            reader_task.cancel()
-            await asyncio.gather(reader_task, return_exceptions=True)
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
             self.clients.pop(ws, None)
             log.info("ws client gone (total=%d)", len(self.clients))
