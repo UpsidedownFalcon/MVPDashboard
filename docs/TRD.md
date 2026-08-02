@@ -270,6 +270,7 @@ Everything that connects components lives in **one root `.env`** (template:
 | `FUTURE_HORIZONS` | `10m,30m,1h` | deployment e.g. `1d,3d,1w` |
 | `PREDICT_INTERVAL_S` / `PREDICT_TRAIN_WINDOW` | 300 / 2h | |
 | `INSIGHT_INTERVAL_S` / `INSIGHT_COOLDOWN_S` | 60 / 600 | |
+| `INSIGHT_WARN_THRESHOLD` / `INSIGHT_ALERT_THRESHOLD` | 70 / 85 | composite 0–100 scale (S2-T05 starter rules; task sheet's 0.7/0.85 predate the SPEC 0–100 rescale) |
 | `METRICS_RETENTION` | 30d | hypertable retention |
 
 Duration syntax everywhere: `<int><s|m|h|d|w>`.

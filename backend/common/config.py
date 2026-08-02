@@ -69,6 +69,10 @@ class Settings(BaseSettings):
     predict_train_window_raw: str = Field("2h", validation_alias="PREDICT_TRAIN_WINDOW")
     insight_interval_s: int = 60
     insight_cooldown_s: int = 600
+    # Insight rule thresholds on the composite's 0-100 scale (S2-T05; the task
+    # sheet's 0.7/0.85 predate the SPEC's 0-100 rescale — TRD §7).
+    insight_warn_threshold: float = 70.0
+    insight_alert_threshold: float = 85.0
     metrics_retention_raw: str = Field("30d", validation_alias="METRICS_RETENTION")
 
     @field_validator("limb_map", mode="before")

@@ -15,9 +15,12 @@ from fastapi.responses import FileResponse
 
 from common.config import get_settings
 from migrations.migrate import dsn
+from api.jobs.insights import InsightJob
 from api.jobs.predict import PredictJob
 from api.routes.devices import router as devices_router
 from api.routes.forecasts import router as forecasts_router
+from api.routes.health import router as health_router
+from api.routes.insights import router as insights_router
 from api.routes.metrics import router as metrics_router
 from api.writer import Writer
 from api.ws import Hub
@@ -43,13 +46,17 @@ def create_app() -> FastAPI:
         await writer.start()
         predict_job = PredictJob(settings, pool)
         await predict_job.start()
+        insight_job = InsightJob(settings, pool)
+        await insight_job.start()
         app.state.pool = pool
         app.state.writer = writer
         app.state.predict_job = predict_job
+        app.state.insight_job = insight_job
         app.state.settings = settings
         app.state.redis = hub.redis
-        log.info("api up (ws fan-out + /debug + db writer + rest + predict)")
+        log.info("api up (ws fan-out + /debug + db writer + rest + jobs)")
         yield
+        await insight_job.stop()
         await predict_job.stop()
         await writer.stop()
         await pool.close()
@@ -59,33 +66,8 @@ def create_app() -> FastAPI:
     app.include_router(devices_router)
     app.include_router(metrics_router)
     app.include_router(forecasts_router)
-
-    @app.get("/api/health/live")
-    async def health_live() -> dict[str, str]:
-        return {"status": "ok"}
-
-    @app.get("/api/health")
-    async def health() -> dict:
-        hub: Hub = app.state.hub
-        redis_ok = await hub.redis_ok()
-        return {
-            "status": "ok" if redis_ok else "degraded",
-            "redis": redis_ok,
-            "ingest": await hub.ingest_stats(),
-            # Pre-normalisation biomech values per device (biomech SPEC §9.2):
-            # the signed transmission ratio R, its locked baseline, signed USI,
-            # dose and active flags. This is what the provisional reference
-            # bounds in SPEC §4 get calibrated against once real trial data
-            # exists, so it is exposed even though nothing consumes it yet.
-            "biomech": await hub.biomech_diag(),
-            "api": {
-                "ws_clients": len(hub.clients),
-                "ws_dropped": hub.ws_dropped,
-                "db_buffer": app.state.writer.db_buffer,
-                "db_dropped": app.state.writer.db_dropped,
-                "rows_written": app.state.writer.rows_written,
-            },
-        }
+    app.include_router(insights_router)
+    app.include_router(health_router)
 
     @app.get("/debug")
     async def debug_page() -> FileResponse:
