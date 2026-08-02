@@ -655,7 +655,14 @@ def compute(
             # freezes m4, but that is normal and must not raise a fault flag.
             flags.add("partial")
     if sess.R_base is None:
-        flags.add("warming_up")
+        # R needs a shank AND a thigh. With either side of the pair unmapped,
+        # R_base can never lock -- that is a permanently degraded sensor set,
+        # not a warm-up, and flagging it `warming_up` forever tells the UI to
+        # keep waiting for a value that is never coming.
+        if len(shank_i) and len(thigh_i):
+            flags.add("warming_up")
+        else:
+            flags.add("degraded_sensors")
 
     # m5: wUSI over decaying accumulators. Both the per-tick noise weighting
     # (where the units match) and the both-sides gate are load-bearing -- SPEC
@@ -668,7 +675,13 @@ def compute(
     if sides_ok and moving:
         L = float(tick_mean_adyn[left_i].mean())
         R = float(tick_mean_adyn[right_i].mean())
-        w_noise = 1.0 - 2.0 * sigma**2 / (sigma**2 + L * L + R * R)
+        # Clamped at 0: the weight goes NEGATIVE once L and R fall below the
+        # noise floor (it tends to -1 as both approach 0), and a negative
+        # weight subtracts from the accumulators -- eating previously measured
+        # load, and able to drive them negative outright on a noisy sensor
+        # where sigma is large. 0 is the correct floor: "this tick carries no
+        # trustworthy asymmetry information", not "undo the last tick".
+        w_noise = max(0.0, 1.0 - 2.0 * sigma**2 / (sigma**2 + L * L + R * R))
         decay = 0.5 ** (step / ASYM_HALFLIFE_S)
         sess.accL = sess.accL * decay + w_noise * L * step
         sess.accR = sess.accR * decay + w_noise * R * step

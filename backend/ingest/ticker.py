@@ -109,9 +109,13 @@ class DeviceTicker:
                         if jsrc == src:
                             jbuf.reset()
                 jitter.insert_chunk(ts_unwrapped, server_t, chunk.imu)
-            # surface jitter counters on the sensor stats
+            # Surface the jitter buffer's running totals. These are mirrored by
+            # assignment, so they go in their own field: stats.buf_drop is the
+            # SUM of this and the pending-queue overflow that state.py counts,
+            # which assigning over would erase (and only under load, when it is
+            # the number you actually need).
             sensor.stats.late_drop = jitter.late_drop
-            sensor.stats.buf_drop = jitter.buf_drop
+            sensor.stats.jitter_drop = jitter.buf_drop
 
     def _tick(self, t: float) -> TickInput:
         self._process_pending()

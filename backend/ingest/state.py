@@ -31,9 +31,23 @@ class SensorStats:
     crc_fail: int = 0        # batch-level share, attributed by the router owner
     bad_sync: int = 0
     late_drop: int = 0       # filled by the jitter buffer (T08)
-    buf_drop: int = 0        # pending-queue overflow
+    pending_drop: int = 0    # pending-queue overflow (this file)
+    jitter_drop: int = 0     # jitter-buffer capacity overflow, mirrored by the ticker
     sat_count: int = 0       # samples within 1% of full scale (biomech SPEC §3.7)
     _recv_at_last_rate: int = 0
+
+    @property
+    def buf_drop(self) -> int:
+        """Total buffer-overflow drops for this sensor (BACKEND_SCHEMA §4).
+
+        Two independent bounded buffers can overflow — the pending queue here
+        and the jitter buffer downstream — and they overflow for the same
+        reason: load. They are summed rather than sharing one field because the
+        ticker mirrors the jitter buffer's running total by assignment, which
+        used to overwrite the pending count and hide it exactly when the system
+        was busy enough for it to matter.
+        """
+        return self.pending_drop + self.jitter_drop
 
 
 @dataclass
@@ -56,7 +70,7 @@ class SensorState:
     def append(self, chunk: SampleChunk) -> None:
         if len(self.pending) >= PENDING_MAXCHUNKS:
             dropped = self.pending[0]
-            self.stats.buf_drop += len(dropped.ts_us)
+            self.stats.pending_drop += len(dropped.ts_us)
         self.pending.append(chunk)
         self.stats.recv += len(chunk.ts_us)
         self.last_seen = chunk.recv_time

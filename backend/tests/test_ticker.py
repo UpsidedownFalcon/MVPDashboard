@@ -138,6 +138,39 @@ async def test_hold_when_no_data_then_suspend(settings: Settings) -> None:
     assert all(t.quality == 0.0 for t in held_ticks)
 
 
+def test_pending_and_jitter_drops_compose(settings: Settings) -> None:
+    """Overflow in BOTH bounded buffers must show up in buf_drop (TRD §4).
+
+    The ticker mirrors the jitter buffer's running total onto the sensor stats.
+    It used to assign that onto the same field the pending queue increments, so
+    the pending-overflow count was erased on the next tick — under exactly the
+    load that produces it. The two counters are independent and both real, so
+    buf_drop reports their sum.
+    """
+    from ingest.state import PENDING_MAXCHUNKS, Registry
+
+    clock = FakeClock(start=1000.0)
+    registry = Registry()
+    device = registry.device(30)
+    ticker = DeviceTicker(device, settings, lambda tick: None,
+                          now_fn=clock.now, sleep_fn=clock.sleep)
+
+    # One sample per route() call, on one sensor, well past the pending cap.
+    for i in range(PENDING_MAXCHUNKS + 200):
+        payload = packet.encode(30, 0, 1, i * 1666, [i % 100, 0, 100, -100, 50, -50])
+        registry.route(packet.decode([payload]), recv_time=1000.0 + i * 1e-3)
+
+    stats = device.sensors[(0, 1)].stats
+    pending_only = stats.pending_drop
+    assert pending_only > 0, "fixture did not overflow the pending queue"
+    assert stats.jitter_drop == 0
+
+    ticker._process_pending()
+    assert stats.jitter_drop > 0, "fixture did not overflow the jitter buffer"
+    assert stats.pending_drop == pending_only, "pending overflow was clobbered"
+    assert stats.buf_drop == stats.pending_drop + stats.jitter_drop
+
+
 async def test_resume_after_offline_resets_and_ticks_again(settings: Settings) -> None:
     clock = FakeClock(start=1000.0)
     registry = Registry()

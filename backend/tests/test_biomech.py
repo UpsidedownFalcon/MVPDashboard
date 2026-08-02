@@ -372,6 +372,60 @@ def test_degradation_ladder(limbs, expect_m4, expect_m5):
         assert "degraded_sensors" in last.flags
 
 
+def test_noise_weight_never_subtracts_from_the_accumulators():
+    """wUSI's W must clamp at 0, not go negative (SPEC §5.5).
+
+    W = 1 - 2s^2/(s^2 + L^2 + R^2) tends to -1 as the per-tick loads approach
+    the noise floor. A negative W does not merely stop accumulating: it eats
+    load already measured, and on a sensor whose measured sigma is large it
+    drives accL/accR negative outright. The floor means "this tick carries no
+    trustworthy asymmetry information".
+    """
+    state: dict = {}
+    # Movement just above MOVE_GATE, paired with a deliberately noisy sensor:
+    # 2*sigma^2 then exceeds sigma^2 + L^2 + R^2 and the unclamped weight is
+    # about -0.66 on every tick.
+    def small(k):
+        t = (k * NS + np.arange(NS)) / FS
+        a = np.stack([np.zeros(NS), 9.81 + 0.25 * np.sin(2 * np.pi * 9 * t),
+                      np.zeros(NS)], 1)
+        return a, np.tile([20.0, 0.0, 0.0], (NS, 1))
+
+    _drive(small, 5, state)                      # create the session
+    noisy = biomech.Calibration(k=1.0, gyro_bias=np.zeros(3), sigma=0.5)
+    biomech.set_calibration(state, {limb: noisy for limb in LIMBS})
+    _drive(small, 60 * 60, state)                # 60 s
+
+    sess = state["_biomech"]
+    assert sess.accL >= 0.0 and sess.accR >= 0.0, (
+        f"noise weight went negative and drained the accumulators "
+        f"(accL={sess.accL:.4f}, accR={sess.accR:.4f})"
+    )
+
+
+def test_no_thigh_mapped_is_degraded_not_warming_up():
+    """R_base can never lock without a thigh, so it is not a warm-up (SPEC §10).
+
+    `warming_up` tells the UI a value is coming. With no thigh sensor in
+    LIMB_MAP, m4 is permanently unavailable — a degraded sensor set. Flagging
+    it `warming_up` leaves the UI waiting forever for m4.
+    """
+    limbs = ("left_shin", "right_shin")
+    state: dict = {}
+    last = None
+    for k in range(60 * 70):                     # past both warm-ups
+        a, w = _moving(k)
+        frames, times = make_tick(a, w, limbs=limbs, t0=k * NS / FS)
+        last = compute(frames, state, times)
+
+    assert last.m4 is None, "m4 cannot exist without a thigh sensor"
+    assert last.m5 is not None, "m5 should still emit from the two shanks"
+    assert "degraded_sensors" in last.flags
+    assert "warming_up" not in last.flags, (
+        "a metric that can never emit is degraded, not warming up"
+    )
+
+
 def test_held_tick_repeats_and_accumulates_no_dose():
     state = {}
     res, _ = _drive(lambda k: _moving(k), 120, state)

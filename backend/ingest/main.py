@@ -38,32 +38,66 @@ def _config_echo(settings) -> str:
     return " ".join(pairs)
 
 
-async def load_biomech_snapshots(settings) -> dict[int, dict]:
-    """Read every biomech:state:* key so a restart resumes mid-session.
+class BiomechRestorer:
+    """Restores a device's warm-restart snapshot whenever the device appears.
 
-    Without this an ingest restart silently resets an athlete to zero
-    accumulated load. Best-effort: Redis being unavailable just means every
-    device starts a fresh session, which is the pre-existing behaviour.
+    Per DEVICE, not per process start (biomech SPEC §7.4). Devices are created
+    on first packet and released again — evicted when silent past SESSION_GAP_S,
+    or displaced by a new device once MAX_DEVICES is reached, which needs only
+    OFFLINE_AFTER_S of silence. A device released that way and reconnecting a
+    few seconds later gets a brand-new DeviceState with empty session state,
+    while `biomech:state:{id}` is still sitting in Redis and still inside the
+    session gap. Loading the snapshots once at startup could not reach that
+    case: it restored a device's first appearance only, so a trainer swapping
+    wearables silently zeroed an athlete's accumulated load.
+
+    The fetch is asynchronous, so a device's first few ticks may run before the
+    snapshot lands; restore() overwrites the accumulators, so at 60 Hz that
+    costs a few ms of dose. Redis being unavailable just means a fresh session,
+    which is the same as having no snapshot.
     """
-    import orjson  # noqa: PLC0415
-    import redis.asyncio as aioredis  # noqa: PLC0415
 
-    out: dict[int, dict] = {}
-    client = aioredis.from_url(settings.redis_url)
-    try:
-        async for key in client.scan_iter(match="biomech:state:*"):
-            raw = await client.get(key)
-            if not raw:
-                continue
-            device_id = int(key.decode().rsplit(":", 1)[1])
-            out[device_id] = orjson.loads(raw)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("biomech snapshot restore skipped (%s) — fresh sessions", exc)
-    finally:
-        await client.aclose()
-    if out:
-        log.info("loaded biomech snapshots for devices: %s", sorted(out))
-    return out
+    def __init__(self, settings, limbs: tuple[str, ...], client=None) -> None:
+        self._limbs = limbs
+        self._session_gap_s = settings.session_gap_s
+        if client is None:
+            import redis.asyncio as aioredis  # noqa: PLC0415
+            client = aioredis.from_url(settings.redis_url)
+        self._client = client
+        self._tasks: set[asyncio.Task] = set()
+        self.restored = 0
+
+    def device_added(self, device) -> None:
+        """Registry callback (synchronous): kick off the fetch, never block."""
+        task = asyncio.create_task(self._restore(device),
+                                   name=f"restore-dev{device.device_id}")
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _restore(self, device) -> None:
+        import orjson  # noqa: PLC0415
+
+        from common import redis_keys  # noqa: PLC0415
+        try:
+            raw = await self._client.get(redis_keys.biomech_state(device.device_id))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("device %d: snapshot fetch failed (%s) — fresh session",
+                        device.device_id, exc)
+            return
+        if not raw:
+            return
+        ok = biomech.restore(device.user_state, orjson.loads(raw), self._limbs,
+                             time.time(), self._session_gap_s)
+        if ok:
+            self.restored += 1
+            log.info("device %d: biomech session restored from snapshot",
+                     device.device_id)
+
+    async def close(self) -> None:
+        for task in list(self._tasks):
+            task.cancel()
+        await asyncio.gather(*self._tasks, return_exceptions=True)
+        await self._client.aclose()
 
 
 async def stats_loop(registry: Registry, udp_counters: UdpCounters,
@@ -91,22 +125,15 @@ async def amain() -> None:
     registry.offline_after_s = settings.offline_after_s
     publisher = Publisher(settings, registry)
 
-    # Warm-restart snapshots (biomech SPEC §7.4). Devices do not exist yet —
-    # they are created on first packet — so the snapshots are loaded now and
-    # applied lazily on each device's first tick.
-    pending_restore = await load_biomech_snapshots(settings)
+    # Warm-restart snapshots (biomech SPEC §7.4), fetched per device as each
+    # one appears — including on reconnect, not only at process start.
     limbs = tuple(sorted(settings.limb_map.values()))
+    restorer = BiomechRestorer(settings, limbs)
 
     def on_tick(tick: TickInput) -> None:
         device = registry.devices.get(tick.device_id)
         if device is None:
             return
-        snap = pending_restore.pop(tick.device_id, None)
-        if snap is not None:
-            if biomech.restore(device.user_state, snap, limbs, tick.t_server,
-                               settings.session_gap_s):
-                log.info("device %d: biomech session restored from snapshot",
-                         tick.device_id)
         try:
             tick.metrics = biomech.compute(tick.frames, device.user_state, tick.times)
         except Exception:  # noqa: BLE001
@@ -124,7 +151,12 @@ async def amain() -> None:
         publisher.publish_tick(tick, tick.metrics)
 
     ticker_manager = TickerManager(settings, on_tick)
-    registry.on_new_device = ticker_manager.device_added
+
+    def on_new_device(device) -> None:
+        restorer.device_added(device)      # before the ticker: restore, then tick
+        ticker_manager.device_added(device)
+
+    registry.on_new_device = on_new_device
     registry.on_device_removed = ticker_manager.device_removed
 
     transport = await start_udp_server(settings.udp_port, buf, udp_counters)
@@ -152,6 +184,7 @@ async def amain() -> None:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        await restorer.close()
         await publisher.close()
 
 
