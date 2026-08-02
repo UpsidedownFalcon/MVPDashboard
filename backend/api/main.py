@@ -45,6 +45,12 @@ def create_app() -> FastAPI:
             "status": "ok" if redis_ok else "degraded",
             "redis": redis_ok,
             "ingest": await hub.ingest_stats(),
+            # Pre-normalisation biomech values per device (biomech SPEC §9.2):
+            # the signed transmission ratio R, its locked baseline, signed USI,
+            # dose and active flags. This is what the provisional reference
+            # bounds in SPEC §4 get calibrated against once real trial data
+            # exists, so it is exposed even though nothing consumes it yet.
+            "biomech": await hub.biomech_diag(),
             "api": {
                 "ws_clients": len(hub.clients),
                 "ws_dropped": hub.ws_dropped,

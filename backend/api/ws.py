@@ -71,6 +71,18 @@ class Hub:
         except Exception:  # noqa: BLE001
             return {}
 
+    async def biomech_diag(self) -> dict[str, dict[str, str]]:
+        """Per-device biomech diagnostics (biomech SPEC §9.2), keyed by device."""
+        out: dict[str, dict[str, str]] = {}
+        try:
+            async for key in self._redis.scan_iter(match="biomech:diag:*"):
+                device_id = key.decode().rsplit(":", 1)[1]
+                raw = await self._redis.hgetall(key)
+                out[device_id] = {k.decode(): v.decode() for k, v in raw.items()}
+        except Exception:  # noqa: BLE001
+            return out
+        return out
+
     # --- fan-out ----------------------------------------------------------------
 
     def _enqueue(self, client: _Client, payload: str) -> None:

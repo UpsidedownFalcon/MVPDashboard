@@ -22,6 +22,10 @@
   .comp { grid-row: span 2; }
   .chart-title { font-size:11px; color:#999; margin:0 0 2px 2px; }
   .sensors { font-size:11px; color:#8ab; }
+  .flags { font-size:11px; color:#c9a227; letter-spacing:.3px; }
+  /* "no data" marker for a null metric — must not look like a zero reading */
+  .na { position:absolute; inset:0; display:none; align-items:center;
+        justify-content:center; color:#555; font-size:18px; pointer-events:none; }
   .u-legend { display:none; }
 </style>
 </head>
@@ -32,7 +36,15 @@
 <script>
 "use strict";
 const WINDOW_S = 30, OUT_HZ = 60, MAXPTS = WINDOW_S * OUT_HZ + 60;
+// Display names from docs/biomech/SPEC.md §9. All six outputs are 0..100.
 const METRICS = ["m1","m2","m3","m4","m5"];
+const LABELS = {
+  m1: "m1 impact", m2: "m2 loading rate", m3: "m3 accumulated load",
+  m4: "m4 control *", m5: "m5 L/R balance *",
+};
+// m4/m5 are null far more often than the rest by design: null for the first
+// 60s/30s of every session, and whenever a leg loses a sensor. They must render
+// as GAPS, never as 0 — 0 would read as "perfect" (SPEC §9).
 const panels = new Map();   // dev -> panel
 
 function mkChart(el, title, height, color) {
@@ -40,10 +52,11 @@ function mkChart(el, title, height, color) {
   if (title !== "composite") { const t = document.createElement("div");
     t.className = "chart-title"; t.textContent = title; wrap.appendChild(t); }
   el.appendChild(wrap);
-  const fixed = title === "composite";
   const opts = {
     width: 10, height,
-    scales: { x: { time: true }, y: fixed ? { range: [0, 1] } : { auto: true } },
+    // All six metrics are 0..100 (SPEC §1). Fixed range on every chart, not
+    // auto: an all-null series must look empty, not auto-scaled to noise.
+    scales: { x: { time: true }, y: { range: [0, 100] } },
     axes: [
       { stroke:"#777", grid:{stroke:"#222"}, ticks:{stroke:"#333"} },
       { stroke:"#777", grid:{stroke:"#222"}, ticks:{stroke:"#333"} },
@@ -64,6 +77,7 @@ function mkPanel(dev) {
       <span class="badge offline" data-r="badge">offline</span>
       <span class="badge held" data-r="held">HELD</span>
       <span data-r="q">q: –</span>
+      <span class="flags" data-r="flags"></span>
       <span class="sensors" data-r="sensors"></span>
     </div>
     <div class="charts">
@@ -77,9 +91,19 @@ function mkPanel(dev) {
   const panel = {
     root, data, dirty: false,
     badge: q("badge"), held: q("held"), qEl: q("q"), sensorsEl: q("sensors"),
+    flagsEl: q("flags"),
     comp: mkChart(q("comp"), "composite", 180, "#fa0"),
-    minis: METRICS.map((m, i) => mkChart(q(m), m, 80, "#4af")),
+    minis: METRICS.map((m, i) => mkChart(q(m), LABELS[m], 80, "#4af")),
+    naEls: {},
   };
+  METRICS.forEach(m => {
+    // "no data" overlay so a null series is distinguishable from a dead chart
+    const el = document.createElement("div");
+    el.className = "na"; el.textContent = "–";
+    q(m).style.position = "relative";
+    q(m).appendChild(el);
+    panel.naEls[m] = el;
+  });
   const resize = () => {
     const w = q("comp").clientWidth || 300;
     panel.comp.setSize({ width: w, height: 180 });
@@ -96,11 +120,18 @@ function onTick(msg) {
   const p = panels.get(msg.dev) || mkPanel(msg.dev);
   const d = p.data, t = Date.parse(msg.t) / 1000;
   d.t.push(t); d.c.push(msg.c);
-  METRICS.forEach((_, i) => d.m[i].push(msg.m[i]));
+  // null passes straight through: uPlot renders it as a gap, which is what an
+  // unavailable metric should look like. Never coerce to 0.
+  METRICS.forEach((m, i) => {
+    const v = msg.m[i];
+    d.m[i].push(v === undefined ? null : v);
+    p.naEls[m].style.display = (v === null || v === undefined) ? "block" : "none";
+  });
   while (d.t.length > MAXPTS) { d.t.shift(); d.c.shift(); d.m.forEach(a => a.shift()); }
   p.qEl.textContent = `q: ${(msg.q * 100).toFixed(0)}%`;
   p.held.style.display = msg.q === 0 ? "inline" : "none";
   p.badge.textContent = "online"; p.badge.className = "badge online";
+  p.flagsEl.textContent = (msg.f || []).join(" ");
   p.dirty = true;
 }
 
