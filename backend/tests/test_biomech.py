@@ -602,6 +602,111 @@ def test_session_reset_clears_dose_but_keeps_calibration():
     assert sess.cal["left_shin"].k == 1.01, "calibration must survive a session reset"
 
 
+def test_m5_returns_toward_even_on_its_own():
+    """After a one-sided bout, m5 must come back toward even BY ITSELF -- not
+    only when the other leg is loaded (wearer request 2026-08-03: "hop for 5 s
+    then stand still and it should return to even").
+
+    🚩 The obvious fix does not work: USI is scale-invariant, so decaying both
+    accumulators proportionally leaves it EXACTLY unchanged. The imbalance has
+    to be pulled toward the common mean. This test fails against proportional
+    decay, which is why it exists.
+    """
+    state: dict = {}
+    # 20 s of movement to clear m5's warm-up, one-sided (left only)
+    for k in range(60 * 40):
+        a_l, w_l = _moving(k, scale=1.0)
+        a_r, w_r = _moving(k, scale=0.05)
+        fl, tl = make_tick(a_l, w_l, limbs=("left_shin", "left_thigh"), t0=k * NS / FS)
+        fr, tr = make_tick(a_r, w_r, limbs=("right_shin", "right_thigh"), t0=k * NS / FS)
+        biased = compute({**fl, **fr}, state, {**tl, **tr})
+    # Assert on the UNCLAMPED signed USI, not m5: m5 saturates at 18% USI, so
+    # any meaningful one-sided bout pins it at 100 and hides the recovery.
+    assert biased.m5 is not None
+    biased_usi = abs(biased.raw["usi_pct"])
+    assert biased_usi > 5.0, f"one-sided load should show up, got {biased_usi:.1f}%"
+
+    # now STAND STILL -- no movement at all, both sensors live
+    n0 = 60 * 40
+    a_still = np.stack([np.zeros(NS), np.full(NS, 9.81), np.zeros(NS)], 1)
+    w_still = np.zeros((NS, 3))
+    for k in range(n0, n0 + 60 * 150):                       # 150 s of stillness
+        frames, times = make_tick(a_still, w_still, t0=k * NS / FS)
+        rested = compute(frames, state, times)
+    rested_usi = abs(rested.raw["usi_pct"])
+    assert rested_usi < 0.5 * biased_usi, (
+        f"imbalance must return toward even while standing still: "
+        f"{biased_usi:.1f}% -> {rested_usi:.1f}%"
+    )
+
+
+def test_a_dead_side_still_cannot_move_m5():
+    """The rebalance must NOT reopen the failure mode the freeze exists for.
+
+    Both the rebalance and the accumulation require BOTH sides streaming. A
+    one-sided sensor failure freezes the whole thing, because without that the
+    live side keeps growing while the dead one decays and m5 hits maximum
+    within seconds (SPEC §5.5).
+    """
+    state: dict = {}
+    for k in range(60 * 40):
+        a, w = _moving(k)
+        frames, times = make_tick(a, w, t0=k * NS / FS)
+        before = compute(frames, state, times)
+    assert before.m5 is not None
+
+    n0 = 60 * 40
+    for k in range(n0, n0 + 60 * 90):                        # left side dies
+        a, w = _moving(k)
+        frames, times = make_tick(a, w, t0=k * NS / FS)
+        for limb in ("left_shin", "left_thigh"):
+            frames[limb] = np.empty((0, 6), dtype=np.float32)
+            times[limb] = np.empty(0, dtype=np.float64)
+        m = compute(frames, state, times)
+        if m.m5 is not None:
+            assert abs(m.m5) < 50.0, (
+                f"a dead side drove m5 to {m.m5:.0f} -- the freeze is not holding"
+            )
+
+
+def test_hard_work_lingers_longer_than_easy_work():
+    """Wearer requirement: a short hard effort climbs fast, reaches a higher
+    amplitude and LINGERS; a long easy effort climbs slowly, reaches a lower
+    amplitude and CLEARS quickly.
+
+    A single half-life scaled by recent activity could not do the second half:
+    two minutes after a sprint the recent-load memory had faded and the
+    sprint's dose then shed at the easy rate.
+    """
+    def bout(scale, seconds, rest_s):
+        state: dict = {}
+        n = int(60 * seconds)
+        for k in range(n):
+            a, w = _moving(k, scale=scale)
+            frames, times = make_tick(a, w, t0=k * NS / FS)
+            worked = compute(frames, state, times)
+        a_still = np.stack([np.zeros(NS), np.full(NS, 9.81), np.zeros(NS)], 1)
+        w_still = np.zeros((NS, 3))
+        for k in range(n, n + int(60 * rest_s)):
+            frames, times = make_tick(a_still, w_still, t0=k * NS / FS)
+            rested = compute(frames, state, times)
+        return worked, rested
+
+    hard_w, hard_r = bout(scale=6.0, seconds=60, rest_s=600)     # short + hard
+    easy_w, easy_r = bout(scale=1.0, seconds=300, rest_s=600)    # long + easy
+
+    assert hard_w.m3 > easy_w.m3, (
+        f"the hard bout must reach a higher amplitude despite being 5x shorter "
+        f"({hard_w.m3:.1f} vs {easy_w.m3:.1f})"
+    )
+    hard_kept = hard_r.m3 / hard_w.m3
+    easy_kept = easy_r.m3 / easy_w.m3
+    assert hard_kept > easy_kept, (
+        f"hard work must linger: kept {hard_kept:.2f} of its dose vs "
+        f"{easy_kept:.2f} for easy work over the same 10 min rest"
+    )
+
+
 def test_snapshot_round_trip_applies_elapsed_decay():
     state = {}
     _drive(lambda k: _moving(k), 60 * 20, state)
@@ -612,8 +717,13 @@ def test_snapshot_round_trip_applies_elapsed_decay():
     ok = biomech.restore(fresh, snap, LIMBS, snap["last_tick_t"] + 60.0, 300.0)
     assert ok
     s2 = fresh["_biomech"]
-    expected = snap["dose"] * 0.5 ** (60.0 / biomech.DOSE_HALFLIFE_S)
+    # Each POOL ages at its own half-life across the gap -- the whole point of
+    # splitting them is that a sprint's dose and a walk's dose do not shed at
+    # the same rate, and a restart must not flatten that back to one rate.
+    expected = (snap["dose_fast"] * 0.5 ** (60.0 / biomech.DOSE_HALFLIFE_S)
+                + snap["dose_slow"] * 0.5 ** (60.0 / biomech.DOSE_HALFLIFE_SLOW_S))
     assert s2.dose == pytest.approx(expected, rel=1e-9)
+    assert s2.dose_slow > 0.0, "the slow pool must survive the round trip"
 
     stale: dict = {}
     assert not biomech.restore(stale, snap, LIMBS, snap["last_tick_t"] + 999.0, 300.0), \

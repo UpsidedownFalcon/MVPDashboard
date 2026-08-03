@@ -142,9 +142,23 @@ DOSE_EXPONENT = 3.0          # load accumulates as a POWER LAW, not linearly.
 # how hard the recent work was: easy movement decays fast, hard work decays
 # slowly. `DOSE_HALFLIFE_S` is retained as the name the forecast mirrors and is
 # the REST value, which is the one the "if they stop now" branch needs.
-DOSE_HALFLIFE_S = 10 * 60.0          # at rest / after easy work
-DOSE_HALFLIFE_HARD_S = 60 * 60.0     # after sustained hard work
-DOSE_INTENSITY_TAU_S = 120.0         # memory of "how hard has it been lately"
+# TWO POOLS (2026-08-03). The decay rate must depend on how the dose was
+# EARNED, not on what the athlete happens to be doing now. A single half-life
+# scaled by recent activity got that backwards: two minutes after a sprint the
+# recent-load memory had faded, so the sprint's dose then shed at the EASY rate.
+#
+# Wearer's requirement: a short hard effort should climb fast, reach a higher
+# amplitude, and then linger; a long easy effort should climb slowly, reach a
+# lower amplitude, and clear quickly. Splitting the accumulation by intensity
+# gives exactly that, because each increment is filed under the half-life it
+# deserves at the moment it is earned and keeps it forever after.
+DOSE_HALFLIFE_S = 15 * 60.0          # FAST pool: low-intensity work sheds quickly
+DOSE_HALFLIFE_SLOW_S = 90 * 60.0     # SLOW pool: hard work lingers
+# Share of an increment filed to the slow pool. Squared so the split is sharp:
+# at the hard-running reference (load_ratio 1) everything is slow, an easy jog
+# (~0.6) sends ~36%, a walk (~0.2) ~4%.
+def _slow_fraction(load_ratio: float) -> float:
+    return min(max(load_ratio, 0.0), 1.0) ** 2
 # Physical reference intensities for the dose power law -- the sustained level
 # of HARD RUNNING on each arm, so one dose-minute == one minute of hard-training
 # equivalent and M3_HI = 60 reads as "a full hard hour". These set the SCALE of
@@ -214,6 +228,14 @@ ASYM_HALFLIFE_S = 5 * 60.0
 # is roughly 14x more event-sensitive just after its 30 s warm-up gate than it
 # is seven minutes later. This channel is here to size a fix, not to ship one.
 ASYM_FAST_HALFLIFE_S = 10.0
+# How fast an imbalance returns to even ON ITS OWN, once both sides are
+# streaming again -- applied whether or not the athlete is moving. Without it
+# m5 stayed pinned to whatever the last one-sided bout left behind, because the
+# accumulators only ever updated while moving AND the scale-invariance of USI
+# means proportional decay is a no-op on it. 60 s: a 5 s hop is forgotten within
+# a couple of minutes, while a sustained limp keeps re-creating the imbalance
+# faster than it is shed, so a real asymmetry still holds.
+ASYM_REBALANCE_HALFLIFE_S = 60.0
 M5_WARMUP_S = 30.0           # the accumulator is rep-dominated before this
 PARTIAL_DEBOUNCE_S = 0.75    # `partial` must persist this long before it shows.
                              # A lossy link makes a limb's `active` flag flicker
@@ -496,7 +518,8 @@ class _Sess:
         self.ema_seen = np.zeros(n, dtype=bool)
         self.last_step = 1.0 / 60.0      # for held ticks, which carry no times
         # session accumulators
-        self.dose = 0.0
+        self.dose_fast = 0.0
+        self.dose_slow = 0.0
         self.accL = 0.0
         self.accR = 0.0
         self.fastL = 0.0        # m5 fast channel (diagnostic)
@@ -517,7 +540,6 @@ class _Sess:
         self.m4_stale = 0.0
         self.m5_stale = 0.0
         self.demand_ema: float | None = None   # exposure-smoothed demand
-        self.load_ema = 0.0                    # recent load, sets dose decay
         self.z4 = self.z12 = self.z20 = None   # m4 tremor-band filters
         self.prev: Metrics | None = None
         self.last_tick_t: float | None = None
@@ -625,15 +647,24 @@ class _Sess:
                if self.cal_src[i] != "default"}
         return out or None
 
+    @property
+    def dose(self) -> float:
+        """Total accumulated dose. The two pools differ only in how fast they
+        shed; everything downstream wants their sum."""
+        return self.dose_fast + self.dose_slow
+
     # --- SPEC Section 7.4 snapshot ------------------------------------------
     def snapshot(self) -> dict:
         return {
+            # v3: `dose` split into fast/slow pools (Section 5.3).
             # v2: m4's single `R_base` scalar became a per-intensity-band table.
             # A v1 snapshot is REJECTED rather than partly applied -- restoring a
             # baseline learned under the old single-band rule would reintroduce
             # exactly the activity-change confound the bands exist to remove.
-            "v": 2,
-            "dose": self.dose,
+            "v": 3,
+            "dose": self.dose,          # informational total; restore uses the pools
+            "dose_fast": self.dose_fast,
+            "dose_slow": self.dose_slow,
             "accL": self.accL,
             "accR": self.accR,
             "move_t": self.move_t,
@@ -651,13 +682,14 @@ class _Sess:
         }
 
     def restore(self, snap: dict, now: float, session_gap_s: float) -> bool:
-        if snap.get("v") != 2:
+        if snap.get("v") != 3:
             return False
         last = snap.get("last_tick_t")
         if last is None or now - last > session_gap_s:
             return False                       # too old: start a fresh session
         elapsed = max(now - last, 0.0)
-        self.dose = snap["dose"] * 0.5 ** (elapsed / DOSE_HALFLIFE_S)
+        self.dose_fast = snap["dose_fast"] * 0.5 ** (elapsed / DOSE_HALFLIFE_S)
+        self.dose_slow = snap["dose_slow"] * 0.5 ** (elapsed / DOSE_HALFLIFE_SLOW_S)
         decay = 0.5 ** (elapsed / ASYM_HALFLIFE_S)
         self.accL = snap["accL"] * decay
         self.accR = snap["accR"] * decay
@@ -690,7 +722,7 @@ class _Sess:
         `measured` is demoted to `carried` and the still-window search restarts
         from scratch — including the 3 s power-on discard.
         """
-        self.dose = 0.0
+        self.dose_fast = self.dose_slow = 0.0
         self.accL = self.accR = 0.0
         self.fastL = self.fastR = 0.0
         self.move_t = 0.0
@@ -704,7 +736,6 @@ class _Sess:
         self.m4_hold = self.m5_hold = None
         self.m4_stale = self.m5_stale = 0.0
         self.demand_ema = None
-        self.load_ema = 0.0
         self.session_start_t = None
         for i in range(len(self.limbs)):
             if self.cal_src[i] == "measured":
@@ -1201,14 +1232,15 @@ def compute(
     # `intensity` is retained on the 0-100 scale for the diagnostics stream and
     # for anything reading biomech:diag -- it is no longer what drives the dose.
     intensity = max(log_score(a_int, m1_lo, M1_HI), log_score(w_int, W_LO, W_HI))
-    # Recent-load memory drives the decay rate: hard work -> slow recovery.
-    a_load = 1.0 - math.exp(-step / DOSE_INTENSITY_TAU_S)
-    sess.load_ema += a_load * (min(load_ratio, 1.0) - sess.load_ema)
-    halflife = (DOSE_HALFLIFE_S
-                + (DOSE_HALFLIFE_HARD_S - DOSE_HALFLIFE_S) * sess.load_ema)
-    sess.dose *= 0.5 ** (step / halflife)
+    # Each pool decays at its own rate, always. What an increment is worth and
+    # how long it lasts are both set by the intensity that earned it.
+    sess.dose_fast *= 0.5 ** (step / DOSE_HALFLIFE_S)
+    sess.dose_slow *= 0.5 ** (step / DOSE_HALFLIFE_SLOW_S)
     if moving:
-        sess.dose += load_ratio**DOSE_EXPONENT * (step / 60.0)
+        inc = load_ratio**DOSE_EXPONENT * (step / 60.0)
+        f = _slow_fraction(load_ratio)
+        sess.dose_slow += inc * f
+        sess.dose_fast += inc * (1.0 - f)
         sess.move_t += step
     m3 = log_score(sess.dose, M3_LO, M3_HI)
 
@@ -1316,6 +1348,28 @@ def compute(
         # trustworthy asymmetry information", not "undo the last tick".
         w_noise = max(0.0, 1.0 - 2.0 * sigma**2 / (sigma**2 + L * L + R * R))
     usi_fast_pct = None
+    if sides_ok:
+        # SELF-REBALANCE toward even, every tick both sides are streaming --
+        # not only when the other leg is loaded (2026-08-03, wearer request:
+        # "hop for 5 s then stand still and it should come back to even").
+        #
+        # 🚩 Proportional decay CANNOT do this. USI = (L-R)/sqrt(L^2+R^2) is
+        # scale-invariant (that is one of its five axioms, Alves 2020), so
+        # multiplying both accumulators by the same factor leaves it EXACTLY
+        # unchanged. The imbalance has to be pulled toward the common mean:
+        #     accL,accR -> mean + (accL,accR - mean) * 2^(-dt/T)
+        # which decays the DIFFERENCE while preserving the total.
+        reb = 0.5 ** (step / ASYM_REBALANCE_HALFLIFE_S)
+        mid = 0.5 * (sess.accL + sess.accR)
+        sess.accL = mid + (sess.accL - mid) * reb
+        sess.accR = mid + (sess.accR - mid) * reb
+        mid_f = 0.5 * (sess.fastL + sess.fastR)
+        reb_f = 0.5 ** (step / ASYM_FAST_HALFLIFE_S)
+        sess.fastL = mid_f + (sess.fastL - mid_f) * reb_f
+        sess.fastR = mid_f + (sess.fastR - mid_f) * reb_f
+    # Accumulation still requires MOVEMENT. And when a side stops streaming the
+    # whole thing freezes -- no rebalance, no accumulation: a one-sided sensor
+    # failure must not be able to move m5 at all (SPEC Section 5.5).
     if sides_ok and moving:
         decay = 0.5 ** (step / ASYM_HALFLIFE_S)
         sess.accL = sess.accL * decay + w_noise * L * step
@@ -1461,6 +1515,8 @@ def compute(
             # means the weighting is being applied to the accumulators.
             "W": w_noise,
             "dose": sess.dose,
+            "dose_fast": sess.dose_fast,
+            "dose_slow": sess.dose_slow,
             "move_t": sess.move_t,
             "intensity": intensity,
             "a_int": a_int,

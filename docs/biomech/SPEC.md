@@ -508,9 +508,22 @@ Mechanical intensity, then **power-law weighted** accumulation with decay:
 
 ```
 load_ratio  = max( adyn_mean / A_DOSE_REF , wmag_mean / W_DOSE_REF )   physical, unbounded
-dose       ← dose · 2^(−Δt / DOSE_HALFLIFE)                            always
-if moving:  dose += load_ratio^DOSE_EXPONENT · Δt/60                   accumulate
-raw₃        = dose
+dose_fast  ← dose_fast · 2^(−Δt / 15 min)                              always
+dose_slow  ← dose_slow · 2^(−Δt / 90 min)                              always
+if moving:  inc = load_ratio^DOSE_EXPONENT · Δt/60
+            f   = clamp(load_ratio, 0, 1)²          share filed to the SLOW pool
+            dose_slow += inc·f ;  dose_fast += inc·(1−f)
+raw₃        = dose_fast + dose_slow
+
+🚩 **TWO POOLS (2026-08-03).** How long a dose lingers must depend on how it was
+**earned**, not on what the athlete is doing now. A single half-life scaled by *recent* activity
+got that backwards: two minutes after a sprint the recent-load memory had faded, so the sprint's
+dose then shed at the easy rate. Each increment is now filed to a pool at the moment it is
+earned and keeps that half-life for good, which gives the requested behaviour directly — a short
+hard effort climbs fast (cubic weighting), reaches a higher amplitude and **lingers**; a long
+easy effort climbs slowly, reaches a lower amplitude and **clears quickly**. The split is
+squared so it is sharp: hard running (`load_ratio` 1) is all slow, an easy jog (~0.6) files 36%,
+a walk (~0.2) files 4%.
 ```
 
 🚩 **The power law acts on the PHYSICAL load ratio, not on a 0–100 score — corrected
@@ -693,6 +706,29 @@ USI  = (accL − accR) / √(accL² + accR²)
 m5   = 100 · clamp( |USI| / 0.18 , 0, 1 )
 ```
 `ASYM_HALFLIFE = 5 min`.
+
+🚩 **SELF-REBALANCE (2026-08-03).** The accumulators also relax toward each other every tick
+both sides are streaming, with `ASYM_REBALANCE_HALFLIFE_S = 60 s` — whether or not the athlete
+is moving. Without it m5 stayed pinned to whatever the last one-sided bout left behind: the
+accumulators only updated while moving, so standing still froze the imbalance and only loading
+the *other* leg could correct it.
+
+⚠️ **Proportional decay cannot do this.** `USI = (L−R)/√(L²+R²)` is **scale-invariant** — that is
+one of the five axioms it was chosen for (Alves 2020) — so multiplying both accumulators by the
+same factor leaves it *exactly* unchanged. The imbalance has to be pulled toward the common mean:
+
+```
+mid = (accL + accR)/2 ;  acc ← mid + (acc − mid)·2^(−Δt/60 s)
+```
+
+which decays the **difference** while preserving the total.
+`test_m5_returns_toward_even_on_its_own` fails against proportional decay, which is why it
+exists. A 5 s hop is forgotten within a couple of minutes; a sustained limp keeps re-creating
+the imbalance faster than it is shed, so a real asymmetry still holds.
+
+🚩 The rebalance requires **both sides streaming**, exactly as accumulation does. A one-sided
+sensor failure freezes the whole thing — without that the live side keeps growing while the dead
+one decays and m5 hits maximum within seconds. `test_a_dead_side_still_cannot_move_m5` pins it.
 
 🚩 **The weighting must be applied PER TICK, not to the accumulator — otherwise it does nothing.**
 `σ` is a per-sample noise figure in m/s²; the accumulators are in m/s²·s. Evaluating

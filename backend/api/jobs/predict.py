@@ -68,7 +68,7 @@ MIN_BUCKETS = 10
 # against the biomech module, so a retune there fails the suite rather than
 # silently desynchronising the forecast.
 M3_LO, M3_HI = 0.03, 60.0            # biomech M3_LO / M3_HI (dose-minutes)
-DOSE_HALFLIFE_MIN = 10.0             # biomech DOSE_HALFLIFE_S / 60 (REST value)
+DOSE_HALFLIFE_MIN = 15.0             # biomech DOSE_HALFLIFE_S / 60 (FAST pool)
 FLOOR_FACTOR = 0.50                  # biomech FLOOR_FACTOR
 
 LN_M3_SPAN = math.log(M3_HI / M3_LO)                        # ln(6000) = 8.699515

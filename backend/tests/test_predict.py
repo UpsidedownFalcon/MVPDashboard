@@ -71,13 +71,13 @@ def test_m3_rest_decay_rate_is_derived_not_hardcoded() -> None:
 
     Derived from the module constants, never written down. The literal below is
     re-measured whenever the m3 range moves: it was 0.1771 pts/min while
-    M3_LO was 0.01 with a 45-minute half-life; it is 0.9119 since M3_LO was
-    re-anchored to 0.03 and the REST half-life cut to 10 minutes.
+    M3_LO was 0.01 with a 45-minute half-life; it is 0.6080 since M3_LO was
+    re-anchored to 0.03 and the FAST pool's half-life set to 15 minutes.
     """
     expected = (100.0 * math.log(2.0)
                 / math.log(P.M3_HI / P.M3_LO) / P.DOSE_HALFLIFE_MIN)
     assert P.M3_DECAY_PTS_PER_MIN == pytest.approx(expected, rel=1e-12)
-    assert P.M3_DECAY_PTS_PER_MIN == pytest.approx(0.9119275, abs=1e-6)
+    assert P.M3_DECAY_PTS_PER_MIN == pytest.approx(0.6079517, abs=1e-6)
     assert P.M3_DECAY_PTS_PER_MIN * P.DOSE_HALFLIFE_MIN == pytest.approx(9.1193, abs=1e-3)
 
 
@@ -104,33 +104,26 @@ def test_dose_m3_roundtrip() -> None:
     assert P._m3_of_dose(P.M3_LO / 10.0) == 0.0
 
 
-def test_dose_decay_is_intensity_dependent() -> None:
-    """Hard work must decay SLOWER than easy work.
+def test_dose_is_split_into_fast_and_slow_pools() -> None:
+    """How long a dose lingers must depend on how it was EARNED.
 
-    Replaces test_dose_equilibrium_matches_the_biomech_recurrence: the forecast
-    no longer uses the closed-form equilibrium (the dose decomposition was
-    retired with the composite rebuild), and the half-life is no longer a
-    constant to solve against.
-
-    A fixed 45-minute half-life meant m3 barely moved -- measured over 85 s of
-    rest after squats to failure it went 36.9 -> 36.9. The half-life now scales
-    with recent load between the rest and hard values.
+    A single half-life scaled by RECENT activity got this backwards: two
+    minutes after a sprint the recent-load memory had faded, so the sprint's
+    dose then shed at the easy rate. Each increment is now filed to a pool at
+    the moment it is earned, by intensity, and keeps that half-life forever.
     """
-    from ingest.biomech import (DOSE_HALFLIFE_HARD_S, DOSE_HALFLIFE_S,
-                                DOSE_INTENSITY_TAU_S)
+    from ingest import biomech as B
 
-    assert DOSE_HALFLIFE_S < DOSE_HALFLIFE_HARD_S, "hard work must decay slower"
-    assert DOSE_HALFLIFE_S == pytest.approx(P.DOSE_HALFLIFE_MIN * 60.0), (
-        "the forecast mirrors the REST half-life, which is the one its "
-        "'if they stop now' branch needs"
+    assert B.DOSE_HALFLIFE_S < B.DOSE_HALFLIFE_SLOW_S, "hard work must linger"
+    assert B.DOSE_HALFLIFE_S == pytest.approx(P.DOSE_HALFLIFE_MIN * 60.0), (
+        "the forecast mirrors the FAST pool, which governs ordinary recovery"
     )
-    assert DOSE_INTENSITY_TAU_S > 0
-
-    # the blend is linear in the recent-load EMA, so a fully loaded athlete sits
-    # at the hard half-life and a rested one at the rest half-life
-    for load, expect in ((0.0, DOSE_HALFLIFE_S), (1.0, DOSE_HALFLIFE_HARD_S)):
-        hl = DOSE_HALFLIFE_S + (DOSE_HALFLIFE_HARD_S - DOSE_HALFLIFE_S) * load
-        assert hl == pytest.approx(expect)
+    # the split is sharp: hard running is all slow, a walk is almost all fast
+    assert B._slow_fraction(1.0) == pytest.approx(1.0)
+    assert B._slow_fraction(0.6) == pytest.approx(0.36)
+    assert B._slow_fraction(0.2) == pytest.approx(0.04)
+    assert B._slow_fraction(0.0) == 0.0
+    assert B._slow_fraction(3.0) == pytest.approx(1.0), "clamped, never above 1"
 
 def test_fit_rising_trend_increases_with_horizon() -> None:
     horizons = [timedelta(minutes=10), timedelta(minutes=30), timedelta(hours=1)]
