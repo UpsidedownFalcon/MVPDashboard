@@ -71,13 +71,13 @@ def test_m3_rest_decay_rate_is_derived_not_hardcoded() -> None:
 
     Derived from the module constants, never written down. The literal below is
     re-measured whenever the m3 range moves: it was 0.1771 pts/min while
-    M3_LO was 0.01, and is 0.2027 since M3_LO was re-anchored to 0.03
-    dose-minutes (a narrower log span decays faster in points/min).
+    M3_LO was 0.01 with a 45-minute half-life; it is 0.9119 since M3_LO was
+    re-anchored to 0.03 and the REST half-life cut to 10 minutes.
     """
     expected = (100.0 * math.log(2.0)
                 / math.log(P.M3_HI / P.M3_LO) / P.DOSE_HALFLIFE_MIN)
     assert P.M3_DECAY_PTS_PER_MIN == pytest.approx(expected, rel=1e-12)
-    assert P.M3_DECAY_PTS_PER_MIN == pytest.approx(0.2026513, abs=1e-6)
+    assert P.M3_DECAY_PTS_PER_MIN == pytest.approx(0.9119275, abs=1e-6)
     assert P.M3_DECAY_PTS_PER_MIN * P.DOSE_HALFLIFE_MIN == pytest.approx(9.1193, abs=1e-3)
 
 
@@ -104,22 +104,33 @@ def test_dose_m3_roundtrip() -> None:
     assert P._m3_of_dose(P.M3_LO / 10.0) == 0.0
 
 
-def test_dose_equilibrium_matches_the_biomech_recurrence() -> None:
-    """Running biomech's own dose recurrence at constant intensity must
-    converge to dose_eq = (I/100)^DOSE_EXPONENT / (60*lambda) = 64.92*(I/100)^3.
-    This is the closed form the 'load continues' branch extrapolates with."""
-    from ingest.biomech import DOSE_EXPONENT, DOSE_HALFLIFE_S
+def test_dose_decay_is_intensity_dependent() -> None:
+    """Hard work must decay SLOWER than easy work.
 
-    lam = math.log(2.0) / DOSE_HALFLIFE_S          # per second
-    for intensity in (30.0, 60.0, 100.0):
-        dose, step = 0.0, 1.0 / 60.0
-        for _ in range(int(6 * 3600 * 60)):        # 6 h at 60 Hz
-            dose *= 0.5 ** (step / DOSE_HALFLIFE_S)
-            dose += (intensity / 100.0) ** DOSE_EXPONENT * (step / 60.0)
-        expected = (intensity / 100.0) ** DOSE_EXPONENT / (60.0 * lam)
-        assert dose == pytest.approx(expected, rel=0.01)
-    assert 1.0 / (60.0 * lam) == pytest.approx(64.92, abs=0.05)
+    Replaces test_dose_equilibrium_matches_the_biomech_recurrence: the forecast
+    no longer uses the closed-form equilibrium (the dose decomposition was
+    retired with the composite rebuild), and the half-life is no longer a
+    constant to solve against.
 
+    A fixed 45-minute half-life meant m3 barely moved -- measured over 85 s of
+    rest after squats to failure it went 36.9 -> 36.9. The half-life now scales
+    with recent load between the rest and hard values.
+    """
+    from ingest.biomech import (DOSE_HALFLIFE_HARD_S, DOSE_HALFLIFE_S,
+                                DOSE_INTENSITY_TAU_S)
+
+    assert DOSE_HALFLIFE_S < DOSE_HALFLIFE_HARD_S, "hard work must decay slower"
+    assert DOSE_HALFLIFE_S == pytest.approx(P.DOSE_HALFLIFE_MIN * 60.0), (
+        "the forecast mirrors the REST half-life, which is the one its "
+        "'if they stop now' branch needs"
+    )
+    assert DOSE_INTENSITY_TAU_S > 0
+
+    # the blend is linear in the recent-load EMA, so a fully loaded athlete sits
+    # at the hard half-life and a rested one at the rest half-life
+    for load, expect in ((0.0, DOSE_HALFLIFE_S), (1.0, DOSE_HALFLIFE_HARD_S)):
+        hl = DOSE_HALFLIFE_S + (DOSE_HALFLIFE_HARD_S - DOSE_HALFLIFE_S) * load
+        assert hl == pytest.approx(expect)
 
 def test_fit_rising_trend_increases_with_horizon() -> None:
     horizons = [timedelta(minutes=10), timedelta(minutes=30), timedelta(hours=1)]
@@ -153,7 +164,9 @@ def test_fit_too_few_buckets_raises() -> None:
 
 
 # =============================================================================
-# The two-component dose model.
+# Trend projection. The two-component dose model was RETIRED 2026-08-03: it
+# rested on the composite carrying dose as an additive floor, and dose now
+# reduces capacity instead, so "if they stop now" is trivially 0.
 # =============================================================================
 
 HORIZONS = [timedelta(minutes=10), timedelta(minutes=30), timedelta(hours=1)]
@@ -180,53 +193,6 @@ def test_resting_forecast_follows_the_closed_form_decay() -> None:
     # the observed source term is ~0 and the recovered acute factor is exactly 1.
     for h in HORIZONS:
         assert out[h].pred == pytest.approx(out[h].ci_low, abs=0.5)
-
-
-def test_stopped_athlete_forecast_decays_rather_than_rising() -> None:
-    """An athlete who worked and has now stopped must be projected DOWN, onto
-    the decaying dose floor, at every horizon."""
-    n_work, n_rest = 20, 10
-    m3, acute = [], []
-    for i in range(n_work):                       # working: dose climbing
-        m3.append(2.0 * i)
-        acute.append(60.0)
-    for i in range(n_rest):                       # stopped: dose decaying
-        m3.append(m3[n_work - 1] - P.M3_DECAY_PTS_PER_MIN * (i + 1))
-        acute.append(0.0)
-    df = dose_history(m3, acute)
-    out = fit(df, HORIZONS)
-
-    preds = [out[h].pred for h in HORIZONS]
-    assert preds == sorted(preds, reverse=True), f"forecast must decay, got {preds}"
-    assert preds[-1] < preds[0]
-    assert preds[0] <= df["composite"].iloc[-1] + 1e-6
-
-
-def test_rising_session_still_reports_an_honest_stop_floor() -> None:
-    """A window ending mid-effort SHOULD project higher under 'load continues' —
-    that is not the bug. What the old single-regression model could not express
-    is the other scenario: where the composite settles if the athlete stops now.
-    That floor is well below the current reading and is what ci_low carries.
-    """
-    n = 30
-    m3 = [1.5 * i for i in range(n)]              # still climbing at the edge
-    acute = [65.0] * n
-    df = dose_history(m3, acute)
-    out = fit(df, HORIZONS)
-    last = df["composite"].iloc[-1]
-
-    # OLS on this series extrapolates upward without bound; that is the regime
-    # where the old model produced its runaway forecasts.
-    x = np.arange(n, dtype=float)
-    assert float(np.polyfit(x, df["composite"].to_numpy(float), 1)[0]) > 0.0
-
-    for h in HORIZONS:
-        assert out[h].ci_low < last            # "if they stop now" is lower
-        assert out[h].ci_low == pytest.approx(
-            0.50 * max(0.0, m3[-1] - P.M3_DECAY_PTS_PER_MIN * h.total_seconds() / 60.0),
-            abs=1e-9,
-        )
-        assert out[h].ci_high >= out[h].pred
 
 
 def test_band_never_collapses_while_the_session_had_load() -> None:

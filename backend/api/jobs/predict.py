@@ -58,7 +58,7 @@ from common.config import Settings
 
 log = logging.getLogger("api.jobs.predict")
 
-MODEL_VERSION = "dose-scenario-1"
+MODEL_VERSION = "trend-ols-1"
 MIN_BUCKETS = 10
 
 # --- dose-model constants -----------------------------------------------------
@@ -68,7 +68,7 @@ MIN_BUCKETS = 10
 # against the biomech module, so a retune there fails the suite rather than
 # silently desynchronising the forecast.
 M3_LO, M3_HI = 0.03, 60.0            # biomech M3_LO / M3_HI (dose-minutes)
-DOSE_HALFLIFE_MIN = 45.0             # biomech DOSE_HALFLIFE_S / 60
+DOSE_HALFLIFE_MIN = 10.0             # biomech DOSE_HALFLIFE_S / 60 (REST value)
 FLOOR_FACTOR = 0.50                  # biomech FLOOR_FACTOR
 
 LN_M3_SPAN = math.log(M3_HI / M3_LO)                        # ln(6000) = 8.699515
@@ -168,82 +168,23 @@ def fit(history: pd.DataFrame, horizons: list[timedelta]) -> dict[timedelta, For
     x = ((df["bucket"] - t0).dt.total_seconds() / 60.0).to_numpy(dtype=float)
     y = df["composite"].to_numpy(dtype=float)
 
-    # m3 absent or entirely null: the decomposition cannot be formed. Fall back
-    # explicitly rather than treating a missing dose as m3 = 0, which would
-    # silently assert "this athlete has no accumulated load".
-    if "m3" not in df.columns or df["m3"].isna().all():
-        return _fit_linear_fallback(x, y, horizons)
-
-    m3_series = df["m3"].to_numpy(dtype=float)
-    # A bucket with composite but no m3 is a gap in the dose channel, not a
-    # zero; carry the last known value forward across it.
-    m3_series = pd.Series(m3_series).ffill().bfill().to_numpy(dtype=float)
-
-    # Recover the per-bucket acute factor A = H / D. This is exact per tick and
-    # very slightly approximate per bucket (both factors are bucket-averaged
-    # separately, so the covariance term is dropped) -- test_predict.py bounds
-    # that error empirically rather than assuming it away.
-    headroom = np.clip(1.0 - y / 100.0, 0.0, 1.0)
-    dose_factor = 1.0 - 0.005 * np.clip(m3_series, 0.0, 100.0)
-    acute_factor = np.clip(headroom / dose_factor, 1e-9, 1.0)
-
-    k = min(RECENT_BUCKETS, len(df))
-    a_central = float(acute_factor[-k:].mean())       # persistence of recent load
-    # The upper scenario is deliberately taken over the WHOLE training window,
-    # not just the recent tail: "if load returns to the hardest level of this
-    # session". Off the tail alone the band collapses to zero width whenever the
-    # athlete happens to be resting at prediction time, which renders as false
-    # precision -- the exact failure this model was meant to remove.
-    a_high = float(np.percentile(acute_factor, ACUTE_HIGH_PCT))
-
-    m3_end = float(m3_series[-1])
-    dose_end = _dose_of_m3(m3_end)
-    dose_series = np.array([_dose_of_m3(v) for v in m3_series], dtype=float)
-
-    # Estimate the dose SOURCE term S from the observed trajectory rather than
-    # assuming an intensity: d(dose)/dt = -lambda*dose + S, so
-    # S = d(dose)/dt + lambda*dose. Clamped at 0 -- a negative source is just
-    # decay, and extrapolating one would drive dose below zero.
-    x_recent, dose_recent = x[-k:], dose_series[-k:]
-    if k >= 3 and (x_recent[-1] - x_recent[0]) > 0:
-        d_slope = float(np.polyfit(x_recent, dose_recent, deg=1)[0])
-    else:
-        d_slope = 0.0
-    source_now = max(0.0, d_slope + LAMBDA_PER_MIN * float(dose_recent.mean()))
-
-    # ...and the hardest accumulation rate seen this session, for the upper
-    # scenario, so that branch is internally consistent: if the acute term
-    # returns to its session peak then dose accumulates at that rate too.
-    dt = np.diff(x)
-    ok = dt > 0
-    if ok.any():
-        pointwise = (np.diff(dose_series)[ok] / dt[ok]
-                     + LAMBDA_PER_MIN * (dose_series[:-1][ok] + dose_series[1:][ok]) / 2.0)
-        source_high = max(source_now, float(np.percentile(pointwise, 90.0)), 0.0)
-    else:
-        source_high = source_now
-
-    def _dose_at(h_min: float, source: float) -> float:
-        """First-order approach to dose_eq = S/lambda. Reduces EXACTLY to pure
-        decay when source == 0."""
-        dose_eq = source / LAMBDA_PER_MIN
-        return dose_eq + (dose_end - dose_eq) * math.exp(-LAMBDA_PER_MIN * h_min)
-
-    out: dict[timedelta, Forecast] = {}
-    for h in horizons:
-        h_min = h.total_seconds() / 60.0
-        # "they stop now": pure decay. m3 is a log score of an exponential, so
-        # this is a straight ramp -- CLAMPED at 0, or it predicts negative dose.
-        m3_stop = float(np.clip(m3_end - M3_DECAY_PTS_PER_MIN * h_min, 0.0, 100.0))
-
-        lo = _compose(m3_stop, 1.0)          # acute -> 0: the dose floor, 0.50*m3
-        mid = _compose(_m3_of_dose(_dose_at(h_min, source_now)), a_central)
-        hi = _compose(_m3_of_dose(_dose_at(h_min, source_high)), a_high)
-        # Monotone in load by construction, but bucket averaging can invert them
-        # by a hair; order defensively so the band is never reported inverted.
-        lo, mid, hi = min(lo, mid, hi), sorted((lo, mid, hi))[1], max(lo, mid, hi)
-        out[h] = Forecast(pred=mid, ci_low=lo, ci_high=hi)
-    return out
+    # 🚩 The dose decomposition was RETIRED on 2026-08-03 with the composite
+    # rebuild. It rested on the identity
+    #     1 - composite/100 == (1 - 0.005*m3) * (1 - acute/100)
+    # which held only while `m3` entered the composite as an additive FLOOR.
+    # It no longer does: dose now reduces CAPACITY instead, so the composite is
+    # `acute` alone and goes to 0 at rest whatever the accumulated load. Under
+    # that model "if they stop now" is trivially 0 and the scenario band carries
+    # no information, so continuing to publish it would be false precision.
+    #
+    # What replaces it is a plain trend projection with a CORRECT OLS prediction
+    # interval. Less informative than the scenario band, but true.
+    #
+    # The better successor -- projecting CAPACITY (knowable: dose decays at a
+    # known, now intensity-dependent rate) against persisted demand (unknowable)
+    # -- is the natural next model and is recorded as an open item rather than
+    # guessed at here.
+    return _fit_linear_fallback(x, y, horizons)
 
 
 class PredictJob:

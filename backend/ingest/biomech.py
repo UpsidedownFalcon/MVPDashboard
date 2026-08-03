@@ -135,7 +135,16 @@ DOSE_EXPONENT = 3.0          # load accumulates as a POWER LAW, not linearly.
                              # Bone daily-stress-stimulus uses m=4 (Whalen 1988);
                              # fatigue damage ~2.1 sub-threshold (Pattin 1996);
                              # 3 is a deliberate conservative middle.
-DOSE_HALFLIFE_S = 45 * 60.0
+# Dose decay is INTENSITY-DEPENDENT (2026-08-03). A fixed 45-minute half-life
+# meant m3 barely moved: measured over an 85 s rest after squats to failure it
+# went 36.9 -> 36.9, i.e. no visible recovery at all. Recovery from hard work
+# genuinely takes longer than from easy work, so the half-life now scales with
+# how hard the recent work was: easy movement decays fast, hard work decays
+# slowly. `DOSE_HALFLIFE_S` is retained as the name the forecast mirrors and is
+# the REST value, which is the one the "if they stop now" branch needs.
+DOSE_HALFLIFE_S = 10 * 60.0          # at rest / after easy work
+DOSE_HALFLIFE_HARD_S = 60 * 60.0     # after sustained hard work
+DOSE_INTENSITY_TAU_S = 120.0         # memory of "how hard has it been lately"
 # Physical reference intensities for the dose power law -- the sustained level
 # of HARD RUNNING on each arm, so one dose-minute == one minute of hard-training
 # equivalent and M3_HI = 60 reads as "a full hard hour". These set the SCALE of
@@ -245,39 +254,67 @@ DEGRADE_W_M4, DEGRADE_W_M5 = 0.45, 0.30    # m3 is NOT here: it drives `floor`
 # Renormalisation is kept; the cap is what makes it safe.
 #
 # Restore this toward 0.70 when m4/m5 gain real-data validation (open item 10).
+#
+# 🚩 SUPERSEDED 2026-08-03 by the capacity rebuild below. Kept only because the
+# forecast mirrors FLOOR_FACTOR; see CAPACITY_SPAN.
 CAPACITY_FACTOR = 0.15
 FLOOR_FACTOR = 0.50
-# Demand is EXPOSURE, not peak. m1/m2 are 1 s peak-holds -- correct for metrics
-# named Impact and Loading Rate -- but feeding them straight into a risk index
-# made one landing outrank a minute of running. Measured on a worn session: a
-# small forward jump pinned the composite at 100 while sustained running, which
-# the wearer rated as the higher risk, read the same. Kalkhoven's model is about
-# damage accumulating toward a threshold, so the risk term should follow
-# exposure. m1/m2 are unchanged; only the composite sees the smoothed value.
-DEMAND_TAU_S = 25.0
+
+# --- capacity rebuild (2026-08-03, from a 13-minute worn protocol) -----------
+#
+# THE FAULT: `dose` entered the composite as an additive `floor`, so the number
+# could never fall below 0.50*m3 and decayed only as fast as a 45-minute
+# half-life. Measured across the whole protocol -- still, squats, walk, jog,
+# jumps, single-leg landings, kicks, a limp, and squats to failure -- the
+# composite spanned 15.5 to 18.5. THREE POINTS. Standing still and squatting to
+# failure were indistinguishable. Worked through on the jump block: demand ~36
+# smeared to ~20 by a 25 s EMA, capacity 94.6, ratio 0.21 raised to the 4th
+# power = 0.002, so `acute` contributed 0.33 points and the other 16 were floor.
+#
+# Four dampers had stacked up -- additive floor, 25 s demand EMA, 4th-power
+# curve, and a capacity term cut to 0.15 -- each defensible alone, never
+# re-measured in combination against real movement.
+#
+# THE FIX: dose stops being a floor and becomes a CAPACITY cost, which is what
+# the load-vs-capacity model this claims to follow actually says. Fatigue does
+# not add risk at rest; it makes the SAME movement riskier. So:
+#
+#   still            -> demand 0 -> risk 0, whatever the accumulated dose
+#   transient        -> visible within a tick (demand is fast again)
+#   stop moving      -> decays immediately, no floor holding it up
+#   fatigued athlete -> same movement, lower capacity, higher risk
+#
+# and every primitive contributes: m1/m2 through demand, m3/m4/m5 through
+# capacity -- which is what the wearer asked for.
+#
+# Weights: dose carries the most because it is the only one of the three with
+# real-data validation; m4/m5 are still synthetic-fixture-only (SPEC 11.1).
+CAP_W_DOSE, CAP_W_CTRL, CAP_W_ASYM = 0.50, 0.30, 0.20
+# Maximum capacity reduction. 55 -> capacity floors at 45, so a fully depleted
+# athlete reaches full-scale risk at roughly half the demand a fresh one needs.
+CAPACITY_SPAN = 55.0
+
+# Demand is fast again. m1/m2 already hold their peak for 1 s, so this only
+# de-noises; at 25 s it smeared a 0.3 s landing into nothing.
+DEMAND_TAU_S = 2.0
 # Share of the remaining demand headroom that rotation can claim once the
 # accelerometer is clipped. 0.5 means a maximally rotating clipped impact reads
 # halfway between the clipping ceiling and full scale, so the top of the range
 # stays reserved rather than being handed out for any saturated event.
 ROT_ESCALATION = 0.5
-# Hill exponent on the load/capacity ratio. Raised 2 -> 4 on 2026-08-03: at n=2
-# the curve was far too eager at the bottom, and the wearer reported ordinary
-# activity reading as substantial injury risk -- a slow walk 20-30 and a light
-# jog 50-70. Measured on an activity ladder driven through this pipeline
-# (literature resultant PTA: walk 2.7-3.7 g, jog ~5 g, run 8-12 g, sprint ~20 g,
-# drop landing ~27 g), n=2 gave slow walk 26.0 and light jog 55.3 -- reproducing
-# the complaint almost exactly. See SPEC Section 6.1 for the full ladder.
+# Hill exponent on the load/capacity ratio, FITTED to the worn protocol's
+# measured m1/m2 against the wearer's stated targets for a FRESH athlete
+# (still 0, walk <=2, jog 15-20, jump 20-25, single-leg landing <=30, kick <=15):
 #
-# n=4 is not a fitted constant. Injury is a THRESHOLD event, not an average:
-# damage accumulates until it exceeds a critical threshold, or until load
-# exceeds a declining tissue strength (Kalkhoven 2021/2026 first-principles
-# model), and mechanical damage is driven far more by load MAGNITUDE than by
-# load frequency. The bone daily-stress-stimulus law uses exponent m = 4
-# (Whalen 1988) and fatigue-damage exponents span 2.1-5.8 (Pattin 1996), so a
-# 4th-power ratio is the same physics the dose term already uses. The practical
-# effect is that risk stays near zero through ordinary ambulation and only
-# climbs as demand approaches capacity, which is what the model claims to mean.
-ACUTE_EXPONENT = 4.0
+#   demand:   squats 24  walk 29  jog 37  kick 40  landing 50  jump 54
+#   n=3.5 ->  squats 1.3 walk 2.6 jog 6.0 kick 8.4 landing 17  jump 21
+#
+# Still a threshold law, not a fitted curve: injury is a threshold event and
+# damage scales with load MAGNITUDE far more than frequency (Kalkhoven), the
+# bone daily-stress-stimulus law uses m=4 (Whalen 1988) and fatigue-damage
+# exponents span 2.1-5.8 (Pattin 1996). 3.5 sits inside that range; 4 put an
+# easy walk below 1 and a jog at 3, which reads as no signal at all.
+ACUTE_EXPONENT = 3.5
 
 SESSION_GAP_S_DEFAULT = 300.0
 
@@ -459,6 +496,7 @@ class _Sess:
         self.m4_stale = 0.0
         self.m5_stale = 0.0
         self.demand_ema: float | None = None   # exposure-smoothed demand
+        self.load_ema = 0.0                    # recent load, sets dose decay
         self.prev: Metrics | None = None
         self.last_tick_t: float | None = None
         self.session_start_t: float | None = None
@@ -643,6 +681,7 @@ class _Sess:
         self.m4_hold = self.m5_hold = None
         self.m4_stale = self.m5_stale = 0.0
         self.demand_ema = None
+        self.load_ema = 0.0
         self.session_start_t = None
         for i in range(len(self.limbs)):
             if self.cal_src[i] == "measured":
@@ -1119,7 +1158,12 @@ def compute(
     # `intensity` is retained on the 0-100 scale for the diagnostics stream and
     # for anything reading biomech:diag -- it is no longer what drives the dose.
     intensity = max(log_score(a_int, m1_lo, M1_HI), log_score(w_int, W_LO, W_HI))
-    sess.dose *= 0.5 ** (step / DOSE_HALFLIFE_S)
+    # Recent-load memory drives the decay rate: hard work -> slow recovery.
+    a_load = 1.0 - math.exp(-step / DOSE_INTENSITY_TAU_S)
+    sess.load_ema += a_load * (min(load_ratio, 1.0) - sess.load_ema)
+    halflife = (DOSE_HALFLIFE_S
+                + (DOSE_HALFLIFE_HARD_S - DOSE_HALFLIFE_S) * sess.load_ema)
+    sess.dose *= 0.5 ** (step / halflife)
     if moving:
         sess.dose += load_ratio**DOSE_EXPONENT * (step / 60.0)
         sess.move_t += step
@@ -1240,7 +1284,15 @@ def compute(
     if sides_ok and sess.asym_t >= M5_WARMUP_S and denom > 0.0:
         usi = (sess.accL - sess.accR) / denom
         usi_pct = 100.0 * usi
-        m5 = 100.0 * min(abs(usi) / M5_FULL_SCALE_USI, 1.0)
+        # SIGNED (2026-08-03, user decision): the magnitude is |m5| and the
+        # SIGN carries the side -- POSITIVE = LEFT-dominant, NEGATIVE = RIGHT.
+        # Reported within a session only. Which limb dominates does not agree
+        # BETWEEN sessions (Cohen's kappa -0.14 to 0.60) and greater asymmetry
+        # has not been shown to predict injury (Malisoux 2024, n=836), so this
+        # is a "which side is carrying more right now" readout, never a claim
+        # that one leg is weaker or at risk. Everything that consumes m5 as a
+        # severity -- the capacity term, the insight rules -- takes abs().
+        m5 = math.copysign(100.0 * min(abs(usi) / M5_FULL_SCALE_USI, 1.0), usi)
         sess.m5_hold = m5
         sess.m5_stale = 0.0
     else:
@@ -1304,26 +1356,30 @@ def compute(
     sess.demand_ema = (demand_inst if sess.demand_ema is None
                        else sess.demand_ema + alpha_dem * (demand_inst - sess.demand_ema))
     demand = sess.demand_ema
-    terms = [(DEGRADE_W_M4, m4), (DEGRADE_W_M5, m5)]
-    avail = [(w, v) for w, v in terms if v is not None]
-    degradation = (sum(w * v for w, v in avail) / sum(w for w, _ in avail)
-                   if avail else 0.0)
-    capacity = 100.0 - CAPACITY_FACTOR * degradation
-    # Risk rises with the load/capacity RATIO. The previous form,
-    # 100*demand/(demand+capacity), is a hyperbola whose value at demand = 100
-    # and healthy capacity = 100 is exactly 50 -- so for an uninjured athlete the
-    # acute term could not exceed half scale however hard the session, and the
-    # top half of a 0-100 "injury risk" was reachable only through accumulated
-    # dose. Measured live: demand p99 = 91 yet composite p99 = 66.
-    # Same ratio raised to ACUTE_EXPONENT (a Hill function, sigmoid rather than
-    # hyperbolic so ordinary activity stays low), normalised so demand ==
-    # capacity reads 100 for any exponent. Degradation lowers capacity and
-    # therefore reaches full scale sooner, which is the intent.
+    # CAPACITY: what this athlete can currently tolerate. Every slow primitive
+    # enters HERE, not as an additive floor -- accumulated dose, movement-control
+    # loss and asymmetry all reduce what the body can absorb, so the same
+    # movement reads riskier when depleted while REST STILL READS ZERO.
+    # Renormalised over available terms (SPEC Section 8) so a device with fewer
+    # sensors is not silently scored as fresher than it is.
+    cap_terms = [(CAP_W_DOSE, m3), (CAP_W_CTRL, m4),
+                 (CAP_W_ASYM, None if m5 is None else abs(m5))]
+    cap_avail = [(w, v) for w, v in cap_terms if v is not None]
+    degradation = (sum(w * v for w, v in cap_avail) / sum(w for w, _ in cap_avail)
+                   if cap_avail else 0.0)
+    capacity = 100.0 - CAPACITY_SPAN * (degradation / 100.0)
+    # Risk rises with the load/capacity RATIO, raised to ACUTE_EXPONENT (a Hill
+    # function, sigmoid rather than hyperbolic so ordinary activity stays low)
+    # and normalised so demand == capacity reads 100 for any exponent.
+    #
+    # There is no `floor` term any more. That is the whole point: an athlete
+    # standing still has zero demand and therefore zero risk no matter how much
+    # load they have accumulated -- the accumulation shows up as a REDUCED
+    # CAPACITY, i.e. as a steeper response the moment they move again.
     ratio = demand / capacity if capacity > 0 else float("inf")
     r_n = ratio ** ACUTE_EXPONENT if math.isfinite(ratio) else float("inf")
     acute = 100.0 if not math.isfinite(r_n) else min(100.0, 200.0 * r_n / (r_n + 1.0))
-    floor = FLOOR_FACTOR * m3
-    composite = floor + (100.0 - floor) * acute / 100.0
+    composite = acute
 
     metrics = Metrics(
         m1=m1, m2=m2, m3=m3, m4=m4, m5=m5,
