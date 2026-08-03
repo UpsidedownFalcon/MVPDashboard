@@ -19,6 +19,7 @@ import time
 import numpy as np
 import pytest
 
+from common.scaling import GYRO_DPS_PER_COUNT
 from ingest import biomech
 from ingest.biomech import compute, log_score
 from tests.conftest import LIMBS, SQUATS_BIN, counts_from_si, make_tick
@@ -498,17 +499,86 @@ def test_packet_loss_does_not_collapse_dose():
     assert m.m3 > 0.0 and m.m1 > 0.0
 
 
-def test_saturated_window_suppresses_m1_m2():
-    """A truncated peak is worse than no peak (SPEC §3.7)."""
+def test_saturated_window_reports_a_marked_floor_value():
+    """A clipped peak is a LOWER BOUND, reported and marked — not suppressed.
+
+    Changed 2026-08-03 (user decision). The +-16 g part cannot be changed and it
+    clips inside real athletic movement: measured through this pipeline, dynamic
+    accel tops out near 147 m/s^2, so 35 g, 42 g, 60 g and 100 g landings all
+    read m1 = 75.2. Suppressing to None removed Impact and Loading Rate on ~2%
+    of ticks at 27 g PTA and ~7% at 42 g — i.e. exactly when load was highest.
+
+    So m1/m2 keep reporting and `saturated` marks them as floors, which the UI
+    renders as ">= x". The values stay monotonic; they stop being exact.
+    """
     state = {}
     _drive(lambda k: _moving(k), 120, state)
     sat = np.full((NS, 6), 32767.0, dtype=np.float32)
     t = np.arange(NS) / FS + 2.0
     m = compute({limb: sat.copy() for limb in LIMBS}, state,
                 {limb: t.copy() for limb in LIMBS})
-    assert m.m1 is None and m.m2 is None
-    assert "saturated" in m.flags
+    assert m.m1 is not None and m.m2 is not None, "clipped peaks are still reported"
+    assert m.m1 > 0.0
+    assert "saturated" in m.flags, "and are marked as lower bounds"
     assert m.composite is not None            # composite is never None
+
+
+def test_saturated_flag_means_lower_bound_not_any_clipping():
+    """`saturated` fires at SAT_SUPPRESS_FRACTION, not on a single clipped
+    sample. One clipped sample in a tick does not make the peak untrustworthy,
+    and firing on that made the flag near-permanent during hard work. The raw
+    fraction stays in `raw.sat_frac` for the fine-grained view."""
+    state = _quiet_state()
+    a, w = _moving(0)
+    f, tt = make_tick(a, w, t0=2.0)
+    one = next(iter(f))
+    f[one] = f[one].copy()
+    f[one][0, 0] = 32767.0                    # exactly one clipped sample
+    m = compute(f, state, tt)
+    assert 0.0 < m.raw["sat_frac"] <= 1.0 / NS
+    assert "saturated" not in m.flags
+    assert m.m1 is not None
+
+
+def test_rotation_discriminates_once_the_accelerometer_clips():
+    """The user's proposal, and the measurement behind it.
+
+    Above the clipping point m1/m2 cannot tell a fast benign movement from a
+    fast violently rotating one — measured at a fixed 35 g landing while
+    sweeping shank rate 100 -> 1900 deg/s, m1 stayed at 81.5 and m2 at 61.5 at
+    EVERY rate. Rotation is the only channel left, so it claims the demand
+    headroom m1 can no longer reach — and ONLY when saturated, because rotation
+    alone must never read as risk (a kick through the air is nearly pure
+    rotation and must stay low).
+    """
+    def sat_tick(state, gyro_dps):
+        sat = np.full((NS, 6), 32767.0, dtype=np.float32)
+        sat[:, 3:6] = gyro_dps / GYRO_DPS_PER_COUNT
+        t = np.arange(NS) / FS + 2.0
+        return compute({limb: sat.copy() for limb in LIMBS}, state,
+                       {limb: t.copy() for limb in LIMBS})
+
+    slow = sat_tick(_drive(lambda k: _moving(k), 120, {})[1], 50.0)
+    fast = sat_tick(_drive(lambda k: _moving(k), 120, {})[1], 1900.0)
+
+    assert slow.m1 == pytest.approx(fast.m1), "impact is blind here — that is the premise"
+    assert fast.raw["demand"] > slow.raw["demand"], (
+        "rotation must discriminate where impact cannot"
+    )
+
+
+def test_rotation_alone_does_not_inflate_demand():
+    """The guard on the rule above: high rotation with UNsaturated impact must
+    not escalate. A firm kick through the air is almost pure rotation with
+    modest impact and the wearer expects it to read low."""
+    state = _quiet_state()
+    spin = _rotating(1900.0)
+    res, _ = _drive(spin, 200, state)
+    last = res[-1]
+    assert "saturated" not in last.flags
+    assert last.raw["demand"] == pytest.approx(0.0, abs=2.0), (
+        f"pure rotation inflated demand to {last.raw['demand']:.1f}"
+    )
 
 
 # =============================================================================

@@ -235,18 +235,53 @@ single axis**, and spline restoration still underestimated peaks by ~1.4 g. Publ
 is **≥±32 g for tibial work**. **[L]**
 
 Actions: (a) count samples within 1% of full scale as `sat_count`, exposed via `/api/health`;
-(b) **suppress `m1` and `m2` for any window whose saturated fraction exceeds 2.6%** — emit `null`
-and flag, rather than a silently truncated peak.
+(b) above a saturated fraction of 2.6%, **report `m1`/`m2` as marked LOWER BOUNDS** and set the
+`saturated` flag, so the UI renders them as "≥ x".
+
+⚠️ **Changed 2026-08-03 (user decision): saturation no longer suppresses to `null`.** The
+hardware cannot be changed, and it clips *inside ordinary athletic movement*. Measured through
+this pipeline: dynamic acceleration tops out near **147 m/s²**, so **35 g, 42 g, 60 g and 100 g
+landings all read `m1` = 75.2** — identical. Suppressing removed Impact and Loading Rate on ~2%
+of ticks at 27 g PTA and ~7% at 42 g, i.e. exactly when load was highest, and took the
+composite's demand term with them. **[V]**
+
+Reporting a marked floor keeps the metrics monotonic (a harder landing never reads *lower*) and
+keeps the composite alive; it only stops them being exact. `saturated` therefore now means
+precisely *"these are lower bounds"* and fires at the 2.6% threshold — not on any single clipped
+sample, which made the flag near-permanent during hard work. The raw fraction stays in
+`raw.sat_frac`.
 
 ⚠️ *The 2.6% figure is borrowed, not derived.* It comes from a **gyroscope** clipping study on
 **foot-mounted** running sensors (cumulative error stays <5% below that fraction) and is applied
-here to **accelerometer** suppression on the shank. The transfer is plausible — both are
-"how much clipping before the aggregate is untrustworthy" — but it is **not validated for this
-use**. Treat it as a starting threshold to be tuned once real running data shows the actual
-saturated-sample distribution (open item 3). Clipping
-also destroys jerk (a flat top has zero derivative). **This belongs in the hardware backlog:
-±16 g is fine for thigh sensors and all strength training, but marginal on the shank for
-running and jumping.** Gyro ±2000 °/s is adequate everywhere except kicking. **[L]**
+here to the **accelerometer** on the shank. The transfer is plausible — both are "how much
+clipping before the aggregate is untrustworthy" — but it is **not validated for this use**
+(open item 3). Clipping also destroys jerk (a flat top has zero derivative). **±16 g is fine for
+thigh sensors and all strength training, but marginal on the shank for running and jumping.**
+Gyro ±2000 °/s is adequate everywhere except kicking. **[L]**
+
+### 3.7.1 Above the clipping point, rotation is the only channel left **[V]**
+
+Once the accelerometer clips, `m1` and `m2` cannot distinguish a fast benign movement from a
+fast, violently rotating one — and off-axis (multiplanar) loading is precisely the injurious
+pattern. Measured at a fixed 35 g landing while sweeping shank angular rate 100 → 1900 °/s:
+
+| shank °/s | `m1` | `m2` | rotational score | composite |
+|---|---|---|---|---|
+| 100 | 75.4 | 58.4 | 48.9 | 49.8 |
+| 600 | 75.4 | 58.5 | 80.3 | 57.0 |
+| 1900 | 75.4 | 58.6 | 100.0 | 66.8 |
+
+`m1`/`m2` are **completely flat**; rotation climbs across the whole range. So when `saturated`,
+rotation claims a share (`ROT_ESCALATION`) of the demand headroom `m1` can no longer reach:
+
+```
+if saturated:  demand += (100 − demand) · ROT_ESCALATION · rot/100
+```
+
+🚩 **Gated on `saturated`, deliberately.** Unsaturated impact discriminates perfectly well on its
+own, and *rotation alone must never read as risk* — a firm kick through the air is nearly pure
+rotation with modest impact, and an ungated rotational term would inflate exactly that case.
+`test_rotation_alone_does_not_inflate_demand` pins it.
 
 ### 3.8 Calibration — AUTOMATIC, so every session runs calibrated
 
@@ -392,20 +427,29 @@ sprint ~20 g, drop landing ~27 g) **[L]**. The generator is calibrated by the fa
 reproduced the previously reported live behaviour almost exactly (slow walk 26, light jog 55)
 before the §5.3/§6.1 corrections.
 
-| Activity | `m1` | `m2` | `m3` | demand | **composite** (before → after) |
-|---|---|---|---|---|---|
-| Standing still | 0 | 0 | 0 | 0 | **0 → 0** |
-| Slow walk | 35 | 7 | 0 | 24 | **26.0 → 0.9** |
-| Brisk walk | 43 | 17 | 0 | 33 | **36.0 → 2.8** |
-| Light jog | 58 | 31 | 0 | 47 | **55.3 → 13.8** |
-| Steady run | 68 | 47 | 14 | 60 | **69.7 → 36.1** |
-| Hard run | 79 | 59 | 30 | 71 | **79.7 → 57.4** |
-| Sprint | 91 | 74 | 62 | 84 | **92.7 → 86.5** |
-| Drop landing | 94 | 82 | 33 | 89 | **100 → 100** |
+| Activity | `m1` | `m2` | `m3` | `m4` | demand | **composite** |
+|---|---|---|---|---|---|---|
+| Standing still | 0 | 0 | 0 | – | 0 | **0.0** |
+| Slow walk | 10 | 0 | 0 | 7 | 7 | **0.0** |
+| Brisk walk | 18 | 0 | 12 | – | 12 | **6.0** |
+| Light jog | 31 | 0 | 42 | 4 | 20 | **21.2** |
+| Steady run | 44 | 16 | 56 | 5 | 33 | **29.7** |
+| Hard run | 55 | 29 | 67 | 12 | 45 | **38.6** |
+| Sprint | 68 | 45 | 86 | 14 | 59 | **55.6** |
+| Landing work (sustained) | 74 | 54 | 68 | 29 | 59 | **51.9** |
 
-The "before" column is what prompted the correction: an easy walk reading 26/100 and a light jog
-55/100 on a scale labelled *injury risk*. `m1` and `m2` are unchanged by either fix — only the
-dose law and the acute curve moved.
+Against the reported worn session, where the composite read ~5 for a medium walk, 50–60 for a
+light jog and **100** for running, jumping, landing, deceleration, change of direction and
+kicking. **[V]**
+
+⚠️ **A single discrete event is not the same as sustained work at that intensity**, and the row
+above is the sustained case. Measured separately for one landing followed by rest: peak composite
+**4.0**, because `m3` never accumulates. Ten seconds of landings reads 16.5, sixty seconds 42.0.
+The reported expectation of ≤30 for "a single-leg landing from a two-leg jump" is the 4.0 case.
+
+What moved the ladder, in order of size: the `capacity` decoupling (§6.1), the `m1`/`m2`
+re-anchoring (§4), the dose-law correction (§5.3), the exposure-based demand (§6.1) and the `m4`
+rebuild (§5.4).
 
 ---
 
@@ -435,7 +479,8 @@ true `p99` over the raw 1 s at **1.08 ± 0.04** — tight and unbiased — where
 between 0.38× and 0.93×. **[V]**
 
 Shank-preferred (the validated site for impact surrogates); falls back to thigh if absent, flagged
-`no_shank`. Emits `null` if the window is >2.6% saturated (§3.7).
+`no_shank`. Above 2.6% saturation it is reported as a marked LOWER BOUND rather than
+`null` (§3.7) — the +-16 g part clips inside real athletic movement.
 
 ### 5.2 `m2` — Loading Rate
 
@@ -523,8 +568,10 @@ running gives *attenuation* (<1), so no absolute 0–100 scale is honest across 
 baseline-relative, per user decision:
 
 ```
-R_base = R over the first 60 s of accumulated movement in the session (locked)
-m4     = 100 · clamp( |R / R_base − 1| / 0.50 , 0, 1 )
+band     = intensity band of the current shank EMA |a_dyn|   (M4_BAND_EDGES)
+R_base[b] = time-weighted MEAN of R over 60 s of movement IN BAND b,
+            learned only after M4_SETTLE_S of movement, then locked
+m4       = 100 · clamp( |R / R_base[band] − 1| / 0.50 , 0, 1 )
 ```
 
 🚩 **The `|·|` is a correction forced by the literature, and it matters.** My first draft scored
@@ -560,7 +607,40 @@ Rule: update `R` only when **both** limbs of that leg are `active` **and** the s
 exceeds `MOVE_GATE`. Otherwise hold the previous value; if the fault persists beyond one 20 s
 window, emit `null` flagged `partial`. The same guard prevents divide-by-near-zero.
 
-Before `R_base` locks, `m4 = null`, flagged `warming_up`.
+Before the CURRENT band's baseline locks, `m4 = null`, flagged `warming_up`.
+
+🚩 **Rebuilt 2026-08-03 — a single baseline made `m4` an activity-change detector.** It locked
+from **one tick's value** at the moment cumulative movement first hit 60 s — whatever the athlete
+happened to be doing — and was never re-learned. But shock transmission differs between walking
+and running as *physiology, not fatigue*, so changing pace moved `R/R_base` past the 50% full
+scale and pinned `m4` at 100. Measured on a worn session: `m4` sat at **90–100 (saturated) while
+jogging**, 75–85 running, and *unchanged during squats* — the activity its baseline had locked on.
+Because `m4` fed `capacity` with 60% weight, that alone drove the composite to 100 (§6.1).
+
+Three fixes, all load-bearing:
+
+1. **Per intensity band.** Baselines are learned separately for each band of
+   `M4_BAND_EDGES`, so `m4` compares like with like and answers a question that is actually
+   answerable: *"at the intensity being worked at right now, is shock being transmitted
+   differently than when fresh at this same intensity?"*
+2. **Time-weighted mean, not a snapshot.** One unlucky tick can no longer set the reference.
+3. **Settle gate (`M4_SETTLE_S` = 3 transmission time constants).** Nothing is learned until the
+   20 s EMA has converged — it seeds from the first active tick, when the gravity baseline is
+   still settling and `a_dyn` briefly carries most of 9.81 m/s², so the shank mean sweeps down
+   through every band during warm-up. Without the gate a band locked on that sweep and read 100
+   for the rest of the session. Measured: exactly that, on the activity ladder. **[V]**
+
+The transmission EMA is also advanced **only while moving** — rest ticks used to fold in and drag
+both limb means toward the noise floor, so a baseline locking shortly after a rest was measured
+against a partly-rest-loaded EMA.
+
+⚠️ The session snapshot is now **schema v2** (a per-band table replaces the scalar `R_base`); a v1
+snapshot is *rejected* rather than partly applied, since restoring a single-band baseline would
+reintroduce the confound the bands exist to remove (§7.4).
+
+**Result on the activity ladder:** `m4` now reads **4–14 across steady walking through sprinting**
+and ~31 on irregular landing work, i.e. near its nominal 0 when movement is consistent — which is
+what the metric always claimed to mean. **[V]**
 
 ⚠️ **`m4` is NOT validated against real data — see §11.1.** The squats log holds only ~20 s of
 movement, below the 60 s baseline lock, so **`m4` never emits a value on the only capture that
@@ -655,9 +735,11 @@ has no injury-data basis and sits inside measurement error for several tests.
 ### 6.1 Structure
 
 ```
-demand      = 0.60·max(m1, m2) + 0.40·min(m1, m2)        soft-max, 0..100
+demand_inst = 0.60·max(m1, m2) + 0.40·min(m1, m2)        soft-max, 0..100
+if saturated: demand_inst += (100−demand_inst)·ROT_ESCALATION·rot/100   (§3.7.1)
+demand      = EMA(demand_inst, DEMAND_TAU_S = 25 s)      EXPOSURE, not peak
 degradation = (0.45·m4 + 0.30·m5) / Σ(available weights)  m4,m5 only — renormalised
-capacity    = 100 − 0.70·degradation                     30..100
+capacity    = 100 − 0.15·degradation                     85..100
 ratio       = demand / capacity                          load vs capacity
 acute       = min(100, 200 · ratio^n / (ratio^n + 1))    n = ACUTE_EXPONENT = 4
                                                          100 when demand == capacity
@@ -701,6 +783,33 @@ Together with the §5.3 dose-law fix this is what moves the ladder to slow walk 
 **13.8**, hard run **57.4**, sprint **86.5** (§4.1). Note the two fixes are independent: the
 exponent alone took a slow walk from 26.0 to 15.9, and the remaining 15 points were the dose
 floor.
+
+🚩 **`CAPACITY_FACTOR` cut 0.70 → 0.15 on 2026-08-03: capacity now floors at 85, not 30.**
+`m4`/`m5` carry the `unvalidated` flag (§11.1 — synthetic fixtures only), yet at 0.70 they could
+remove **42 capacity points**, and since `acute` raises `demand/capacity` to the FOURTH power that
+is far more leveraged than the linear form suggests. Measured, at `demand` 60 and `m3` 0:
+
+| `m4` | `m5` | capacity | ratio | **composite** |
+|---|---|---|---|---|
+| 0 | 0 | 100.0 | 0.600 | **23** |
+| 75 | 14 | 64.6 | 0.929 | **85** — crosses WARN |
+| 90 | 0 | 62.2 | 0.965 | **93** — crosses ALERT |
+| 90 | `null` | 37.0 | 1.622 | **100** — pinned |
+
+The same physical session read 23 or 93 depending only on an unvalidated number, and the label
+said `unvalidated` on the metric's own card while the value silently set the alert-severity
+headline — which §2 forbids. The last row is the sharpest: `degradation` renormalises over
+*available* terms (§8, so fewer sensors are not scored as lower risk), so whenever `m5` is `null`
+— common, it freezes on any missing side — `m4` **alone** sets degradation at full value and its
+0.45 weight is cosmetic. Renormalisation is kept; the cap is what makes it safe. **Restore toward
+0.70 when `m4`/`m5` gain real-data validation (open item 10).** **[V]**
+
+🚩 **`demand` is EXPOSURE, not peak.** `m1`/`m2` are 1 s peak-holds — correct for metrics named
+Impact and Loading Rate — but feeding them straight into a risk index made **one landing outrank a
+minute of running**. The composite now consumes `EMA(demand, DEMAND_TAU_S = 25 s)`; `m1`/`m2`
+themselves are unchanged. Kalkhoven's model is about damage accumulating toward a threshold, so
+the risk term should follow exposure. Consequence to be aware of: a single hard landing moves the
+composite only ~4 points (while `m1` still shows it clearly at ~68). **[V]**
 
 **`m3` was removed from `degradation`.** It previously appeared in *both* `degradation` (0.25)
 and `floor` (0.50) — a genuine double-count that the earlier text acknowledged but did not fix.
@@ -759,12 +868,20 @@ Per the evidence, the following are deliberately absent: **[L]**
 | Phase | `m1` | `m2` | `m3` | `m4` | `m5` | **composite** |
 |---|---|---|---|---|---|---|
 | Standing still, 2–11 s (before work) | 0.0 | 0.0 | 0.0 | `null` | `null` | **0.0** |
-| Squatting, 16–31 s | 13.5 | 17.7 | 0.0 | `null` | `null` | **0.61** |
+| Squatting, 16–31 s | 0.04 | 1.79 | 0.0 | `null` | `null` | **0.00** |
 | Standing still, 34–41 s (after work) | 0.0 | 0.0 | 0.0 | `null` | `null` | **0.0** |
 
-⚠️ **Re-measured 2026-08-03** after the §5.3 dose law and §6.1 acute curve were corrected.
-`m1` and `m2` are **unchanged** at 13.5 / 17.7 — neither fix touches their normalisation, so they
-are the control showing the change moved only what it was meant to.
+⚠️ **Re-measured 2026-08-03** after the §4 `m1`/`m2` re-anchoring, the §5.3 dose law and the §6.1
+acute curve were corrected. Every value in this table is now ~0, and that is the honest reading
+rather than a regression: this capture is **16 s of gentle bodyweight squatting** whose peak
+dynamic acceleration is ~3.6 m/s² — below the new impact floor, and genuinely below *walking*
+(~11 m/s²), which is why §6.4 already noted that "a squat has less heel strike than a step".
+
+🚩 **This capture can therefore no longer validate any metric numerically.** It validates only
+that a low-load activity reads low. The numeric validation has moved to the synthetic fixtures
+and to `test_sustained_load_builds_dose_and_decays_to_the_floor`. **Closing this needs a real
+capture containing running and jumping — see open item 13 and
+`scripts/calibrate_capture.py`.**
 
 **`m3` is now 0 across the whole capture, and that is the point rather than a regression.** This
 file holds **16 s of gentle squatting**, whose measured cube-mean load is ~14% of hard running;
@@ -1000,11 +1117,11 @@ is O(1) scalars, so persisting it is cheap. **Confirmed required by the user.**
 |---|---|---|
 | `dose` | float | `m3` accumulator |
 | `accL`, `accR` | float | `m5` decaying load accumulators |
-| `R_base`, `move_time_s` | float | `m4` baseline + the 60 s lock progress |
+| `r_base[]`, `r_sum[]`, `r_time[]` | float x M4_BANDS | `m4` PER-BAND baselines and their lock progress (§5.4). **Schema v2** — a v1 snapshot carrying the old scalar `R_base` is rejected outright, since restoring a single-band baseline would reintroduce the activity-change confound the bands exist to remove |
 | `session_started_at`, `last_tick_at` | float (unix s) | drives the `SESSION_GAP_S` decision on restore |
 | `cal[limb_name]` | 5 × float | per sensor: `k`, `gyro_bias[3]`, `sigma` (§3.8) |
 | `cal_src[limb_name]` | str | `default` / `carried` / `measured` — calibration provenance (§3.8) |
-| `schema_version` (`v`) | int | reject-and-restart on mismatch |
+| `schema_version` (`v`) | int | **currently 2**; reject-and-restart on mismatch |
 
 🚩 **Calibration MUST be keyed on the limb name (equivalently the sensor triple it is mapped
 from), never on the slot index.** Slots are assigned dynamically on first packet (§7.2), so if devices reconnect
@@ -1098,7 +1215,7 @@ Any individual flag must show the component panel that drove it (§2).
    | `partial` (debounced ≥0.75 s: a lossy link flickers `active` tick-to-tick and an
      undebounced flag toggled hundreds of times per second in a live session) | a required sensor went inactive mid-session; `m4`/`m5` frozen or `null` |
    | `no_shank` | `m1` fell back to thigh sensors |
-   | `saturated` | >2.6% clipped samples; `m1`/`m2` suppressed (§3.7) |
+   | `saturated` | >2.6% clipped samples; **`m1`/`m2` are LOWER BOUNDS**, render as ">= x" (§3.7). They are still reported -- suppression to `null` was removed 2026-08-03 |
    | `degraded_sensors` | device streaming <4 sensors (§8), **or** a sensor a metric requires was mapped but has never produced data (flat battery, bad strap). Both are "this value is never coming"; `warming_up` promises the opposite, so the two must not be confused. Tested against `ema_seen`, never against `LIMB_MAP` alone |
    | `uncalibrated` | at least one sensor running on default `k`/`bias`/`σ` — no history and no still window yet (§3.8) |
    | **`carried_over`** | **at least one sensor running last-known-good values from a PREVIOUS session (`biomech:cal:{dev}`), applied but not measured on this athlete today (§3.8)** |
@@ -1159,12 +1276,31 @@ empty — and `USI = (accL−accR)/√(accL²+accR²)` is unstable when both are
 `m5`'s first emitted values read ~82 out of pure noise, then fell to ~15 once the accumulators
 filled. The gate is now `asym_t`, incremented only when the accumulators are actually updated.
 
-⚠️ **Open item — `ASYM_HALFLIFE_S = 5 min` may be too slow to be actionable.** In the same
-session, 90 s of deliberate one-sided loading (an exaggerated limp) moved `m5` only to ~27,
-because it was diluted by the preceding 2 minutes of symmetric squats. That time constant suits
-*chronic* asymmetry monitoring; it cannot show a trainer an asymmetry that develops within a
-session. Not changed yet — the trade-off needs a decision, and a shorter halflife makes `m5`
-noisier. Recorded here so it is a known limitation rather than a surprise.
+⚠️ **Open item — `ASYM_HALFLIFE_S = 5 min` is too slow to see a discrete event.** In one session,
+90 s of deliberate one-sided loading (an exaggerated limp) moved `m5` only to ~27, diluted by the
+preceding 2 minutes of symmetric squats. A later worn session confirmed the sharper form: a
+**single-leg landing barely moved it at all**. Quantified: with a 5-minute half-life the
+accumulator's time constant is 433 s, so one second of one-sided load displaces roughly **0.2%**
+of it.
+
+⚠️ **`m5`'s sensitivity is also NON-STATIONARY, and the metric never declares it.** The
+accumulators start empty, so the effective averaging length is `min(elapsed, 433 s)`. Just after
+the 30 s warm-up gate a one-second event is worth ~13 points; seven minutes later the same event
+is worth ~0.9. So `m5` is roughly **14× more event-sensitive at the start of a session** than
+later in it.
+
+**What ships:** the chronic 5-minute accumulator is unchanged and remains the reported `m5`. A
+**fast channel** (`ASYM_FAST_HALFLIFE_S` = 10 s) now runs alongside it and is published as
+`raw.usi_fast_pct` — diagnostic only, so the trade-off can be sized on real data before anything
+is promoted. Magnitude only, never a direction (§5.5).
+
+**What `m5` should read, for reference:** near **0** when symmetric. Values of 14–18 correspond to
+roughly 2.5–3.2% actual asymmetry, which is squarely inside documented natural asymmetry for
+uninjured athletes (2.3–3.1% for peak GRF) — so a steady 14 during running is plausibly *correct*
+rather than a fault. ⚠️ But note `m5` is an **inter-sensor ratio**: with `M5_FULL_SCALE_USI = 0.18`
+one percentage point of USI is 5.56 `m5` points, so a residual **2% left/right gain mismatch reads
+`m5` ≈ 11 on a perfectly symmetric athlete**. On a sensor still flagged `uncalibrated` or
+`carried_over` that bias is unbounded.
 
 **Synthetic fixtures required** (each a generated frame stream, not a recording):
 
@@ -1195,7 +1331,9 @@ presented to a trainer as a finding — only as a trend with the `unvalidated` f
 5. **Packet-loss robustness** — drop 30% of samples at random; `m3` within 10%.
 6. **Gravity-only input** — constant 9.81 m/s² on any axis ⇒ all primitives zero.
 7. **Free-fall** — must not produce a spurious `m1` peak (§3.3 fold-over).
-8. **Saturation suppression** — a synthetic clipped impact ⇒ `m1`/`m2` `null` + `saturated` flag.
+8. **Saturation floor** — a synthetic clipped impact => `m1`/`m2` still reported, `saturated`
+    flag set; and a single clipped sample must NOT raise the flag. Plus: at a clipped impact,
+    rotation must move `demand`, while pure rotation with no impact must not.
 9. **Degradation ladder** — every row of §8 gives the right `null` pattern, and the composite
    does not fall merely because sensors are missing.
 10. **Held ticks** — empty `frames` repeats previous `Metrics`, accumulates no dose.
@@ -1298,8 +1436,9 @@ topology.
 | # | Item | Needed by | Status |
 |---|---|---|---|
 | 1 | ~~`m5` full scale~~ | — | **CLOSED** — 18% wUSI, from Delgado-García 2025 (§5.5) |
-| 2 | 🚩 **Accelerometer range.** ±16 g will clip on the **shank during running/jumping**; literature recommends ≥±32 g. Fine for thigh and all strength training. | before running trials | Saturation counter + metric suppression implemented (§3.7); hardware change is a user/firmware decision |
+| 2 | 🚩 **Accelerometer range.** ±16 g clips on the **shank during running/jumping**; literature recommends ≥±32 g. Measured: dynamic accel tops out near 147 m/s², so 35 g / 42 g / 60 g / 100 g landings are indistinguishable on `m1` | **hardware is fixed for now (user)** | **Mitigated, not solved.** `m1`/`m2` report marked lower bounds (§3.7) and rotation discriminates above the ceiling (§3.7.1). Anything above 27.7 g resultant remains unmeasurable |
 | 3 | Reference bounds (§4), composite weights (§6), `DOSE_EXPONENT`, and the borrowed **2.6% saturation threshold** (§3.7) — all provisional | post-MVP | Calibrate against trial data |
+| 13 | **`A_DOSE_REF` / `W_DOSE_REF` and the §4 bounds are anchored to a SYNTHETIC gait generator, not to this device.** They set the whole scale of `m3` and where every activity lands on `m1`/`m2`. The only real capture (`squats.bin`) is 16 s of gentle squatting and now reads ~0 throughout (§6.4), so it cannot anchor them | **before trusting any absolute value** | **Open — tooling ready.** `scripts/calibrate_capture.py` replays a real worn capture through the shipped `compute()` and prints the cube-mean statistics each constant needs. Needs one session with walking, running and jumping, plus rough per-movement timestamps |
 | 11 | **Packet loss degrades `m1` far harder than expected, and pushes `m2` the *wrong way*.** Measured 2026-08-03 by replaying `squats.bin` through `compute()` with per-sample random drop (squat phase, vs the 0% arm): 5% loss → `m1` −49%, `m2` **+34%**; 20% → `m1` −65%, `m2` **+42%**; 50% → `m1` −80%, `m3` −99%; 70% → all metrics collapse (composite −97%). `m1` falls because it is `p90` *within* a tick and a thinned tick under-estimates the peak; `m2` **rises** because the rate-adaptive `α = 1 − exp(−Δt/τ)` grows with the widened sample spacing, so the low-pass smooths less and more jerk survives. Per-sample uniform drop is the harshest model — real UDP loss is bursty, so these are an upper bound on the damage | before trusting any absolute metric on a lossy link | **Open.** Aggregates must not be compared across quality regimes |
 | 12 | **`quality` ≈ 0.35 is probably not 65% packet loss.** The live 11-minute session read `quality` 0.35 yet produced coherent, well-ordered metrics (walking 29, jumps 56, intervals 77). Item 11 shows that a *genuine* 65–70% per-sample loss drives the composite to ~0.4 — three orders of magnitude away from what was observed. Since `quality` is a ratio against the **configured** `EXPECTED_INPUT_HZ` (changed 600 → 640 on 2026-08-02), a low reading is equally consistent with real loss and with that constant being too high. **A 0%-loss simulator control arm settles it in ten minutes** and should be run before any hardware work is done on the strength of the 0.35 figure | before acting on the loss figure | **Open — cheap to close** |
 | 10 | **`m4`/`m5` have no real-data validation** — the only capture has 19.9 s of movement vs their 60 s / 30 s warm-ups. Shipping on synthetic fixtures by user decision; flagged `unvalidated` in code and surfaced in `/api/health` | **S1-T15 step 4** | §11.1 — needs one ≥10-min session with a deliberate fatigue block to close |

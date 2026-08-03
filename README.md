@@ -57,6 +57,9 @@ docker compose --profile debug up -d                # exposes redis on 127.0.0.1
 uv run pytest backend/tests/                        # unit + integration tests
 uv run pytest backend/tests/test_ws.py              # WS throughput test on its own
 uv run python scripts/validate_stage1.py            # full matrix (--quick for a smoke run)
+uv run python scripts/calibrate_capture.py CAP.bin  # anchor biomech constants to a REAL capture
+#    --segments segs.txt   one `start_s end_s label` per line, to split by movement
+#    --wire                22-byte UDP capture instead of the 21-byte SD log
 ```
 
 Start the debug profile **before** pytest: `test_ws.py` needs Redis reachable on

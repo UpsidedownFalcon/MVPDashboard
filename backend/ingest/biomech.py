@@ -255,6 +255,14 @@ FLOOR_FACTOR = 0.50
 # damage accumulating toward a threshold, so the risk term should follow
 # exposure. m1/m2 are unchanged; only the composite sees the smoothed value.
 DEMAND_TAU_S = 25.0
+<<<<<<< HEAD
+=======
+# Share of the remaining demand headroom that rotation can claim once the
+# accelerometer is clipped. 0.5 means a maximally rotating clipped impact reads
+# halfway between the clipping ceiling and full scale, so the top of the range
+# stays reserved rather than being handed out for any saturated event.
+ROT_ESCALATION = 0.5
+>>>>>>> dc19c97 (biomech tweaks for gyro compensated accel)
 # Hill exponent on the load/capacity ratio. Raised 2 -> 4 on 2026-08-03: at n=2
 # the curve was far too eager at the bottom, and the wearer reported ordinary
 # activity reading as substantial injury risk -- a slow walk 20-30 and a light
@@ -1042,8 +1050,12 @@ def compute(
         _still_window_update(sess, limbs, counts, a_raw, w_dps, wmag, step)
 
     flags: set[str] = set()
-    if sat_frac > 0.0:
-        flags.add("saturated")
+    # `saturated` now means exactly "m1/m2 are LOWER BOUNDS, render them as >=",
+    # so it fires at SAT_SUPPRESS_FRACTION rather than on any clipping at all
+    # (set below, once sat_frac has been compared). A single clipped sample in a
+    # tick does not make the peak untrustworthy, and firing on that made the
+    # flag near-permanent during hard work. The raw fraction stays in
+    # `raw.sat_frac` for anyone who wants the fine-grained view.
     if "default" in sess.cal_src:
         flags.add("uncalibrated")
     if "carried" in sess.cal_src:
@@ -1070,11 +1082,21 @@ def compute(
             return 0.0
         return float(np.where(vsel, sel, -np.inf).max())
 
-    if sat_frac > SAT_SUPPRESS_FRACTION:
-        m1 = m2 = None            # a truncated peak is worse than no peak
-    else:
-        m1 = log_score(ring_max(sess.pk_a, impact_i), m1_lo, M1_HI)
-        m2 = log_score(ring_max(sess.pk_j, list(range(n_limbs))), M2_LO, M2_HI)
+    # Saturation: report a marked FLOOR value, do not suppress (user decision,
+    # 2026-08-03). The +-16 g part cannot be changed, and it clips well inside
+    # real athletic movement -- measured through this pipeline, dynamic accel
+    # tops out near 147 m/s^2, so a 35 g, 42 g, 60 g and 100 g landing ALL read
+    # m1 = 75.2. Suppressing to None removed Impact and Loading Rate on ~2% of
+    # ticks at 27 g PTA and ~7% at 42 g, i.e. exactly when load was highest.
+    #
+    # So m1/m2 keep reporting, `saturated` marks them as LOWER BOUNDS, and the
+    # UI renders them as ">= x". They stay monotonic (a harder landing never
+    # reads lower), they just stop being exact once clipped.
+    m1 = log_score(ring_max(sess.pk_a, impact_i), m1_lo, M1_HI)
+    m2 = log_score(ring_max(sess.pk_j, list(range(n_limbs))), M2_LO, M2_HI)
+    saturated = sat_frac > SAT_SUPPRESS_FRACTION
+    if saturated:
+        flags.add("saturated")
 
     # m3 dose: power law, decays always, accumulates only while moving.
     #
@@ -1253,6 +1275,34 @@ def compute(
         demand_inst = float(m1 if m2 is None else m2)
     else:
         demand_inst = DEMAND_MAX_W * max(m1, m2) + DEMAND_MIN_W * min(m1, m2)
+<<<<<<< HEAD
+=======
+    # Above the clipping point, ROTATION is the only channel left that still
+    # discriminates. Measured 2026-08-03 at a fixed 35 g landing while sweeping
+    # shank angular rate 100 -> 1900 deg/s: m1 stayed at 81.5 and m2 at 61.5 at
+    # EVERY rate, while the rotational score climbed 49 -> 100. So once the
+    # accelerometer clips, a fast benign movement and a fast violently rotating
+    # one are indistinguishable on impact alone -- which is the state the
+    # hardware forces, since +-16 g cannot be changed.
+    #
+    # Rotation therefore fills the headroom m1 can no longer reach, and ONLY
+    # there. It is gated on `saturated` rather than applied everywhere because:
+    #   * unsaturated impact already discriminates perfectly well, and
+    #   * rotation alone must never read as risk. A firm kick through the air is
+    #     almost pure rotation with modest impact, and the wearer expects it to
+    #     read low -- an ungated rotational term would inflate exactly that.
+    # The escalation is multiplicative on the remaining headroom, so it can only
+    # move a reading that is ALREADY at the clipping ceiling.
+    #
+    # Grounding: combined axial + rotational (multiplanar) loading is the
+    # injurious pattern, not axial load alone -- it is the mechanism behind
+    # landing-related knee and ankle injury, and peak shank angular velocity is
+    # the best-supported IMU marker in that literature.
+    if saturated:
+        rot = log_score(w_int, W_LO, W_HI)
+        demand_inst += (100.0 - demand_inst) * ROT_ESCALATION * (rot / 100.0)
+
+>>>>>>> dc19c97 (biomech tweaks for gyro compensated accel)
     # Exposure, not peak (see DEMAND_TAU_S). m1/m2 stay peak-holds for display;
     # the risk index follows how long load is sustained, so one landing is a
     # brief bump and a minute of running is a sustained reading.

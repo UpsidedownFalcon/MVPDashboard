@@ -25,15 +25,16 @@ term, and `log H` is additive in the two. Asserted as an invariant by
 This matters because the two halves have completely different forecastability.
 
 **The dose term is closed form.** `dose` obeys `d(dose)/dt = −λ·dose + S` with a 45-min
-half-life, and `m3 = log_score(dose, 0.01, 60)` is a *log* score of it, so **at rest m3
+half-life, and `m3 = log_score(dose, M3_LO, M3_HI)` is a *log* score of it, so **at rest m3
 falls linearly**:
 
 ```
-100·ln2 / ln(M3_HI/M3_LO) / 45 min  =  0.1771 points/min  =  7.968 points per half-life
+100·ln2 / ln(M3_HI/M3_LO) / 45 min  =  0.2027 points/min  =  9.119 points per half-life
 ```
 
 and under sustained intensity `I` it approaches `dose_eq = (I/100)³/(60λ) = 64.92·(I/100)³`
-exponentially. Both are derived from the biomech constants in
+exponentially. ⚠️ The literal rate above moves whenever the m3 range is re-anchored — it was
+0.1771 at `M3_LO = 0.01` and is 0.2027 at the current 0.03. Both are derived from the biomech constants in
 `test_m3_rest_decay_rate_is_derived_not_hardcoded` and
 `test_dose_equilibrium_matches_the_biomech_recurrence`, so a retune of `M3_HI` or the
 half-life fails the suite rather than silently changing every forecast.

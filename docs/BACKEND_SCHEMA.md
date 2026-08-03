@@ -129,8 +129,14 @@ the model). `q` remains 0–1.
 
 **`m` entries may be `null`** when a primitive is unavailable — the device streams fewer than 4
 sensors (SPEC §8), the metric is still warming up (`m4` needs 60 s of movement, `m5` needs 30 s),
-a required sensor went inactive mid-session (`partial` — SPEC §5.4/§5.5), or the window was
->2.6% saturated (`m1`/`m2`, SPEC §3.7). `c` and `q` are **never null**. The DDL already allows
+a required sensor went inactive mid-session (`partial` — SPEC §5.4/§5.5), or `m4`'s current
+intensity band has not yet learned a baseline (SPEC §5.4). `c` and `q` are **never null**.
+
+⚠️ **Saturation no longer nulls `m1`/`m2`** (changed 2026-08-03, SPEC §3.7). When the `saturated`
+flag is present those two are **lower bounds** — the ±16 g part clips inside real athletic
+movement, and 35 g / 42 g / 60 g / 100 g landings all read the same `m1`. **The UI must render
+them as "≥ x" whenever `saturated` is in `f`**, and must not present them as exact. They stay
+monotonic, so ordering is still safe; only the magnitude is a floor. The DDL already allows
 this (`m1..m5` nullable `REAL`; only `composite`/`quality` are `NOT NULL`), and `metrics_1m`'s
 `avg()` skips NULLs, which is the desired behaviour.
 
@@ -208,7 +214,8 @@ class Metrics:
     m4: float | None    # Movement Control 0..100 (None while warming up)
     m5: float | None    # L/R Balance     0..100 (None while warming up)
     composite: float    # Injury Risk     0..100  — never None
-    flags: frozenset[str]     # SPEC §10: 'warming_up','partial','no_shank','saturated',
+    flags: frozenset[str]     # SPEC §10: 'warming_up','partial','no_shank','saturated'
+                              #   ('saturated' => m1/m2 are LOWER BOUNDS, render ">= x"),
                               # 'degraded_sensors','unvalidated', and the three
                               # calibration states below
     raw:   dict[str, float]   # pre-normalisation diagnostics -> biomech:diag:{dev} (§4)
