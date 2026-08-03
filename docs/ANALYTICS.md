@@ -107,7 +107,97 @@ Three further fixes in the same file:
   production — while `metrics_1m` is materialized-only, hiding its newest 1–2 minutes
   (up to 40% of a 5 m window). Now `td <= 5m`.
 
-## 4. Insights
+## 4. Insights — the rule catalogue
+
+Every insight carries an **`action`** (short imperative, rendered as the card headline) and a
+**`rationale`** (the why, with the measured numbers), plus `context` holding the evidence that
+fired it. `message` remains as a standalone summary for anything that cannot render the pair.
+
+### 4.1 Why these rules survive a future metric retune
+
+Rules about the athlete fire on `MetricView.z` — the deviation of the recent window from that
+athlete's **own** longer-run baseline, expressed in units of that athlete's **own** spread:
+
+```
+z = (value_short − value_baseline) / max(sd_baseline, SD_FLOOR)
+```
+
+This is **exactly invariant** under any affine rescale of a metric, which is what a change to a
+biomech normalisation bound produces. Moving `lo` shifts every value by a constant (cancels in
+the numerator); changing `hi/lo` scales value and `sd` by the same factor (cancels in the ratio).
+So retuning `M1_LO`, `M3_HI`, the acute curve or the dose law changes the numbers an insight
+*reports* without changing *whether it fires*. `test_z_is_invariant_to_a_metric_rescale` asserts
+this over a range of gains and offsets.
+
+Absolute thresholds have no such property, so they are used only where the scale is definitional
+(the 0–1 `quality` ratio) or set by the operator (`INSIGHT_WARN/ALERT_THRESHOLD`).
+
+### 4.2 Holistic by construction
+
+A rule reads `ctx.metrics` — all five primitives *and* the composite, each with its value in the
+shortest window, its baseline in the longest, its spread, its `z` and its trend — plus
+`ctx.horizons`, every projected horizon with its full scenario band. Rules are not permitted to
+depend on one number: `load_spike` reports what the projection says about where it is heading,
+and `accumulated_load` combines the dose's past trend with the future residual.
+
+### 4.3 The rules
+
+| Rule | Severity | Fires on | Time axis | Action |
+|---|---|---|---|---|
+| `load_spike` | warning → alert at 3 sd | composite ≥ 2 sd above own baseline | past + present + future | *Ease off for the rest of this session* |
+| `accumulated_load` | warning → alert | `m3` ≥ 2 sd above own baseline **and** trending up | past + present + future | *Cap this session and protect recovery* |
+| `residual_load` | warning | forecast `ci_low` at the furthest horizon ≥ warn threshold | future | *Schedule recovery before the next session* |
+| `impact_deviation` | info | `m1` or `m2` ≥ 2 sd above own baseline | past + present | *Review landing mechanics* |
+| `movement_quality` | info, `unvalidated` | `m4` or `m5` ≥ 2 sd above own baseline | past + present | *Flag for review at the next check-in* |
+| `composite_high` | warning → alert | shortest-window mean ≥ configured threshold | present | *Reduce training intensity* |
+| `rising_risk` | warning | mid-window trend up **and** a projection crossing alert | past + future | *Schedule rest before the next block* |
+| `data_quality` | info | shortest-window quality < 0.8 × own baseline | data health | *Check sensor fit* |
+
+**Evidence base.**
+- `load_spike` is the best-evidenced of these: current running research finds injuries are driven
+  by doing too much in a **single session relative to recent history** — a ≥30% single-run spike
+  carried a 64% higher injury rate — while week-to-week change and the acute:chronic ratio showed
+  little or no predictive value.
+- `accumulated_load` follows Kalkhoven's first-principles model: repetitive loading accumulates
+  damage, damage lowers the critical threshold, and injury occurs when load exceeds that
+  *declining* threshold. High-and-still-rising is the mechanistically meaningful state.
+- `residual_load` is the one genuinely new capability the `dose-scenario-1` forecast unlocked. It
+  reads `ci_low` — where risk settles **if the athlete stops right now** — which is closed-form
+  decay of load already taken, not a prediction about behaviour. That distinction is what makes
+  it safe to act on under SPEC §2.
+- `impact_deviation` is held at `info` deliberately: IMU jerk has never been validated against
+  GRF loading rate (SPEC §5.2) and peak tibial acceleration does not track internal tibial load
+  (Matijevich 2019, r = −0.29 ± 0.37). They are surrogates for *external* impact loading.
+- `movement_quality` is `info` and flagged `unvalidated` for two independent reasons: `m4`/`m5`
+  have no real-data validation at all (SPEC §11.1), and the largest prospective test of asymmetry
+  (Malisoux 2024, n = 836) found **greater** asymmetry associated with **lower** injury risk.
+  Magnitude only, never a direction (SPEC §5.5).
+
+### 4.4 Gating — when a rule must stay quiet
+
+Every rule that makes a claim about the *person* is gated on `ctx.trustworthy`:
+
+- **Coverage** ≥ 10% of the window, so a sliver of data cannot masquerade as a session.
+- **Quality match** between the two windows being compared (within 0.75×). Measured 2026-08-03:
+  5% packet loss moves `m1` **−49%** and `m2` **+34%** — in opposite directions — so comparing
+  windows recorded at different link quality compares measurement artefacts, not the athlete.
+
+Rules about the *data* (`data_quality`) deliberately bypass this gate; that is their subject.
+
+### 4.5 Specificity over sensitivity
+
+Thresholds sit at ~2 sd of the athlete's own spread with AND-conditions, not at any excursion. At
+realistic injury base rates roughly **90% of individual alerts are false** even for a genuinely
+good composite (SPEC §2, AUC 0.55–0.57 in the largest prospective test), so more rules firing
+more often makes the feed worse, not better. The catalogue is deliberately small.
+
+**Not implemented, by intent:** any acute:chronic workload ratio. The conventional form is
+mathematically coupled (Lolli 2019) and has no evidence supporting its use in load management
+(Impellizzeri 2020) — SPEC §6.3. `test_firing_depends_on_dispersion_not_on_a_bare_ratio` pins the
+behavioural difference: the identical 2× short/long ratio fires for a metronomic athlete and
+stays silent for a variable one, which a ratio cannot express.
+
+## 4bis. Earlier insight fixes
 
 - **Cooldown ranks severity.** Keyed on `(device_id, rule_id)` alone, a `composite_high`
   *warning* swallowed a genuine *alert* arriving seconds later for the full 600 s — the

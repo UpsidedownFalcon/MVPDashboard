@@ -439,15 +439,25 @@ def test_held_tick_repeats_and_accumulates_no_dose():
 # 7. Robustness: sample rate, packet loss, saturation.
 # =============================================================================
 
+# Amplitudes here are a HARD-RUN equivalent (16 m/s^2 / 480 deg/s), not the
+# gentler `_moving` default. Since 2026-08-03 the dose power law acts on the
+# physical load ratio against A_DOSE_REF/W_DOSE_REF and M3_LO is 0.5 dose-minutes
+# (= 30 s of hard-training equivalent), so a light synthetic load accumulates a
+# real but sub-floor dose and reads m3 = 0 -- which would make these assertions
+# vacuous rather than failing. The amplitude is what changed, not the claim.
+_HARD_A_MS2 = 16.0
+_HARD_W_DPS = 480.0
+
+
 @pytest.mark.parametrize("fs,n", [(600.0, 10), (300.0, 5), (150.0, 3)])
 def test_dose_is_sample_rate_independent(fs, n):
     """m3 is a MEAN, not a sum, so halving the rate must not halve the dose."""
     state = {}
     for k in range(int(60 * 30)):
         t = (k * n + np.arange(n)) / fs
-        a = np.stack([np.zeros(n), 9.81 + 4.0 * np.sin(2 * np.pi * 9 * t),
+        a = np.stack([np.zeros(n), 9.81 + _HARD_A_MS2 * np.sin(2 * np.pi * 9 * t),
                       np.zeros(n)], 1)
-        w = np.tile([120.0, 0.0, 0.0], (n, 1))
+        w = np.tile([_HARD_W_DPS, 0.0, 0.0], (n, 1))
         frames, times = make_tick(a, w, t0=k * n / fs, fs=fs)
         m = compute(frames, state, times)
     assert 0.0 < m.m3 < 100.0
@@ -457,7 +467,7 @@ def test_packet_loss_does_not_collapse_dose():
     rng = np.random.default_rng(3)
     state = {}
     for k in range(60 * 30):
-        a, w = _moving(k)
+        a, w = _moving(k, scale=4.0)
         keep = rng.random(NS) > 0.30          # drop ~30% of samples
         if not keep.any():
             keep[0] = True
@@ -488,7 +498,8 @@ def test_saturated_window_suppresses_m1_m2():
 
 def test_session_reset_clears_dose_but_keeps_calibration():
     state = {}
-    res, _ = _drive(lambda k: _moving(k), 60 * 20, state)
+    # hard-run amplitude so the dose clears M3_LO -- see _HARD_A_MS2 above
+    res, _ = _drive(lambda k: _moving(k, scale=4.0), 60 * 20, state)
     assert res[-1].m3 > 0.0
     sess = state["_biomech"]
     sess.cal["left_shin"] = biomech.Calibration(k=1.01, gyro_bias=np.zeros(3), sigma=0.04)
@@ -626,10 +637,25 @@ def test_squats_replay_golden_values():
         mean = lambda f: sum(f(m) for m in sel) / len(sel)
         return sel, mean
 
-    # Re-measured 2026-08-02 after the normalisation floors were raised against
-    # a live wearing session (SPEC §4/§11). m1/m2/composite all move DOWN; m3 is
-    # untouched by that change and still reads 7.0 / 13.7, which is the control
+    # Re-measured 2026-08-03 after the dose law and the acute curve were
+    # corrected (SPEC §5.3/§6.1). m1 and m2 are UNCHANGED at 13.5 / 17.7 --
+    # neither change touches their normalisation, so they are the control
     # showing the retune moved only what it was meant to.
+    #
+    # m3 is now 0 across the whole capture, and that is the point rather than a
+    # regression. The dose power law acts on the physical load ratio against a
+    # hard-running reference, and M3_LO is 0.5 dose-minutes (= 30 s of hard
+    # training equivalent). This file holds 16 s of GENTLE squatting, whose
+    # measured cube-mean load is ~14% of hard running; cubed and integrated that
+    # is 0.0011 dose-minutes, three orders below the floor. SPEC §5.3 already
+    # argued this is the physically correct answer ("16 seconds of moderate
+    # squatting genuinely is a negligible cumulative load"); the old scale said
+    # 13.7/100 because its floor was 0.6 s of hard-training equivalent, so any
+    # movement at all cleared it within a second.
+    #
+    # Consequence: this capture can no longer validate m3 or the dose-floor
+    # identity. test_sustained_load_builds_dose_and_decays_to_the_floor below
+    # takes that over on a synthetic load long enough to matter.
     still, mean = phase(2, 11)
     assert mean(lambda m: m.m1) < 2.0
     assert mean(lambda m: m.m2) < 2.0
@@ -637,21 +663,58 @@ def test_squats_replay_golden_values():
     assert mean(lambda m: m.composite) < 2.0
 
     squat, mean = phase(16, 31)
-    assert 9.0 <= mean(lambda m: m.m1) <= 18.0            # measured 13.5
-    assert 13.0 <= mean(lambda m: m.m2) <= 23.0           # measured 17.7
-    assert 4.0 <= mean(lambda m: m.m3) <= 11.0            # measured 7.0, unchanged
-    assert 7.0 <= mean(lambda m: m.composite) <= 15.0     # measured 10.6
+    assert 9.0 <= mean(lambda m: m.m1) <= 18.0            # measured 13.5, unchanged
+    assert 13.0 <= mean(lambda m: m.m2) <= 23.0           # measured 17.7, unchanged
+    assert mean(lambda m: m.m3) == 0.0                    # measured 0.0 (see above)
+    assert 0.2 <= mean(lambda m: m.composite) <= 2.0      # measured 0.61
 
     after, mean = phase(34, 41)
     assert mean(lambda m: m.m1) < 4.0
-    assert 10.0 <= mean(lambda m: m.m3) <= 18.0           # measured 13.7, unchanged
-    # composite at rest is the dose floor and nothing else: 0.50 * m3.
+    assert mean(lambda m: m.m3) == 0.0                    # measured 0.0
+    # composite at rest is the dose floor and nothing else: 0.50 * m3. Holds as
+    # an identity at any dose, including this capture's zero.
     assert abs(mean(lambda m: m.composite) - 0.5 * mean(lambda m: m.m3)) < 0.1
-    # composite rests on the accumulated-dose floor rather than collapsing to 0
-    assert 4.0 <= mean(lambda m: m.composite) <= 18.0
 
     assert all(m.m4 is None for _, m in rows), "m4 cannot emit on this capture"
     assert all(m.m5 is None for _, m in rows), "m5 cannot emit on this capture"
+
+
+def test_sustained_load_builds_dose_and_decays_to_the_floor():
+    """The decay-to-dose-floor behaviour, on a load long enough to have a dose.
+
+    squats.bin holds 16 s of gentle squatting, which is a negligible cumulative
+    load and now correctly reads m3 = 0 -- so it can no longer carry this check
+    (see test_squats_replay_golden_values). This is the replacement: 10 minutes
+    of hard-run-equivalent load, then rest.
+
+    Asserts the two things the real capture used to: that dose ACCUMULATES with
+    sustained work, and that once work stops the composite settles onto the
+    accumulated-dose floor of exactly 0.50 * m3 rather than collapsing to zero.
+    """
+    state: dict = {}
+    res, _ = _drive(lambda k: _moving(k, scale=4.0), 60 * 600, state)   # 10 min
+    worked = res[-1]
+    assert worked.m3 > 20.0, f"10 min of hard load should build dose, got {worked.m3:.1f}"
+    assert worked.m3 < 100.0, "and must not pin the scale"
+
+    # stop moving: gravity only, no rotation. Dose decays; demand goes to zero.
+    # Timestamps continue from the work phase -- _drive restarts its clock at 0,
+    # which would read as a discontinuity rather than a rest.
+    n_work = 60 * 600
+    a_still = np.stack([np.zeros(NS), np.full(NS, 9.81), np.zeros(NS)], 1)
+    w_still = np.zeros((NS, 3))
+    for k in range(n_work, n_work + 60 * 30):                           # 30 s rest
+        frames, times = make_tick(a_still, w_still, t0=k * NS / FS)
+        rested = compute(frames, state, times)
+
+    assert rested.m1 == 0.0 and rested.m2 == 0.0, "no load while standing still"
+    assert rested.m3 > 0.0, "dose must persist through a short rest, not reset"
+    assert rested.m3 < worked.m3, "and must be decaying"
+    # THE identity: at rest the composite IS the dose floor.
+    assert rested.composite == pytest.approx(0.5 * rested.m3, abs=1e-9)
+    assert rested.composite > 0.0, (
+        "the composite settles onto accumulated dose, never to a false zero"
+    )
 
 
 # =============================================================================

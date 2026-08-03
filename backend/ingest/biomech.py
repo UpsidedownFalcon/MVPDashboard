@@ -87,7 +87,14 @@ M1_HI = 150.0                # ~15 g, near accel full scale
 # scoring. Ceiling raised because 12,000 was being clipped by ordinary interval
 # work (session p90 hit 100 in three separate phases).
 M2_LO, M2_HI = 800.0, 30_000.0
-M3_LO, M3_HI = 0.01, 60.0          # dose-minutes; 16 s squats -> 14, 1 h hard -> 88
+# dose-minutes, where 1 dose-minute == 1 minute of hard-training equivalent
+# (see A_DOSE_REF/W_DOSE_REF). Floor = 30 s of that, ceiling = a full hard hour.
+# Re-anchored 2026-08-03 with the dose law: the old 0.01 floor was 0.6 s of
+# hard-training equivalent, so ANY movement cleared it within a second and the
+# bottom of the scale was unreachable. Measured on the ladder at these bounds:
+# 45 min continuous slow walk -> 0, light jog -> 56, hard run -> 87; 10 min hard
+# run -> 61, 1 min -> 14.
+M3_LO, M3_HI = 0.5, 60.0
 W_LO, W_HI = 5.0, 1500.0           # deg/s; still mean 1.6, squat mean 82, sprint >1200
 
 # --- m3 dose (SPEC Section 5.3) ---
@@ -96,6 +103,19 @@ DOSE_EXPONENT = 3.0          # load accumulates as a POWER LAW, not linearly.
                              # fatigue damage ~2.1 sub-threshold (Pattin 1996);
                              # 3 is a deliberate conservative middle.
 DOSE_HALFLIFE_S = 45 * 60.0
+# Physical reference intensities for the dose power law -- the sustained level
+# of HARD RUNNING on each arm, so one dose-minute == one minute of hard-training
+# equivalent and M3_HI = 60 reads as "a full hard hour". These set the SCALE of
+# the dose; DOSE_EXPONENT above sets its shape.
+#
+# Measured 2026-08-03 through this pipeline on an activity ladder built from
+# literature resultant PTA (walk 2.7-3.7 g, jog ~5 g, run 8-12 g, sprint ~20 g,
+# drop landing ~27 g). What matters is the CUBE-mean E[x^3]^(1/3), not the
+# median -- the dose integrates every tick and cubing lets impact ticks dominate,
+# so a median understates it several-fold. Cube-means at a 12 g / 180 spm hard
+# run: |a_dyn| 7.38 m/s^2, |w| 539 deg/s.
+A_DOSE_REF = 7.4             # m/s^2, cube-mean tick dynamic accel
+W_DOSE_REF = 540.0           # deg/s, cube-mean tick rotational rate
 
 # --- m4 control (SPEC Section 5.4) ---
 M4_BASELINE_LOCK_S = 60.0    # movement time before R_base locks
@@ -140,6 +160,24 @@ DEMAND_MAX_W, DEMAND_MIN_W = 0.60, 0.40
 DEGRADE_W_M4, DEGRADE_W_M5 = 0.45, 0.30    # m3 is NOT here: it drives `floor`
 CAPACITY_FACTOR = 0.70                     # capacity floors at 30
 FLOOR_FACTOR = 0.50
+# Hill exponent on the load/capacity ratio. Raised 2 -> 4 on 2026-08-03: at n=2
+# the curve was far too eager at the bottom, and the wearer reported ordinary
+# activity reading as substantial injury risk -- a slow walk 20-30 and a light
+# jog 50-70. Measured on an activity ladder driven through this pipeline
+# (literature resultant PTA: walk 2.7-3.7 g, jog ~5 g, run 8-12 g, sprint ~20 g,
+# drop landing ~27 g), n=2 gave slow walk 26.0 and light jog 55.3 -- reproducing
+# the complaint almost exactly. See SPEC Section 6.1 for the full ladder.
+#
+# n=4 is not a fitted constant. Injury is a THRESHOLD event, not an average:
+# damage accumulates until it exceeds a critical threshold, or until load
+# exceeds a declining tissue strength (Kalkhoven 2021/2026 first-principles
+# model), and mechanical damage is driven far more by load MAGNITUDE than by
+# load frequency. The bone daily-stress-stimulus law uses exponent m = 4
+# (Whalen 1988) and fatigue-damage exponents span 2.1-5.8 (Pattin 1996), so a
+# 4th-power ratio is the same physics the dose term already uses. The practical
+# effect is that risk stays near zero through ordinary ambulation and only
+# climbs as demand approaches capacity, which is what the model claims to mean.
+ACUTE_EXPONENT = 4.0
 
 SESSION_GAP_S_DEFAULT = 300.0
 
@@ -896,13 +934,35 @@ def compute(
         m2 = log_score(ring_max(sess.pk_j, list(range(n_limbs))), M2_LO, M2_HI)
 
     # m3 dose: power law, decays always, accumulates only while moving.
+    #
+    # The power law acts on the PHYSICAL load ratio, not on a log score. Until
+    # 2026-08-03 it was `(intensity/100)**3` where `intensity` was itself a
+    # log_score -- but Whalen's daily-stress-stimulus exponent applies to the
+    # stress sigma, not to a compressed score of it, and log-compressing first
+    # destroys exactly the magnitude weighting the exponent exists to apply.
+    # Measured consequence: an easy walk scored intensity 57 against hard
+    # running's ~80, so it accumulated dose at (0.57/0.80)^3 = 36% of the hard-
+    # running rate when the physical loads differ by more than an order of
+    # magnitude. 90 s of slow walking reached m3 = 30, putting a 15-point dose
+    # floor under the composite and making an easy walk read as real injury
+    # risk. On the physical ratio the same walk accumulates 14x less.
+    #
+    # The references are the sustained intensity of HARD RUNNING, which gives
+    # `dose` an interpretable unit: one dose-minute is one minute of hard
+    # training equivalent, so M3_HI = 60 is "a full hard hour". Both arms are
+    # kept and max()'d for the SPEC Section 5.3 reason -- |a| under-reads slow
+    # horizontal gym movement, while mean |w| is the best-supported IMU fatigue
+    # marker in resistance training (Brice 2020).
     a_int = float(tick_mean_adyn[active].mean()) if active.any() else 0.0
     w_int = float(tick_mean_w[active].mean()) if active.any() else 0.0
+    load_ratio = max(a_int / A_DOSE_REF, w_int / W_DOSE_REF)
+    # `intensity` is retained on the 0-100 scale for the diagnostics stream and
+    # for anything reading biomech:diag -- it is no longer what drives the dose.
     intensity = max(log_score(a_int, m1_lo, M1_HI), log_score(w_int, W_LO, W_HI))
     sess.dose *= 0.5 ** (step / DOSE_HALFLIFE_S)
     moving = a_int > MOVE_GATE_MS2
     if moving:
-        sess.dose += (intensity / 100.0) ** DOSE_EXPONENT * (step / 60.0)
+        sess.dose += load_ratio**DOSE_EXPONENT * (step / 60.0)
         sess.move_t += step
     m3 = log_score(sess.dose, M3_LO, M3_HI)
 
@@ -1028,11 +1088,13 @@ def compute(
     # acute term could not exceed half scale however hard the session, and the
     # top half of a 0-100 "injury risk" was reachable only through accumulated
     # dose. Measured live: demand p99 = 91 yet composite p99 = 66.
-    # Same ratio, squared (sigmoid rather than hyperbolic so light activity stays
-    # low), normalised so demand == capacity reads 100. Degradation lowers
-    # capacity and therefore reaches full scale sooner, which is the intent.
+    # Same ratio raised to ACUTE_EXPONENT (a Hill function, sigmoid rather than
+    # hyperbolic so ordinary activity stays low), normalised so demand ==
+    # capacity reads 100 for any exponent. Degradation lowers capacity and
+    # therefore reaches full scale sooner, which is the intent.
     ratio = demand / capacity if capacity > 0 else float("inf")
-    acute = min(100.0, 200.0 * ratio * ratio / (ratio * ratio + 1.0))
+    r_n = ratio ** ACUTE_EXPONENT if math.isfinite(ratio) else float("inf")
+    acute = 100.0 if not math.isfinite(r_n) else min(100.0, 200.0 * r_n / (r_n + 1.0))
     floor = FLOOR_FACTOR * m3
     composite = floor + (100.0 - floor) * acute / 100.0
 

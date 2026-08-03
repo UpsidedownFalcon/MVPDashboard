@@ -18,6 +18,33 @@ from migrations.migrate import dsn
 RULE = {r.rule_id: r for r in RULES}
 
 
+def make_windows(*, short_m=None, long_m=None, short_c=50.0, long_c=50.0,
+                 sd=None, quality=1.0, baseline_quality=None, coverage=1.0,
+                 mid_trend="flat"):
+    """Three windows with independent short/long values, so within-athlete
+    deviation rules can be driven directly."""
+    short_m = short_m if short_m is not None else [None] * 5
+    long_m = long_m if long_m is not None else [None] * 5
+    sd = sd if sd is not None else [10.0] * 5
+    if baseline_quality is None:
+        baseline_quality = quality
+
+    def w(label, m, c, q, trend):
+        return {"window": label, "from": "2026-08-03T12:00:00.000Z",
+                "m": list(m), "sd": list(sd),
+                "composite": {"avg": c, "min": c, "max": c, "sd": 10.0},
+                "quality": q, "coverage": coverage, "trend": trend}
+
+    return [w("5m", short_m, short_c, quality, "flat"),
+            w("30m", short_m, short_c, quality, mid_trend),
+            w("2h", long_m, long_c, baseline_quality, "flat")]
+
+
+def ctx_from(windows, forecasts=None, name="Alice") -> Ctx:
+    return Ctx(device_id="30", display_name=name, windows=windows,
+               forecasts=forecasts, settings=Settings(_env_file=None))
+
+
 def make_ctx(comp_avg=50.0, quality=1.0, mid_trend="flat",
              forecasts=None, name="Alice", baseline_quality=None) -> Ctx:
     """`baseline_quality` sets the LONGEST window's quality independently, so
@@ -28,9 +55,9 @@ def make_ctx(comp_avg=50.0, quality=1.0, mid_trend="flat",
 
     def window(label, avg, trend, q):
         return {"window": label, "from": "2026-08-02T12:00:00.000Z",
-                "m": [None] * 5,
-                "composite": {"avg": avg, "min": avg, "max": avg},
-                "quality": q, "trend": trend}
+                "m": [None] * 5, "sd": [None] * 5,
+                "composite": {"avg": avg, "min": avg, "max": avg, "sd": None},
+                "quality": q, "coverage": 1.0, "trend": trend}
     return Ctx(
         device_id="30", display_name=name,
         windows=[window("5m", comp_avg, "flat", quality),
@@ -114,6 +141,158 @@ def test_data_quality_reports_a_drop_not_an_absolute_level() -> None:
     # missing data never fires
     assert rule.evaluate(make_ctx(quality=None, baseline_quality=0.9)) is None
     assert rule.evaluate(make_ctx(quality=0.2, baseline_quality=None)) is None
+
+
+# --- the holistic / retune-immune layer --------------------------------------
+
+def test_z_is_invariant_to_a_metric_rescale() -> None:
+    """THE property the whole rule catalogue rests on.
+
+    Every athlete-facing rule fires on `MetricView.z` — the deviation of the
+    recent window from the athlete's own baseline, in units of their own spread.
+    That is EXACTLY invariant under any affine rescale of the metric, which is
+    what a change to a biomech normalisation bound (`M1_LO`, `M3_HI`, the acute
+    curve, …) produces: `lo` shifts every value by a constant, `hi/lo` scales
+    them all by a common factor, and both cancel in (now - baseline)/sd.
+
+    So retuning the model changes the numbers an insight REPORTS without
+    changing whether it fires. Absolute thresholds have no such property.
+    """
+    base = make_windows(short_m=[60.0] * 5, long_m=[30.0] * 5, sd=[10.0] * 5,
+                        short_c=60.0, long_c=30.0)
+    z_before = {k: v.z for k, v in ctx_from(base).metrics.items()}
+
+    for gain, offset in ((2.0, 0.0), (0.5, 0.0), (1.0, 25.0), (3.0, -10.0)):
+        scaled = make_windows(
+            short_m=[60.0 * gain + offset] * 5, long_m=[30.0 * gain + offset] * 5,
+            sd=[10.0 * gain] * 5,
+            short_c=60.0 * gain + offset, long_c=30.0 * gain + offset,
+        )
+        # composite sd is fixed at 10.0 by make_windows, so check the primitives,
+        # which carry the rescaled sd.
+        z_after = {k: v.z for k, v in ctx_from(scaled).metrics.items()}
+        for key in ("m1", "m2", "m3", "m4", "m5"):
+            assert z_after[key] == pytest.approx(z_before[key], rel=1e-9), (
+                f"{key} z changed under rescale gain={gain} offset={offset}"
+            )
+
+
+def test_metrics_view_spans_every_primitive_and_window() -> None:
+    """An insight must be able to see the whole picture, not one number."""
+    ctx = ctx_from(make_windows(short_m=[10.0, 20.0, 30.0, 40.0, 50.0],
+                                long_m=[1.0, 2.0, 3.0, 4.0, 5.0]))
+    assert set(ctx.metrics) == {"m1", "m2", "m3", "m4", "m5", "composite"}
+    assert ctx.metrics["m3"].now == 30.0 and ctx.metrics["m3"].baseline == 3.0
+    assert ctx.metrics["m4"].unvalidated and ctx.metrics["m5"].unvalidated
+    assert not ctx.metrics["m1"].unvalidated
+
+
+def test_load_spike_fires_on_within_athlete_deviation() -> None:
+    rule = RULE["load_spike"]
+    # inside the athlete's own spread -> silent, however large the absolute value
+    assert rule.evaluate(ctx_from(make_windows(short_c=90.0, long_c=85.0))) is None
+    # 3 sd above their own baseline -> alert
+    ev = rule.evaluate(ctx_from(make_windows(short_c=60.0, long_c=30.0)))
+    assert ev is not None and ev["severity"] == "alert"
+    assert ev["z"] == pytest.approx(3.0)
+    # 2 sd -> warning, not alert
+    ev = rule.evaluate(ctx_from(make_windows(short_c=50.0, long_c=30.0)))
+    assert ev["severity"] == "warning"
+
+
+def test_accumulated_load_needs_both_high_and_rising() -> None:
+    rule = RULE["accumulated_load"]
+    high = dict(short_m=[0, 0, 60.0, 0, 0], long_m=[0, 0, 30.0, 0, 0])
+    assert rule.evaluate(ctx_from(make_windows(**high, mid_trend="flat"))) is None
+    ev = rule.evaluate(ctx_from(make_windows(**high, mid_trend="up")))
+    assert ev is not None and ev["metric"] == "m3"
+    assert ev["severity"] == "alert"
+
+
+def test_residual_load_reads_the_stop_now_branch() -> None:
+    """Fires on ci_low — where risk settles if the athlete stops NOW. That is
+    decay of load already taken, not a prediction about behaviour."""
+    rule = RULE["residual_load"]
+    w = make_windows()
+    quiet = [{"horizon": "1h", "pred": 95.0, "ci_low": 40.0, "ci_high": 99.0}]
+    assert rule.evaluate(ctx_from(w, forecasts=quiet)) is None, (
+        "a high central projection must NOT fire this rule — only the floor does"
+    )
+    loaded = [{"horizon": "10m", "pred": 99.0, "ci_low": 50.0, "ci_high": 99.0},
+              {"horizon": "1h", "pred": 99.0, "ci_low": 88.0, "ci_high": 99.0}]
+    ev = rule.evaluate(ctx_from(w, forecasts=loaded))
+    assert ev["settles_at"] == pytest.approx(88.0) and ev["horizon"] == "1h"
+    assert "stop" in rule.message(ctx_from(w, forecasts=loaded), ev).lower()
+
+
+def test_impact_and_movement_rules_stay_info_and_marked() -> None:
+    dev = dict(short_m=[60.0, 60.0, 0.0, 60.0, 60.0],
+               long_m=[30.0, 30.0, 0.0, 30.0, 30.0])
+    ctx = ctx_from(make_windows(**dev))
+
+    ev = RULE["impact_deviation"].evaluate(ctx)
+    assert ev["severity"] == "info" and ev["metric"] in ("m1", "m2")
+    assert not ev.get("unvalidated")
+
+    ev = RULE["movement_quality"].evaluate(ctx)
+    assert ev["severity"] == "info" and ev["metric"] in ("m4", "m5")
+    assert ev["unvalidated"] is True, "m4/m5 have no real-data validation"
+    text = RULE["movement_quality"].rationale(ctx, ev)
+    assert "no real-world validation" in text
+    for banned in ("left leg", "right leg", "weaker"):
+        assert banned not in text.lower(), "no directional L/R claim (SPEC §5.5)"
+
+
+def test_athlete_rules_are_suppressed_on_mismatched_quality() -> None:
+    """5% packet loss moves m1 -49% and m2 +34%, so comparing windows measured
+    at different link quality compares artefacts, not the athlete."""
+    spike = dict(short_c=60.0, long_c=30.0,
+                 short_m=[60.0] * 5, long_m=[30.0] * 5)
+    assert RULE["load_spike"].evaluate(ctx_from(make_windows(**spike))) is not None
+    mismatched = ctx_from(make_windows(**spike, quality=0.3, baseline_quality=0.95))
+    for rid in ("load_spike", "accumulated_load", "impact_deviation",
+                "movement_quality"):
+        assert RULE[rid].evaluate(mismatched) is None, f"{rid} fired on bad data"
+
+
+def test_low_coverage_suppresses_athlete_rules() -> None:
+    spike = dict(short_c=60.0, long_c=30.0)
+    assert RULE["load_spike"].evaluate(
+        ctx_from(make_windows(**spike, coverage=0.5))) is not None
+    assert RULE["load_spike"].evaluate(
+        ctx_from(make_windows(**spike, coverage=0.01))) is None
+
+
+def test_every_rule_supplies_action_and_rationale_with_evidence() -> None:
+    """UIUX §4 renders `action` as the headline and `rationale` beneath it, and
+    SPEC §2 forbids an individual flag without the evidence that fired it."""
+    for rule in RULES:
+        assert rule.action is not None, f"{rule.rule_id} has no action"
+        assert rule.rationale is not None, f"{rule.rule_id} has no rationale"
+        assert rule.severity in ("info", "warning", "alert")
+
+
+def test_firing_depends_on_dispersion_not_on_a_bare_ratio() -> None:
+    """The behavioural difference from an acute:chronic ratio.
+
+    ACWR fires on short/long alone. It is mathematically coupled (Lolli 2019)
+    and has no evidence supporting its use for load management (Impellizzeri
+    2020), and SPEC §6.3 excludes it. These rules instead ask whether the change
+    is large FOR THIS ATHLETE, so the identical 2x ratio fires for a metronomic
+    athlete and stays silent for a variable one — which a ratio cannot express.
+    """
+    steady = ctx_from(make_windows(short_c=60.0, long_c=30.0, sd=[3.0] * 5))
+    variable = ctx_from(make_windows(short_c=60.0, long_c=30.0, sd=[40.0] * 5))
+    # identical short/long ratio in both
+    assert steady.metrics["m1"].now == variable.metrics["m1"].now
+
+    m3_steady = dict(short_m=[0, 0, 60.0, 0, 0], long_m=[0, 0, 30.0, 0, 0],
+                     sd=[3.0] * 5, mid_trend="up")
+    m3_variable = dict(m3_steady, sd=[40.0] * 5)
+    assert RULE["accumulated_load"].evaluate(
+        ctx_from(make_windows(**m3_steady))) is not None
+    assert RULE["accumulated_load"].evaluate(
+        ctx_from(make_windows(**m3_variable))) is None
 
 
 # --- engine against a scratch db ---------------------------------------------

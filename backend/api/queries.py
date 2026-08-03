@@ -105,6 +105,9 @@ async def _window_agg(
             """SELECT avg(m1) m1, avg(m2) m2, avg(m3) m3, avg(m4) m4, avg(m5) m5,
                       avg(composite) c_avg, min(composite) c_min, max(composite) c_max,
                       stddev_samp(composite) c_sd,
+                      stddev_samp(m1) m1_sd, stddev_samp(m2) m2_sd,
+                      stddev_samp(m3) m3_sd, stddev_samp(m4) m4_sd,
+                      stddev_samp(m5) m5_sd,
                       avg(quality) quality, count(*) n
                FROM metrics
                WHERE device_id=$1 AND time >= $2 AND time < $3""",
@@ -134,6 +137,9 @@ async def _window_agg(
                       / nullif(sum(n) FILTER (WHERE composite IS NOT NULL), 0) c_avg,
                   min(composite_min) c_min, max(composite_max) c_max,
                   stddev_samp(composite) c_sd,
+                  stddev_samp(m1) m1_sd, stddev_samp(m2) m2_sd,
+                  stddev_samp(m3) m3_sd, stddev_samp(m4) m4_sd,
+                  stddev_samp(m5) m5_sd,
                   sum(quality * n)
                       / nullif(sum(n) FILTER (WHERE quality IS NOT NULL), 0) quality,
                   coalesce(sum(n), 0) n
@@ -172,14 +178,27 @@ async def windows(pool: asyncpg.Pool, settings: Settings, device_id: str) -> dic
         use_raw = td <= WINDOW_RAW_MAX
         cur = await _window_agg(pool, device_id, now - td, now, use_raw)
         prev = await _window_agg(pool, device_id, now - 2 * td, now - td, use_raw)
+        # `sd` and `coverage` are what make the insight layer retune-proof and
+        # honest respectively (docs/ANALYTICS.md). `sd` lets a rule express a
+        # deviation in units of the athlete's OWN spread, which is invariant to
+        # any change in a metric's 0-100 normalisation bounds. `coverage` is the
+        # share of the window that actually has data -- without it a window
+        # average cannot be told apart from a sliver of one.
+        expected_rows = settings.output_hz * td.total_seconds()
         out.append({
             "window": label,
             "from": _iso(now - td),
             "m": [_f(cur["m1"]), _f(cur["m2"]), _f(cur["m3"]), _f(cur["m4"]), _f(cur["m5"])],
+            "sd": [_f(cur["m1_sd"]), _f(cur["m2_sd"]), _f(cur["m3_sd"]),
+                   _f(cur["m4_sd"]), _f(cur["m5_sd"])],
             "composite": {
                 "avg": _f(cur["c_avg"]), "min": _f(cur["c_min"]), "max": _f(cur["c_max"]),
+                "sd": _f(cur["c_sd"]),
             },
             "quality": _f(cur["quality"]),
+            # sum() over the aggregate returns Decimal; float() before dividing
+            "coverage": (min(1.0, float(cur["n"] or 0) / expected_rows)
+                         if expected_rows else None),
             "trend": _trend(_f(cur["c_avg"]), _f(prev["c_avg"]),
                             _f(cur["c_sd"]), _f(prev["c_sd"])),
         })

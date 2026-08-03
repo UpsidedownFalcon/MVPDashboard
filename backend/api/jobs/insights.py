@@ -34,13 +34,98 @@ _SEVERITY_RANK_SQL = (
 )
 
 
+METRIC_KEYS = ("m1", "m2", "m3", "m4", "m5")
+METRIC_NAMES = {
+    "m1": "impact", "m2": "loading rate", "m3": "accumulated load",
+    "m4": "movement control", "m5": "left/right balance",
+    "composite": "injury-risk load",
+}
+# m4/m5 have no real-data validation (biomech SPEC Section 11.1) -- synthetic
+# fixtures only. Any evidence derived from them is marked so the UI can say so.
+UNVALIDATED_METRICS = frozenset({"m4", "m5"})
+
+# A deviation must clear this many of the athlete's OWN standard deviations
+# before it is called a change. Below it, the difference is inside the spread
+# the metric shows anyway. ~2 sd is the conventional "unusual" boundary and is
+# deliberately conservative: at realistic injury base rates roughly 90% of
+# individual alerts are false (SPEC Section 2), so specificity beats sensitivity.
+Z_NOTABLE = 2.0
+Z_STRONG = 3.0
+# sd floors, in metric points. A window that happens to be nearly constant
+# produces a tiny sd and would turn any difference into a huge z.
+SD_FLOOR = 3.0
+# Rules that describe the ATHLETE are suppressed when the windows being compared
+# were measured at materially different link quality. Measured 2026-08-03: 5%
+# packet loss moves m1 -49% and m2 +34% (SPEC Section 13 item 11), so comparing
+# across quality regimes compares measurement artefacts, not the athlete.
+QUALITY_MATCH_RATIO = 0.75
+MIN_COVERAGE = 0.10
+
+
+@dataclass
+class MetricView:
+    """One metric seen across the whole time axis at once.
+
+    `z` is the load-bearing field, and the reason this layer exists: it states
+    how far the recent window sits from the athlete's own longer-run baseline in
+    units of that athlete's own spread. That is EXACTLY invariant to the metric's
+    0-100 normalisation bounds -- rescaling `lo`/`hi` multiplies `now`,
+    `baseline` and `sd` by the same factor and shifts them by the same constant,
+    both of which cancel. So a future retune of the biomech reference ranges (or
+    of the composite curve) changes the numbers a rule REPORTS without changing
+    whether it fires. Absolute thresholds have no such property, which is why
+    they are used only where the scale is definitional (the 0-1 quality ratio)
+    or configured by the operator (the composite warn/alert thresholds).
+    """
+    key: str
+    now: float | None          # shortest window
+    baseline: float | None     # longest window
+    sd: float | None           # spread over the longest window
+    z: float | None            # (now - baseline) / max(sd, SD_FLOOR)
+    trend: str                 # of the mid window, or the shortest if only one
+
+    @property
+    def name(self) -> str:
+        return METRIC_NAMES.get(self.key, self.key)
+
+    @property
+    def unvalidated(self) -> bool:
+        return self.key in UNVALIDATED_METRICS
+
+
+def _metric_view(windows: list[dict], key: str, idx: int | None) -> MetricView:
+    def pick(w: dict | None, field: str):
+        if w is None:
+            return None
+        if idx is None:
+            return w["composite"][field]
+        return w[field][idx] if w.get(field) else None
+
+    short, long_ = windows[0], windows[-1]
+    mid = windows[1] if len(windows) > 1 else windows[0]
+    now = pick(short, "avg" if idx is None else "m")
+    base = pick(long_, "avg" if idx is None else "m")
+    sd = pick(long_, "sd")
+    z = None
+    if now is not None and base is not None:
+        z = (now - base) / max(sd or 0.0, SD_FLOOR)
+    return MetricView(key=key, now=now, baseline=base, sd=sd, z=z,
+                      trend=mid.get("trend", "flat"))
+
+
 @dataclass
 class Ctx:
-    """Everything a rule may look at, for one device."""
+    """Everything a rule may look at, for one device.
+
+    Rules read `metrics` / `horizons` rather than indexing `windows` directly:
+    that is what makes an insight reflect the whole picture -- every primitive,
+    every configured past window, and every projected horizon -- instead of one
+    number. `windows` and `forecasts` stay available for anything bespoke.
+    """
     device_id: str
     display_name: str
     windows: list[dict]            # queries.windows() entries, PAST_WINDOWS order
-    forecasts: list[dict] | None   # latest run's points [{horizon,pred,…}] or None
+    forecasts: list[dict] | None   # latest run's points [{horizon,pred,ci_low,…}]
     settings: Settings
 
     @property
@@ -54,6 +139,44 @@ class Ctx:
     @property
     def longest(self) -> dict | None:
         return self.windows[-1] if self.windows else None
+
+    @property
+    def metrics(self) -> dict[str, MetricView]:
+        """m1..m5 + composite, each across every configured window."""
+        if not self.windows:
+            return {}
+        out = {k: _metric_view(self.windows, k, i)
+               for i, k in enumerate(METRIC_KEYS)}
+        out["composite"] = _metric_view(self.windows, "composite", None)
+        return out
+
+    @property
+    def horizons(self) -> list[dict]:
+        return self.forecasts or []
+
+    @property
+    def furthest(self) -> dict | None:
+        """The last projected horizon -- the one that says where this is going."""
+        return self.horizons[-1] if self.horizons else None
+
+    @property
+    def trustworthy(self) -> bool:
+        """Is the athlete-state picture worth acting on at all?
+
+        Guards every rule that makes a claim about the PERSON (not about the
+        data): enough of the window actually has data, and the two windows being
+        compared were measured at comparable link quality.
+        """
+        short, long_ = self.shortest, self.longest
+        if short is None or long_ is None:
+            return False
+        cov = short.get("coverage")
+        if cov is not None and cov < MIN_COVERAGE:
+            return False
+        qs, ql = short.get("quality"), long_.get("quality")
+        if qs is None or ql is None or ql <= 0.0:
+            return True          # nothing to compare against; do not block
+        return min(qs, ql) / max(qs, ql) >= QUALITY_MATCH_RATIO
 
 
 @dataclass
@@ -70,7 +193,74 @@ class Rule:
     rationale: Callable[[Ctx, Evidence], str] | None = None
 
 
-# --- starter rules (catalogue TBD in a later session) -------------------------
+# --- rule catalogue -----------------------------------------------------------
+#
+# Design rules, all load-bearing:
+#
+# 1. WITHIN-ATHLETE, NOT POPULATION. Every rule about the athlete compares them
+#    to their own longer-run baseline in units of their own spread (MetricView.z).
+#    That is what the field recommends over absolute cut-offs, what SPEC §6.3
+#    requires, and what makes these rules survive a future metric retune
+#    unchanged -- see MetricView's docstring for why the invariance is exact.
+# 2. HOLISTIC. Rules read `ctx.metrics` (every primitive across every configured
+#    past window) and `ctx.horizons` (every projection), not a single number.
+# 3. SPECIFICITY OVER SENSITIVITY. At realistic injury base rates ~90% of
+#    individual alerts are false even for a genuinely good composite (SPEC §2),
+#    so rules require ~2 sd of their own spread and AND-conditions rather than
+#    firing on any excursion.
+# 4. NO ACWR, IN ANY FORM. The ratio is mathematically coupled (Lolli 2019) and
+#    has no evidence supporting its use for load management (Impellizzeri 2020).
+#    Absent by intent, not by omission (SPEC §6.3).
+# 5. EVIDENCE ALWAYS. Every rule returns the numbers that fired it, because
+#    SPEC §2 forbids an individual flag without the component panel behind it.
+#    `rationale` renders those numbers; `action` is what to do about them.
+
+
+def _base_evidence(ctx: Ctx, m: MetricView) -> Evidence:
+    """Evidence common to every within-athlete deviation rule."""
+    short, long_ = ctx.shortest or {}, ctx.longest or {}
+    ev: Evidence = {
+        "metric": m.key,
+        "metric_name": m.name,
+        "window": short.get("window"),
+        "baseline_window": long_.get("baseline_window", long_.get("window")),
+        "value": None if m.now is None else round(m.now, 1),
+        "baseline": None if m.baseline is None else round(m.baseline, 1),
+        "sd": None if m.sd is None else round(m.sd, 1),
+        "z": None if m.z is None else round(m.z, 2),
+        "quality": short.get("quality"),
+        "coverage": short.get("coverage"),
+    }
+    if m.unvalidated:
+        ev["unvalidated"] = True
+    return ev
+
+
+def _deviation_rationale(ctx: Ctx, ev: Evidence) -> str:
+    """Shared plain-language body: what moved, versus what, by how much."""
+    bits = [
+        f"{ev['metric_name'].capitalize()} over the last {ev['window']} is"
+        f" {ev['value']:.0f} against a {ev['baseline_window']} baseline of"
+        f" {ev['baseline']:.0f} — {ev['z']:.1f}× this athlete's own typical"
+        f" spread."
+    ]
+    if ev.get("settles_at") is not None:
+        bits.append(
+            f"Even with no further load it settles around"
+            f" {ev['settles_at']:.0f} over the next {ev['horizon']}."
+        )
+    elif ev.get("projected") is not None:
+        bits.append(
+            f"If the recent level continues it reaches about"
+            f" {ev['projected']:.0f} within {ev['horizon']}."
+        )
+    if ev.get("unvalidated"):
+        bits.append(
+            "This metric has no real-world validation yet — treat as a prompt to"
+            " look, not as a finding."
+        )
+    return " ".join(bits)
+
 
 def _composite_high(ctx: Ctx) -> Evidence | None:
     w = ctx.shortest
@@ -85,6 +275,136 @@ def _composite_high(ctx: Ctx) -> Evidence | None:
         return {"severity": "warning", "window": w["window"], "composite_avg": round(avg, 2),
                 "threshold": s.insight_warn_threshold}
     return None
+
+
+def _load_spike(ctx: Ctx) -> Evidence | None:
+    """A session materially harder than this athlete's own recent norm.
+
+    This is the best-evidenced signal available. Current running research finds
+    injuries are driven by doing too much in a SINGLE SESSION relative to recent
+    history rather than by weekly totals -- a >=30% single-run spike carried a
+    64% higher injury rate, while week-to-week change and the acute:chronic
+    ratio had little or no predictive value. Expressed against the athlete's own
+    spread, so it is a within-athlete change and not a population cut-off
+    (SPEC Section 6.3 forbids fixed population thresholds).
+    """
+    if not ctx.trustworthy:
+        return None
+    m = ctx.metrics.get("composite")
+    if m is None or m.z is None:
+        return None
+    if m.z < Z_NOTABLE:
+        return None
+    ev = _base_evidence(ctx, m)
+    ev["severity"] = "alert" if m.z >= Z_STRONG else "warning"
+    # what the projection says about where this goes
+    far = ctx.furthest
+    if far is not None:
+        ev["horizon"] = far["horizon"]
+        ev["projected"] = round(far["pred"], 1)
+    return ev
+
+
+def _accumulated_load(ctx: Ctx) -> Evidence | None:
+    """Accumulated mechanical dose is high AND still climbing.
+
+    m3 is the dose term: a power-law-weighted, 45-minute-half-life accumulation.
+    Kalkhoven's first-principles model is the grounding -- repetitive loading
+    accumulates damage, damage lowers the tissue's critical threshold, and
+    injury occurs when load exceeds that declining threshold. So a dose that is
+    both high and still rising is the mechanistically meaningful state, which is
+    also why the composite carries m3 as a floor it decays onto rather than as
+    another averaged term.
+
+    Uses PAST (dose vs the athlete's baseline, and its trend) and FUTURE (where
+    the dose settles if they stop now) together.
+    """
+    if not ctx.trustworthy:
+        return None
+    m = ctx.metrics.get("m3")
+    if m is None or m.z is None or m.now is None:
+        return None
+    if m.z < Z_NOTABLE or m.trend != "up":
+        return None
+    ev = _base_evidence(ctx, m)
+    ev["trend"] = m.trend
+    ev["severity"] = "alert" if m.z >= Z_STRONG else "warning"
+    far = ctx.furthest
+    if far is not None and far.get("ci_low") is not None:
+        ev["horizon"] = far["horizon"]
+        ev["settles_at"] = round(far["ci_low"], 1)
+    return ev
+
+
+def _residual_load(ctx: Ctx) -> Evidence | None:
+    """Even if the athlete stops right now, risk stays elevated.
+
+    `ci_low` under `dose-scenario-1` is the "if they stop now" branch: closed-
+    form decay of the already-accumulated dose onto the composite's floor. It is
+    arithmetic about load already taken, NOT a prediction about what the athlete
+    will do -- which is what makes it safe to act on under SPEC Section 2, where
+    behavioural prediction is not defensible.
+
+    The actionable content is recovery scheduling rather than stopping.
+    """
+    far = ctx.furthest
+    if far is None or far.get("ci_low") is None:
+        return None
+    floor = far["ci_low"]
+    warn = ctx.settings.insight_warn_threshold
+    if floor < warn:
+        return None
+    return {"severity": "warning", "horizon": far["horizon"],
+            "settles_at": round(floor, 1), "threshold": warn,
+            "window": (ctx.shortest or {}).get("window")}
+
+
+def _impact_deviation(ctx: Ctx) -> Evidence | None:
+    """Impact magnitude or loading rate deviating from this athlete's baseline.
+
+    Loading rate -- not peak magnitude -- is the ground-reaction variable most
+    consistently associated with running injury, which is why m2 is watched
+    alongside m1. Held to `info` deliberately: IMU jerk has never been validated
+    against GRF loading rate (SPEC Section 5.2), and peak tibial acceleration
+    does not track internal tibial load (Matijevich 2019, r = -0.29 +- 0.37).
+    These are surrogates for EXTERNAL impact loading, so the honest action is to
+    look at mechanics, not to assert tissue damage.
+    """
+    if not ctx.trustworthy:
+        return None
+    hits = [m for k in ("m1", "m2")
+            if (m := ctx.metrics.get(k)) and m.z is not None and m.z >= Z_NOTABLE]
+    if not hits:
+        return None
+    worst = max(hits, key=lambda m: m.z or 0.0)
+    ev = _base_evidence(ctx, worst)
+    ev["severity"] = "info"
+    ev["also"] = [m.key for m in hits if m.key != worst.key] or None
+    return ev
+
+
+def _movement_quality(ctx: Ctx) -> Evidence | None:
+    """Movement control or L/R balance drifting from this athlete's baseline.
+
+    `info` only, and explicitly flagged unvalidated. Two independent reasons:
+    m4/m5 have no real-data validation at all (SPEC Section 11.1, synthetic
+    fixtures only), and the largest prospective test of asymmetry (Malisoux
+    2024, n = 836, 107 injuries) found GREATER asymmetry associated with LOWER
+    injury risk. So this can be surfaced as something to look at, and must never
+    be presented as risk -- nor given a direction, since which limb dominates
+    does not agree across sessions (SPEC Section 5.5).
+    """
+    if not ctx.trustworthy:
+        return None
+    hits = [m for k in ("m4", "m5")
+            if (m := ctx.metrics.get(k)) and m.z is not None and m.z >= Z_NOTABLE]
+    if not hits:
+        return None
+    worst = max(hits, key=lambda m: m.z or 0.0)
+    ev = _base_evidence(ctx, worst)
+    ev["severity"] = "info"
+    ev["unvalidated"] = True
+    return ev
 
 
 def _rising_risk(ctx: Ctx) -> Evidence | None:
@@ -135,6 +455,85 @@ def _data_quality(ctx: Ctx) -> Evidence | None:
 
 
 RULES: list[Rule] = [
+    Rule(
+        rule_id="load_spike",
+        severity="warning",
+        evaluate=_load_spike,
+        message=lambda ctx, ev: (
+            f"{ctx.display_name}: load over the last {ev['window']} is well above"
+            f" their own recent norm ({ev['value']:.0f} vs {ev['baseline']:.0f})."
+        ),
+        action=lambda ctx, ev: "Ease off for the rest of this session",
+        rationale=lambda ctx, ev: (
+            _deviation_rationale(ctx, ev)
+            + " Doing too much in a single session relative to recent history is"
+              " the load pattern most consistently linked to injury."
+        ),
+    ),
+    Rule(
+        rule_id="accumulated_load",
+        severity="warning",
+        evaluate=_accumulated_load,
+        message=lambda ctx, ev: (
+            f"{ctx.display_name}: accumulated load is high and still climbing"
+            f" ({ev['value']:.0f} over {ev['window']})."
+        ),
+        action=lambda ctx, ev: "Cap this session and protect recovery",
+        rationale=lambda ctx, ev: (
+            _deviation_rationale(ctx, ev)
+            + " Accumulated load is still trending up, so each additional bout is"
+              " landing on tissue that has less capacity than it started with."
+        ),
+    ),
+    Rule(
+        rule_id="residual_load",
+        severity="warning",
+        evaluate=_residual_load,
+        message=lambda ctx, ev: (
+            f"{ctx.display_name}: risk stays around {ev['settles_at']:.0f} over the"
+            f" next {ev['horizon']} even if they stop now."
+        ),
+        action=lambda ctx, ev: "Schedule recovery before the next session",
+        rationale=lambda ctx, ev: (
+            f"Load already accumulated decays slowly: even with no further"
+            f" training, projected risk only falls to about"
+            f" {ev['settles_at']:.0f} over the next {ev['horizon']}, still above"
+            f" the {ev['threshold']:.0f} review threshold. This is decay of load"
+            f" already taken, not a prediction of what they will do next."
+        ),
+    ),
+    Rule(
+        rule_id="impact_deviation",
+        severity="info",
+        evaluate=_impact_deviation,
+        message=lambda ctx, ev: (
+            f"{ctx.display_name}: {ev['metric_name']} over the last {ev['window']}"
+            f" is above their baseline ({ev['value']:.0f} vs {ev['baseline']:.0f})."
+        ),
+        action=lambda ctx, ev: "Review landing mechanics",
+        rationale=lambda ctx, ev: (
+            _deviation_rationale(ctx, ev)
+            + " These measure external impact loading at the shank, not tissue"
+              " stress — worth a look at technique and surface rather than a"
+              " conclusion about the athlete."
+        ),
+    ),
+    Rule(
+        rule_id="movement_quality",
+        severity="info",
+        evaluate=_movement_quality,
+        message=lambda ctx, ev: (
+            f"{ctx.display_name}: {ev['metric_name']} has drifted from their"
+            f" fresh baseline over the last {ev['window']}."
+        ),
+        action=lambda ctx, ev: "Flag for review at the next check-in",
+        rationale=lambda ctx, ev: (
+            _deviation_rationale(ctx, ev)
+            + " Reported as magnitude only — which side leads does not agree"
+              " between sessions, and greater asymmetry has not been shown to"
+              " predict injury."
+        ),
+    ),
     Rule(
         rule_id="composite_high",
         severity="warning",
@@ -220,8 +619,17 @@ class InsightJob:
                 log.exception("insight run failed")
 
     async def _latest_forecast_points(self, device_id: str) -> list[dict] | None:
+        """Latest run's points, earliest horizon first.
+
+        `ci_low`/`ci_high` are carried through because under `dose-scenario-1`
+        they are not estimator error but two counterfactuals, and `ci_low` in
+        particular -- "where risk settles if the athlete stops right now" -- is
+        the single most actionable number the forecast produces. It is closed-
+        form dose decay, not a prediction about behaviour.
+        """
         rows = await self._pool.fetch(
-            """SELECT horizon, composite_pred FROM forecasts
+            """SELECT horizon, composite_pred, ci_low, ci_high, model_version
+               FROM forecasts
                WHERE device_id = $1
                  AND made_at = (SELECT max(made_at) FROM forecasts WHERE device_id = $1)
                ORDER BY horizon""",
@@ -230,7 +638,10 @@ class InsightJob:
         if not rows:
             return None
         return [{"horizon": format_duration(r["horizon"]),
-                 "pred": float(r["composite_pred"])} for r in rows]
+                 "pred": float(r["composite_pred"]),
+                 "ci_low": None if r["ci_low"] is None else float(r["ci_low"]),
+                 "ci_high": None if r["ci_high"] is None else float(r["ci_high"]),
+                 "model_version": r["model_version"]} for r in rows]
 
     async def run_once(self) -> int:
         """One evaluation sweep; returns number of insights inserted."""

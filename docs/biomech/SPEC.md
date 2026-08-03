@@ -370,12 +370,7 @@ magnitude primitives only. Flagged for approval.)*
 | `m1` Impact | **`max(2.0, 5σ)`** m/s² | 150 m/s² | **`lo` is noise-adaptive** — derived from the per-sensor `σ` that calibration already measures (§3.8), so a noisier sensor cannot read m1 > 0 at rest. The **floor was raised 0.15 → 2.0 on 2026-08-02** against a live 11-minute wearing session: at 0.15 the floor sat barely above the rest noise, ordinary walking already scored 57/100, and everything from an easy walk to near-maximal effort was squeezed into ten points. Measured shank p90 \|a_dyn\| that session: still 0.2, squats 4.2, walking 8.4, jumps 11.3, hard interval work 16.7 m/s² **[V]**. `hi` ≈ 15 g, near accel full scale — deliberately **not** anchored to that session, whose hardest impact was 11 m/s² against 30–150 in the landing literature; anchoring the top to it would peg a real athlete at 100 permanently |
 | `m2` Loading Rate | **800 m/s³** | **30 000 m/s³** | `lo` sits near the validated osteogenic jerk threshold (**981 m/s³**, Jämsä 2011) **[L]** rather than at the measured rest floor (p99 48–57): below that the loading rate is not doing anything worth scoring. `hi` raised from 12 000 after the same live session clipped it — p90 hit 100 in three separate phases of ordinary interval work **[V]** |
 
-⚠️ **This table was stale until 2026-08-03 and contradicted the shipped code**: it showed the
-pre-retune `m1` floor of 0.15 and an `m2` range of 120–12 000, and its `m2` justification argued
-*against* the value actually in `biomech.py`. The code (`M1_LO_FLOOR = 2.0`, `M2_LO/M2_HI =
-800/30 000`) and §6.1/§6.4/§11 were correct throughout; only this section was wrong. Corrected
-here from the constants and their in-code rationale.
-| `m3` Accumulated Load | **0.01** | **60** (dose·min) | §5.3. Chosen so a realistic session spans the scale: 16 s squats → 14, 10 min moderate → 56, 1 h moderate → 76, 1 h hard → 88 **[V]** |
+| `m3` Accumulated Load | **0.5** | **60** (dose·min) | §5.3. One dose-minute is **one minute of hard-training equivalent**, so the floor is 30 s of that and the ceiling a full hard hour. Re-anchored 2026-08-03 with the dose law: the old floor of 0.01 was 0.6 s of hard-training equivalent, so *any* movement cleared it within a second and the bottom of the scale was unreachable — 90 s of slow walking read 30/100. Measured on the activity ladder at these bounds: 45 min continuous slow walk → 0, light jog → 56, hard run → 87; 10 min hard run → 61, 1 min → 14 **[V]** |
 | **`ω` term (inside `m3`)** | **5 °/s** | **1500 °/s** | **Was missing entirely — `m3` was unimplementable.** `lo` above measured still-standing mean `\|ω\|` = 1.6 °/s; squat mean = 82 °/s → score 49 **[V]**; `hi` covers sprint thigh (792 °/s) and inferred shank (1200–1900 °/s) **[L]** |
 | `m4` Movement Control | 0 | ±50% vs own baseline | §5.4 |
 | `m5` L/R Balance | 0 | 18% wUSI | §5.5 — **literature-derived** |
@@ -383,6 +378,34 @@ here from the constants and their in-code rationale.
 Reference bounds are **constants in `biomech.py`, not `.env` keys** — model parameters, not
 deployment wiring (TRD §7 permits file-local tuning constants). They are **provisional starting
 points requiring calibration against trial data**, not validated clinical cut-offs.
+
+⚠️ *This table was stale until 2026-08-03 and contradicted the shipped code: it showed the
+pre-retune `m1` floor of 0.15 and an `m2` range of 120–12 000, and its `m2` justification argued
+against the value actually in `biomech.py`. Corrected from the constants and their in-code
+rationale; the `m3` row was re-anchored again the same day with the §5.3 dose-law fix.*
+
+### 4.1 The activity ladder — what the scale reads for real activities **[V]**
+
+Measured 2026-08-03 by driving synthetic gait through the shipped `compute()`, with amplitudes
+set from published **resultant** peak tibial acceleration (walk 2.7–3.7 g, jog ~5 g, run 8–12 g,
+sprint ~20 g, drop landing ~27 g) **[L]**. The generator is calibrated by the fact that it
+reproduced the previously reported live behaviour almost exactly (slow walk 26, light jog 55)
+before the §5.3/§6.1 corrections.
+
+| Activity | `m1` | `m2` | `m3` | demand | **composite** (before → after) |
+|---|---|---|---|---|---|
+| Standing still | 0 | 0 | 0 | 0 | **0 → 0** |
+| Slow walk | 35 | 7 | 0 | 24 | **26.0 → 0.9** |
+| Brisk walk | 43 | 17 | 0 | 33 | **36.0 → 2.8** |
+| Light jog | 58 | 31 | 0 | 47 | **55.3 → 13.8** |
+| Steady run | 68 | 47 | 14 | 60 | **69.7 → 36.1** |
+| Hard run | 79 | 59 | 30 | 71 | **79.7 → 57.4** |
+| Sprint | 91 | 74 | 62 | 84 | **92.7 → 86.5** |
+| Drop landing | 94 | 82 | 33 | 89 | **100 → 100** |
+
+The "before" column is what prompted the correction: an easy walk reading 26/100 and a light jog
+55/100 on a scale labelled *injury risk*. `m1` and `m2` are unchanged by either fix — only the
+dose law and the acute curve moved.
 
 ---
 
@@ -439,11 +462,27 @@ peak jerk is recovered (peak jerk is ~5× more sample-rate-sensitive than peak a
 Mechanical intensity, then **power-law weighted** accumulation with decay:
 
 ```
-intensity   = max( score(adyn_mean, m1 range), score(wmag_mean, ω range) )   0..100
-dose       ← dose · 2^(−Δt / DOSE_HALFLIFE)                                  always
-if intensity > gate:  dose += (intensity/100)^DOSE_EXPONENT · Δt/60          accumulate
+load_ratio  = max( adyn_mean / A_DOSE_REF , wmag_mean / W_DOSE_REF )   physical, unbounded
+dose       ← dose · 2^(−Δt / DOSE_HALFLIFE)                            always
+if moving:  dose += load_ratio^DOSE_EXPONENT · Δt/60                   accumulate
 raw₃        = dose
 ```
+
+🚩 **The power law acts on the PHYSICAL load ratio, not on a 0–100 score — corrected
+2026-08-03.** It was `(intensity/100)^3` where `intensity` was itself a `log_score`. But Whalen's
+exponent applies to the stress `σ`, not to a log-compressed score of it, and log-compressing
+first destroys precisely the magnitude weighting the exponent exists to apply. Measured
+consequence: an easy walk scored `intensity` 57 against hard running's ~80, so it accumulated
+dose at `(0.57/0.80)³ = 36%` of the hard-running rate when the physical loads differ by more than
+an order of magnitude. 90 s of slow walking reached `m3 = 30`, putting a 15-point floor under the
+composite and making a walk read as real injury risk. On the physical ratio the same walk
+accumulates **14× less**, and the walk↔hard-run rate separation goes from 2.8× to ~90×. **[V]**
+
+`A_DOSE_REF = 7.4 m/s²` and `W_DOSE_REF = 540 °/s` are the sustained **cube-mean** tick values of
+hard running, measured on the §4.1 ladder. Cube-mean (`E[x³]^⅓`), not median: the dose integrates
+every tick and the cubing lets impact ticks dominate, so a median understates the driving value
+several-fold. Anchoring there gives `dose` an interpretable unit — **one dose-minute is one
+minute of hard-training equivalent**, so `M3_HI = 60` is a full hard hour.
 
 - **Mean, not sum** — a sum scales with sample count, so packet loss would silently reduce
   reported dose. Under the mean, loss costs precision, never magnitude.
@@ -620,7 +659,8 @@ demand      = 0.60·max(m1, m2) + 0.40·min(m1, m2)        soft-max, 0..100
 degradation = (0.45·m4 + 0.30·m5) / Σ(available weights)  m4,m5 only — renormalised
 capacity    = 100 − 0.70·degradation                     30..100
 ratio       = demand / capacity                          load vs capacity
-acute       = min(100, 200 · ratio² / (ratio² + 1))      100 when demand == capacity
+acute       = min(100, 200 · ratio^n / (ratio^n + 1))    n = ACUTE_EXPONENT = 4
+                                                         100 when demand == capacity
 floor       = 0.50 · m3                                  accumulated-fatigue residue
 composite   = floor + (100 − floor) · acute/100          0..100
 ```
@@ -633,11 +673,34 @@ reachable only through accumulated dose. Measured live over 11 minutes: `demand`
 98) yet composite p99 = 66, and the wearer independently reported the number "plateauing around
 50" without having seen the formula.
 
-The replacement keeps the load-versus-capacity ratio and the saturating shape, but squares the
-ratio (sigmoid rather than hyperbolic, so light activity stays low) and normalises so that
-**`demand == capacity` reads 100**. Degradation lowers `capacity`, so a degraded athlete reaches
-full scale at lower demand — which is the intent. Same session under the new form: walking 29
-(was 44), interval work 77 (was 63).
+The replacement keeps the load-versus-capacity ratio and the saturating shape, but raises the
+ratio to a power (sigmoid rather than hyperbolic, so light activity stays low) and normalises so
+that **`demand == capacity` reads 100** for any exponent. Degradation lowers `capacity`, so a
+degraded athlete reaches full scale at lower demand — which is the intent.
+
+🚩 **`ACUTE_EXPONENT` raised 2 → 4 on 2026-08-03.** At `n = 2` the curve was still far too eager
+at the bottom: a slow walk read 20–30 and a light jog 50–70 on a scale labelled *injury risk*.
+Measured on the §4.1 ladder at `n = 2`: slow walk 26.0, light jog 55.3 — reproducing the reported
+complaint almost exactly. `n = 4` is not a fitted constant. Injury is a **threshold event, not an
+average**: damage accumulates until it exceeds a critical threshold, or until load exceeds a
+*declining* tissue strength, and mechanical damage is driven far more by load **magnitude** than
+by load frequency (Kalkhoven — first-principles athletic-injury model). The bone
+daily-stress-stimulus law uses `m = 4` (Whalen 1988) and fatigue-damage exponents span 2.1–5.8
+(Pattin 1996), so a 4th-power ratio is the same physics `DOSE_EXPONENT` already applies. **[L]**
+
+What the exponent does to the ladder, at fixed demand:
+
+| demand | n=2 | **n=4** | n=6 |
+|---|---|---|---|
+| 24 (slow walk) | 11.0 | **0.7** | 0.0 |
+| 47 (light jog) | 36.4 | **9.4** | 2.2 |
+| 71 (hard run) | 66.7 | **40.1** | 22.3 |
+| 84 (sprint) | 83.1 | **67.2** | 52.9 |
+
+Together with the §5.3 dose-law fix this is what moves the ladder to slow walk **0.9**, light jog
+**13.8**, hard run **57.4**, sprint **86.5** (§4.1). Note the two fixes are independent: the
+exponent alone took a slow walk from 26.0 to 15.9, and the remaining 15 points were the dose
+floor.
 
 **`m3` was removed from `degradation`.** It previously appeared in *both* `degradation` (0.25)
 and `floor` (0.50) — a genuine double-count that the earlier text acknowledged but did not fix.
@@ -696,12 +759,26 @@ Per the evidence, the following are deliberately absent: **[L]**
 | Phase | `m1` | `m2` | `m3` | `m4` | `m5` | **composite** |
 |---|---|---|---|---|---|---|
 | Standing still, 2–11 s (before work) | 0.0 | 0.0 | 0.0 | `null` | `null` | **0.0** |
-| Squatting, 16–31 s | 13.5 | 17.7 | 7.0 | `null` | `null` | **10.6** |
-| Standing still, 34–41 s (after work) | 0.0 | 0.0 | 13.7 | `null` | `null` | **6.9** |
+| Squatting, 16–31 s | 13.5 | 17.7 | 0.0 | `null` | `null` | **0.61** |
+| Standing still, 34–41 s (after work) | 0.0 | 0.0 | 0.0 | `null` | `null` | **0.0** |
 
-The requested semantics hold: zero when fresh and idle, a real reading during work, and settling
-onto the accumulated-dose floor rather than collapsing to zero — after-work composite is exactly
-`0.50 × m3`, which the test now asserts as an identity rather than a magic number.
+⚠️ **Re-measured 2026-08-03** after the §5.3 dose law and §6.1 acute curve were corrected.
+`m1` and `m2` are **unchanged** at 13.5 / 17.7 — neither fix touches their normalisation, so they
+are the control showing the change moved only what it was meant to.
+
+**`m3` is now 0 across the whole capture, and that is the point rather than a regression.** This
+file holds **16 s of gentle squatting**, whose measured cube-mean load is ~14% of hard running;
+cubed and integrated that is **0.0011 dose-minutes** against a floor of 0.5 — three orders below.
+§5.3 already argued this is the physically correct answer ("16 seconds of moderate squatting
+genuinely is a negligible cumulative load"); the old scale said 13.7/100 only because its floor
+was 0.6 s of hard-training equivalent, so any movement cleared it within a second.
+
+**Consequence: this capture can no longer validate `m3` or the decay-to-dose-floor behaviour** —
+both are zero here, so the assertions would be vacuous.
+`test_sustained_load_builds_dose_and_decays_to_the_floor` takes that over on 10 minutes of
+hard-run-equivalent synthetic load followed by rest, asserting that dose accumulates, persists
+through a short rest, decays, and that the composite settles onto exactly `0.50 × m3`. The
+identity itself still holds on this capture — at zero.
 
 ⚠️ **Re-measured 2026-08-02** after the §4 normalisation floors were raised against a live
 wearing session. The earlier row read `m1` 44.1, `m2` 52.6, composite 35.2 for the same file:

@@ -160,7 +160,7 @@ All routes require the auth cookie except `POST /api/auth/login` and liveness
 | GET `/api/devices` | — | `[{"device_id","display_name","online":bool,"last_seen":ts\|null,"quality":num\|null,"sensors":[{"source_id","sensor_id","limb","rate_hz","last_seen"}]}]` |
 | PATCH `/api/devices/{id}` | `{"display_name"}` | updated device object |
 | GET `/api/metrics/recent` | `?device=30&seconds=30` | `{"device_id","t0",…,"rows":[[t_offset_ms,m1..m5,c,q],…]}` (compact arrays for chart backfill) |
-| GET `/api/metrics/windows` | `?device=30` | `{"windows":[{"window":"5m","from":ts,"m":[…5 avgs],"composite":{"avg","min","max"},"quality":num,"trend":"up\|down\|flat"},…]}` — one entry per `PAST_WINDOWS`, `trend` vs the preceding equal-length window |
+| GET `/api/metrics/windows` | `?device=30` | `{"windows":[{"window":"5m","from":ts,"m":[…5 avgs],"sd":[…5 std devs],"composite":{"avg","min","max","sd"},"quality":num,"coverage":num\|null,"trend":"up\|down\|flat"},…]}` — one entry per `PAST_WINDOWS`, `trend` vs the preceding equal-length window. **`sd`** is the within-window standard deviation of each metric; **`coverage`** is observed rows ÷ expected rows for the window (0–1). Both added 2026-08-03: `sd` is what lets an insight express a deviation in units of the athlete's own spread — the property that makes the rule catalogue survive a biomech retune (docs/ANALYTICS.md §4.1) — and `coverage` is what distinguishes a full window from a sliver of one. Both nullable when the window is empty. |
 | GET `/api/metrics/history` | `?device=30&window=30m&buckets=24` | `{"device_id","window","from":ts,"bucket_s":int,"buckets":[{"t":ts,"m":[…5 avgs\|null],"composite":{"avg","min","max"},"quality":num}\|null,…]}` — stage-3 (S3-T01): time-bucketed series for the History tab. `window` MUST be one of `PAST_WINDOWS` (400 otherwise); `buckets` 1–96, default 24; bucket span = window/buckets, clamped to ≥1m when reading `metrics_1m` (bucket count shrinks accordingly — the response's `bucket_s` is authoritative). Buckets are aligned to `from`. Reads `metrics_1m` (or `metrics` for windows ≤5m, same source rule as `/windows`); a bucket with no rows is `null` (chart gap, never 0) |
 | GET `/api/forecasts/latest` | `?device=30` | `{"made_at":ts,"model_version","points":[{"horizon":"10m","target_time":ts,"pred","ci_low","ci_high"},…]}` (404-shaped empty if no run yet) |
 | GET `/api/insights` | `?device=30&limit=20` (device optional) | `[{"insight_id","created_at","device_id","severity","rule_id","message","context","action":str\|null,"rationale":str\|null},…]` newest first (`action`/`rationale`: migration 002, §1) |
@@ -247,5 +247,25 @@ def fit(history: pd.DataFrame, horizons: list[timedelta]) -> dict[timedelta, For
 # prediction interval) may still exist in `forecasts` from before the change.
 
 # backend/api/jobs/insights.py — rule list is the extension point
-RULES: list[Rule]  # Rule(rule_id, severity, predicate(WindowData, ForecastData) -> Evidence | None, message_fn)
+# backend/api/jobs/insights.py — RULES is the stable extension point
+@dataclass
+class Rule:
+    rule_id:   str
+    severity:  str                                    # default; evidence may raise it
+    evaluate:  Callable[[Ctx], Evidence | None]
+    message:   Callable[[Ctx, Evidence], str]         # standalone summary
+    action:    Callable[[Ctx, Evidence], str] | None  # short imperative (UI headline)
+    rationale: Callable[[Ctx, Evidence], str] | None  # the why, with the numbers
+
+RULES: list[Rule]
+
+# `Ctx` gives a rule the WHOLE picture, not one number (docs/ANALYTICS.md §4.2):
+#   ctx.metrics   -> {'m1'..'m5','composite': MetricView}  each across every window
+#   ctx.horizons  -> every projected point incl. the ci_low/ci_high scenario band
+#   ctx.shortest / ctx.mid / ctx.longest / ctx.windows / ctx.forecasts
+#   ctx.trustworthy -> coverage + quality-match gate for athlete-facing claims
+#
+# MetricView.z = (now - baseline) / max(sd, floor) is the field rules fire on. It
+# is EXACTLY invariant to a rescale of the metric's 0-100 bounds, so retuning the
+# biomech model changes what an insight REPORTS without changing whether it fires.
 ```

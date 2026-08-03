@@ -67,7 +67,7 @@ MIN_BUCKETS = 10
 # not be the thing that couples them. test_predict.py asserts every one of these
 # against the biomech module, so a retune there fails the suite rather than
 # silently desynchronising the forecast.
-M3_LO, M3_HI = 0.01, 60.0            # biomech M3_LO / M3_HI (dose-minutes)
+M3_LO, M3_HI = 0.5, 60.0             # biomech M3_LO / M3_HI (dose-minutes)
 DOSE_HALFLIFE_MIN = 45.0             # biomech DOSE_HALFLIFE_S / 60
 FLOOR_FACTOR = 0.50                  # biomech FLOOR_FACTOR
 
