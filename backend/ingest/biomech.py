@@ -255,14 +255,11 @@ FLOOR_FACTOR = 0.50
 # damage accumulating toward a threshold, so the risk term should follow
 # exposure. m1/m2 are unchanged; only the composite sees the smoothed value.
 DEMAND_TAU_S = 25.0
-<<<<<<< HEAD
-=======
 # Share of the remaining demand headroom that rotation can claim once the
 # accelerometer is clipped. 0.5 means a maximally rotating clipped impact reads
 # halfway between the clipping ceiling and full scale, so the top of the range
 # stays reserved rather than being handed out for any saturated event.
 ROT_ESCALATION = 0.5
->>>>>>> dc19c97 (biomech tweaks for gyro compensated accel)
 # Hill exponent on the load/capacity ratio. Raised 2 -> 4 on 2026-08-03: at n=2
 # the curve was far too eager at the bottom, and the wearer reported ordinary
 # activity reading as substantial injury risk -- a slow walk 20-30 and a light
@@ -1275,8 +1272,6 @@ def compute(
         demand_inst = float(m1 if m2 is None else m2)
     else:
         demand_inst = DEMAND_MAX_W * max(m1, m2) + DEMAND_MIN_W * min(m1, m2)
-<<<<<<< HEAD
-=======
     # Above the clipping point, ROTATION is the only channel left that still
     # discriminates. Measured 2026-08-03 at a fixed 35 g landing while sweeping
     # shank angular rate 100 -> 1900 deg/s: m1 stayed at 81.5 and m2 at 61.5 at
@@ -1302,7 +1297,6 @@ def compute(
         rot = log_score(w_int, W_LO, W_HI)
         demand_inst += (100.0 - demand_inst) * ROT_ESCALATION * (rot / 100.0)
 
->>>>>>> dc19c97 (biomech tweaks for gyro compensated accel)
     # Exposure, not peak (see DEMAND_TAU_S). m1/m2 stay peak-holds for display;
     # the risk index follows how long load is sustained, so one landing is a
     # brief bump and a minute of running is a sustained reading.
