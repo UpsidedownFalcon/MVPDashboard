@@ -371,8 +371,12 @@ def test_shank_loss_does_not_pin_m4():
 @pytest.mark.parametrize("limbs,expect_m4,expect_m5", [
     (("left_shin", "left_thigh", "right_shin", "right_thigh"), True, True),
     (("left_shin", "left_thigh"), True, False),          # one leg
-    (("left_shin", "right_shin"), False, True),          # both shanks
-    (("left_shin",), False, False),                      # single sensor
+    # m4 became available on ANY streaming limb when it moved from the
+    # shank/thigh transmission ratio to the tremor index (2026-08-03): the
+    # tremor band is measured per limb, so it no longer needs a matched pair.
+    # That is the fix -- the old form was null on 100% of ticks during jumps.
+    (("left_shin", "right_shin"), True, True),           # both shanks
+    (("left_shin",), True, False),                       # single sensor
 ])
 def test_degradation_ladder(limbs, expect_m4, expect_m5):
     """SPEC §8: unavailable primitives are None; the composite still works."""
@@ -1004,7 +1008,16 @@ def test_mid_run_sensor_fault_is_isolated_and_recovers():
     for k in range(fault_from, fault_to):
         m = out[0][k]
         if m.m4 is not None:
-            assert m.m4 == pytest.approx(before.m4), "m4 moved on a dead sensor"
+            # m4 no longer has to FREEZE on a dead sensor. The freeze existed
+            # because R = thigh/shank explodes when the shank dies, pinning m4
+            # at 100 -- a hardware fault rendering as the most alarming possible
+            # finding. The tremor index is a per-limb power ratio averaged over
+            # whatever is live, so it degrades gracefully instead. What still
+            # must hold is that it does not SPIKE.
+            assert m.m4 < before.m4 + 25.0, (
+                f"m4 spiked to {m.m4:.1f} from {before.m4:.1f} on a dead sensor "
+                "-- a hardware fault must not read as loss of control"
+            )
         if m.m5 is not None:
             assert m.m5 == pytest.approx(before.m5), "m5 moved on a dead sensor"
             assert m.m5 < 100.0

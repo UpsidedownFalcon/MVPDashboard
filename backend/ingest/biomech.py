@@ -160,6 +160,26 @@ A_DOSE_REF = 7.4             # m/s^2, cube-mean tick dynamic accel
 W_DOSE_REF = 540.0           # deg/s, cube-mean tick rotational rate
 
 # --- m4 control (SPEC Section 5.4) ---
+# m4 measures MOVEMENT CONTROL as the TREMOR INDEX -- the fraction of
+# acceleration power in the 4-12 Hz tremor band over the 0.5-20 Hz movement
+# band -- relative to this athlete's own fresh baseline at the same intensity.
+#
+# Replaced the shank->thigh shock-transmission ratio on 2026-08-03. A worn
+# protocol destroyed that version: it was NULL on 100% of ticks during jumps,
+# 70% during single-leg landings and 61% during the rest block, it read highest
+# during kicks (41) and limping (40) -- neither of which is fatigue -- and it
+# went 6 -> 4 DURING AND AFTER squats to failure, i.e. it fell as the athlete
+# fatigued. It also required both a shank and a thigh on the same leg to be
+# streaming, which is why it vanished exactly when movement got interesting.
+#
+# The tremor band is the directly-evidenced signal for what the metric claims
+# to mean: loss of control shows up as tremor, and the 4-12 Hz power fraction
+# is an established unitless index that scales across tasks and individuals.
+# It needs one limb, not a matched pair, so it is available whenever anything
+# is streaming.
+TREMOR_LO_HZ, TREMOR_HI_HZ = 4.0, 12.0
+MOVEBAND_HI_HZ = 20.0
+M4_FULL_SCALE_RATIO = 1.0    # a doubling of the tremor fraction reads 100
 M4_BASELINE_LOCK_S = 60.0    # movement time IN A BAND before its baseline locks
 M4_FULL_SCALE = 0.50         # |R/R_base - 1| of 0.5 reads 100
 # Shank-EMA |a_dyn| edges (m/s^2) splitting movement into intensity bands.
@@ -491,12 +511,14 @@ class _Sess:
         self.r_sum = [0.0] * M4_BANDS      # time-weighted sum of R, per band
         self.r_time = [0.0] * M4_BANDS     # movement seconds accrued, per band
         self.r_base: list[float | None] = [None] * M4_BANDS
+        self.r_mask: list[tuple | None] = [None] * M4_BANDS  # limbs at lock
         self.m4_hold: float | None = None
         self.m5_hold: float | None = None
         self.m4_stale = 0.0
         self.m5_stale = 0.0
         self.demand_ema: float | None = None   # exposure-smoothed demand
         self.load_ema = 0.0                    # recent load, sets dose decay
+        self.z4 = self.z12 = self.z20 = None   # m4 tremor-band filters
         self.prev: Metrics | None = None
         self.last_tick_t: float | None = None
         self.session_start_t: float | None = None
@@ -678,6 +700,7 @@ class _Sess:
         self.r_sum = [0.0] * M4_BANDS
         self.r_time = [0.0] * M4_BANDS
         self.r_base = [None] * M4_BANDS
+        self.r_mask = [None] * M4_BANDS
         self.m4_hold = self.m5_hold = None
         self.m4_stale = self.m5_stale = 0.0
         self.demand_ema = None
@@ -980,6 +1003,26 @@ def compute(
     base, sess.zb = lfilter(b_b, a_b, amag, axis=0, zi=sess.zb)
     adyn = np.abs(amag - base)
 
+    # --- TREMOR INDEX (m4, SPEC Section 5.4) --------------------------------
+    # Fraction of acceleration power in the 4-12 Hz tremor band over the whole
+    # 0.5-20 Hz movement band. Unitless and scale-free, so it survives any
+    # change to the m1/m2 normalisation and compares across activities.
+    #
+    # Two extra one-pole low-passes on `amag` are enough: a band-pass is the
+    # difference of two low-passes, and the 0.5 Hz edge is already available as
+    # `base` (tau 0.35 s ~ 0.45 Hz). Rate-adaptive alphas like everything else.
+    a4 = 1.0 - np.exp(-dt_arr[:, 0] * (2.0 * math.pi * TREMOR_LO_HZ)).mean()
+    a12 = 1.0 - np.exp(-dt_arr[:, 0] * (2.0 * math.pi * TREMOR_HI_HZ)).mean()
+    a20 = 1.0 - np.exp(-dt_arr[:, 0] * (2.0 * math.pi * MOVEBAND_HI_HZ)).mean()
+    for name, alpha in (("z4", a4), ("z12", a12), ("z20", a20)):
+        if getattr(sess, name) is None:
+            setattr(sess, name, _zi_for(alpha, amag[0]))
+    lp4, sess.z4 = lfilter([a4], [1.0, -(1.0 - a4)], amag, axis=0, zi=sess.z4)
+    lp12, sess.z12 = lfilter([a12], [1.0, -(1.0 - a12)], amag, axis=0, zi=sess.z12)
+    lp20, sess.z20 = lfilter([a20], [1.0, -(1.0 - a20)], amag, axis=0, zi=sess.z20)
+    p_tremor = ((lp12 - lp4) ** 2).mean(axis=0)      # 4-12 Hz power, per limb
+    p_move = ((lp20 - base) ** 2).mean(axis=0)       # 0.5-20 Hz power, per limb
+
     # --- 5. exact gravity-free jerk (SPEC Section 3.4):
     #     ||df/dt + w x f|| == ||da_world/dt||, from measured signals only.
     # w MUST be in radians/s here. Feeding deg/s makes m2 wrong by 57.3x and it
@@ -1169,44 +1212,53 @@ def compute(
         sess.move_t += step
     m3 = log_score(sess.dose, M3_LO, M3_HI)
 
-    # m4: shank->thigh transmission drift vs this athlete's own fresh baseline.
-    # Direction-agnostic (|.|): the literature does not fix the sign -- shock
-    # attenuation usually INCREASES under fatigue, and injured runners showed
-    # GREATER lower-body attenuation (SPEC Section 5.4).
+    # m4: TREMOR INDEX vs this athlete's own fresh baseline, at the same
+    # intensity (SPEC Section 5.4). Directional: more tremor than fresh is a
+    # loss of control; less is not a problem.
     m4 = None
     R_now = None
-    legs_ok = (len(shank_i) > 0 and len(thigh_i) > 0
-               and bool(active[shank_i].all()) and bool(active[thigh_i].all()))
-    sh_mean = float(sess.ema_adyn[shank_i].mean()) if len(shank_i) else 0.0
-    th_mean = float(sess.ema_adyn[thigh_i].mean()) if len(thigh_i) else 0.0
+    # `sh_mean` is only the intensity-band selector now. Kept on the shank EMA
+    # because that is the limb whose amplitude best separates walking from
+    # running; it no longer needs a matched thigh.
+    sh_mean = (float(sess.ema_adyn[shank_i].mean()) if len(shank_i)
+               else float(sess.ema_adyn[active].mean()) if active.any() else 0.0)
+    legs_ok = bool(active.any())
     band = _intensity_band(sh_mean)
-    if legs_ok and moving and sh_mean > MOVE_GATE_MS2:
-        R_now = th_mean / sh_mean
-        base = sess.r_base[band]
-        if base is None:
-            # Still learning THIS band. Accumulate a time-weighted MEAN rather
-            # than snapshotting one tick: the old code froze R_base to a single
-            # sample, so one unlucky tick set the reference for the session.
-            #
-            # Nothing is learned until the 20 s transmission EMA has settled.
-            # `ema_adyn` seeds from the first active tick, when the gravity
-            # baseline is still converging and `adyn` briefly carries most of
-            # 9.81 m/s^2 -- so sh_mean sweeps down through every band during
-            # warm-up. Without this gate a band could lock its baseline on that
-            # sweep and then read 100 for the rest of the session once R settled
-            # somewhere else. Measured: exactly that, on the activity ladder.
+    # Tremor fraction across the limbs that actually streamed this tick. One
+    # limb is enough -- unlike the old shank/thigh ratio, which needed a matched
+    # pair and was therefore null exactly when movement got interesting.
+    tremor = float("nan")
+    if active.any():
+        pm = float(p_move[active].mean())
+        if pm > 0.0:
+            tremor = float(p_tremor[active].mean()) / pm
+    if moving and math.isfinite(tremor) and a_int > MOVE_GATE_MS2:
+        R_now = tremor
+        base_t = sess.r_base[band]
+        if base_t is None:
+            # Learning this band's fresh reference. Time-weighted mean, and
+            # nothing is learned until the movement filters have settled.
             if sess.move_t >= M4_SETTLE_S:
-                sess.r_sum[band] += R_now * step
+                sess.r_sum[band] += tremor * step
                 sess.r_time[band] += step
-            if sess.r_time[band] >= M4_BASELINE_LOCK_S:
-                learned = sess.r_sum[band] / sess.r_time[band]
-                # `> 0.0`, not truthiness: a baseline of exactly 0.0 would make
-                # the old `if sess.R_base:` test fail forever while the
-                # `is None` guard also failed, leaving m4 permanently dead with
-                # no value and no flag.
-                sess.r_base[band] = learned if learned > 0.0 else None
+                if sess.r_time[band] >= M4_BASELINE_LOCK_S:
+                    learned = sess.r_sum[band] / sess.r_time[band]
+                    sess.r_base[band] = learned if learned > 0.0 else None
+                    sess.r_mask[band] = tuple(bool(v) for v in active)
+        elif sess.r_mask[band] != tuple(bool(v) for v in active):
+            # The limb set changed since this band's baseline was learned. The
+            # tremor fraction is averaged over whatever is live, so dropping a
+            # limb shifts it against a baseline measured on a different set --
+            # measured at +33 points when one sensor died. FREEZE instead: a
+            # hardware fault must never read as loss of control.
+            sess.m4_stale += step
+            if sess.m4_hold is not None and sess.m4_stale <= STALE_TIMEOUT_S:
+                m4 = sess.m4_hold
         else:
-            m4 = 100.0 * min(abs(R_now / base - 1.0) / M4_FULL_SCALE, 1.0)
+            # DIRECTIONAL, unlike the old |.| form: more tremor than when fresh
+            # is a loss of control; LESS is not a problem and must not score.
+            drift = (tremor / base_t) - 1.0
+            m4 = 100.0 * min(max(drift, 0.0) / M4_FULL_SCALE_RATIO, 1.0)
             sess.m4_hold = m4
             sess.m4_stale = 0.0
     if m4 is None:
@@ -1219,6 +1271,8 @@ def compute(
         elif sess.m4_hold is not None and sess.debounce("legs_bad", not legs_ok, step):
             # `partial` means SENSORS are missing. Simply standing still also
             # freezes m4, but that is normal and must not raise a fault flag.
+            # With the tremor index this now fires only when NOTHING is
+            # streaming, not when one leg of a pair drops out.
             flags.add("partial")
     if sess.r_base[band] is None:
         # R needs a shank AND a thigh. If either is unmapped OR mapped but never
