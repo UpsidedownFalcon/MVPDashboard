@@ -9,81 +9,46 @@
 
 ---
 
-## 1. The composite is exactly separable
+## 1. The composite is `acute` alone — the dose floor was removed
 
-With `floor = 0.50·m3` (SPEC §6.1), `composite = floor + (100 − floor)·acute/100`.
-Define **headroom** `H = 1 − composite/100`. Then, **exactly**:
-
-```
-H  =  (1 − 0.005·m3) · (1 − acute/100)
-```
-
-The composite is the *noisy-OR* of a slow accumulated-dose term and a fast activity
-term, and `log H` is additive in the two. Asserted as an invariant by
-`test_headroom_identity_is_exact`.
-
-This matters because the two halves have completely different forecastability.
-
-**The dose term is closed form.** `dose` obeys `d(dose)/dt = −λ·dose + S` with a 45-min
-half-life, and `m3 = log_score(dose, M3_LO, M3_HI)` is a *log* score of it, so **at rest m3
-falls linearly**:
+Until 2026-08-03 the composite was `floor + (100 − floor)·acute/100` with `floor = 0.50·m3`,
+which made it **exactly separable** into a slow dose term and a fast activity term:
 
 ```
-100·ln2 / ln(M3_HI/M3_LO) / 45 min  =  0.2027 points/min  =  9.119 points per half-life
+1 − composite/100  =  (1 − 0.005·m3) · (1 − acute/100)
 ```
 
-and under sustained intensity `I` it approaches `dose_eq = (I/100)³/(60λ) = 64.92·(I/100)³`
-exponentially. ⚠️ The literal rate above moves whenever the m3 range is re-anchored — it was
-0.1771 at `M3_LO = 0.01` and is 0.2027 at the current 0.03. Both are derived from the biomech constants in
-`test_m3_rest_decay_rate_is_derived_not_hardcoded` and
-`test_dose_equilibrium_matches_the_biomech_recurrence`, so a retune of `M3_HI` or the
-half-life fails the suite rather than silently changing every forecast.
+That identity is what the forecast was built on. **It no longer holds.** A 13-minute worn
+protocol showed the composite spanning only 15.5–18.5 across everything from standing still to
+squats to failure, because ~16 of those points *were* the floor and `acute` contributed 0.33.
+Dose now reduces **capacity** instead (biomech SPEC §6.1a), so:
 
-**The acute term is not forecastable** beyond persistence. It is driven by what the
-athlete chooses to do next.
+```
+composite = 200·r^3.5/(r^3.5 + 1),   r = demand / capacity
+capacity  = 100 − 55·(0.50·m3 + 0.30·m4 + 0.20·|m5|)/Σweights
+```
 
-## 2. Forecasts — `dose-scenario-1`
+Standing still gives demand 0 and therefore **risk 0**, whatever the accumulated load; fatigue
+shows up as a steeper response the moment the athlete moves again.
 
-Fitting one straight line to the *sum* of those two (the previous `linreg-stub-1`) fits a
-mixture of a knowable and an unknowable quantity. Worse, OLS over a session fits the
-**rising limb**, so the post-session decay tail cannot pull the slope down — a device that
-had stopped streaming was observed forecasting 35 → 46.7 → 64.3 with widening bands.
+## 2. Forecasts — `trend-ols-1`
 
-The model now decomposes, forecasts each part in its own terms, and recomposes via §1:
+The two-component dose-scenario model was **retired** with the floor. Under the new composite
+"if they stop now" is trivially 0, so the scenario band carries no information — publishing it
+would be false precision.
 
-| Output | Scenario | Basis |
-|---|---|---|
-| `ci_low` | *"if they stop now"* | acute → 0, dose decays. Composite settles onto the dose floor `0.50·m3`. Closed form. |
-| `pred` | *"if recent load continues"* | dose follows the source term `S` observed over the recent buckets; acute held at its recent mean. |
-| `ci_high` | *"if load returns to this session's hardest"* | acute at its session p90, dose at the session's steepest accumulation rate. |
+`fit()` is now a plain trend projection on the composite with a **correct OLS prediction
+interval**, `t₍.₉₇₅,n−2₎·σ̂·√(1 + 1/n + (x*−x̄)²/Sxx)`. The old `1.96·σ̂·√(1 + h/span)` had a
+leverage term linear in `h` where the truth is quadratic and no dependence on `n` at all, making
+it ~38% too narrow at `n = 10` before autocorrelation.
 
-`S` is **estimated from the observed dose trajectory** (`S = d(dose)/dt + λ·dose`), not
-assumed from an intensity, and clamped at 0. The `ci_high` branch is taken over the whole
-training window rather than the recent tail, so the band does not collapse to zero width
-whenever the athlete happens to be resting at prediction time — that would render as false
-precision, the exact failure this model exists to remove.
+Retained from the previous model: `target_time` is anchored on the **last observed bucket**, not
+`made_at`; and a device staler than `SESSION_GAP_S` is not forecast at all.
 
-**These are two counterfactuals, not a confidence interval.** They reuse the `ci_low`/
-`ci_high` columns because those are just numbers, but the frontend switches its label on
-`model_version` (`range`, not `CI`, plus an explicit note) so no 95%-probability claim is
-made about them. SPEC §2 forbids that, and `App.tsx` previously printed `CI 35.0–64.3`.
-
-Three further fixes in the same file:
-
-- **`target_time` is anchored on the last observed bucket**, not `made_at`. `fit()`
-  extrapolates from the end of the data and `metrics_1m` runs at least a minute behind
-  (`end_offset = 1 minute` plus refresh lag), so the old label overstated every horizon.
-- **A device staler than `SESSION_GAP_S` is not forecast at all.** `MIN_BUCKETS` is a raw
-  count over the whole training window and enforces neither recency nor contiguity.
-  `SESSION_GAP_S` is the right bound because past it biomech resets `dose` to 0 on
-  reconnect (SPEC §7.4), so a projected dose trajectory describes a state that will never
-  occur.
-- **The degenerate branch** (no `m3` in the history) keeps a linear fit but with a
-  *correct* OLS prediction interval — `t₍.₉₇₅,n−2₎·σ̂·√(1 + 1/n + (x*−x̄)²/Sxx)`. The old
-  form `1.96·σ̂·√(1 + h/span)` had a leverage term linear in `h` where the truth is
-  quadratic and no dependence on `n` at all, making it ~38% too narrow at `n = 10` before
-  autocorrelation. An absent `m3` is never read as `m3 = 0`, which would silently assert
-  the athlete has no accumulated load.
+⚠️ **Open — the natural successor.** Project **capacity**, which is knowable (dose decays at a
+known, now intensity-dependent rate), against **demand** persisted from recent behaviour, which
+is not. That is the honest decomposition under the new composite. It is recorded rather than
+guessed at.
 
 ## 3. Windows
 
