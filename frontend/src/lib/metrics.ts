@@ -43,7 +43,8 @@ export const METRICS: MetricMeta[] = [
     id: 'm4',
     label: 'Movement Control',
     short: 'CTRL',
-    tooltip: 'Shock absorption vs. this athlete when fresh',
+    // Tremor index since 2026-08-03 (SPEC §5.4) — no longer shock transmission.
+    tooltip: 'Movement tremor vs. this athlete when fresh — rises as control degrades',
     cssVar: '--series-m4',
     color: '#C98500',
   },
@@ -51,11 +52,41 @@ export const METRICS: MetricMeta[] = [
     id: 'm5',
     label: 'L/R Balance',
     short: 'BAL',
-    tooltip: 'Left/right load imbalance',
+    // SIGNED −100..+100 (SPEC §5.5): magnitude is the value, sign is the side.
+    // Deliberately neutral wording — never "weaker", never cross-session.
+    tooltip: 'How evenly load is shared left/right in this session — magnitude, with the side carrying more',
     cssVar: '--series-m5',
     color: '#D55181',
   },
 ]
+
+/** `m5` is the one signed metric (−100 left-dominant … +100 right-dominant).
+ *  Everything that ranks, colours or sizes a metric must use the magnitude. */
+export function isSignedMetric(id: MetricId): boolean {
+  return id === 'm5'
+}
+
+/** Severity/display magnitude for any metric value. */
+export function metricMagnitude(id: MetricId, v: number | null): number | null {
+  if (v == null) return null
+  return isSignedMetric(id) ? Math.abs(v) : v
+}
+
+/** Side label for a signed m5 reading. Neutral phrasing only (SPEC §5.5):
+ *  a within-session readout of which side is carrying more load right now —
+ *  never a statement about a leg being weak, and never compared across
+ *  sessions (limb dominance does not reproduce, κ = −0.14…0.60). */
+export function m5Side(v: number | null): 'left' | 'right' | 'even' | null {
+  if (v == null) return null
+  if (Math.abs(v) < 1) return 'even'
+  return v > 0 ? 'left' : 'right'
+}
+
+export function m5SideLabel(v: number | null): string | null {
+  const side = m5Side(v)
+  if (side == null) return null
+  return side === 'even' ? 'even' : `more load ${side}`
+}
 
 export const COMPOSITE: MetricMeta = {
   id: 'composite',
@@ -66,14 +97,38 @@ export const COMPOSITE: MetricMeta = {
   color: '#21F3FC',
 }
 
-/** Display bands (SPEC §9 — display only). The band word always accompanies
- *  the color so meaning never rides on color alone. */
+/** Display bands (display only — SPEC §9; UIUX §9 documents these cutoffs).
+ *  The band word always accompanies the color so meaning never rides on color
+ *  alone.
+ *
+ *  ⚠️ Re-cut 2026-08-03 for the post-dose-floor composite (SPEC §6.1a). The old
+ *  30/60/80 cutoffs were chosen when accumulated dose entered as an additive
+ *  floor and everything read 15–18. On the current scale a FRESH athlete
+ *  measures: squats 1.3, walk 2.6, jog 6.0, kick 8.4, single-leg landing 17,
+ *  jump 21 — and the SAME jump when fatigued reads ~33. Against 30/60/80 that
+ *  entire protocol, fatigue included, collapses into "low": the band would
+ *  carry no information at all.
+ *
+ *  The cutoffs below are anchored on those measured landmarks so the bands say
+ *  something a trainer can act on:
+ *    low       <10   ordinary activity — walking, jogging, light work
+ *    moderate  10–25 real athletic loading — landings, jumps, hard efforts
+ *    elevated  25–45 the same work costing more than it should (the measured
+ *                    fresh-vs-fatigued jump, 21 → 33, crosses HERE — which is
+ *                    the whole point of the capacity model)
+ *    high      ≥45   beyond anything the worn protocol produced fresh;
+ *                    a depleted athlete still under load
+ *
+ *  These are DISPLAY bands only. The backend's INSIGHT_WARN/ALERT thresholds
+ *  (85/92) are a separate, backend-owned calibration. */
 export type RiskBand = 'low' | 'moderate' | 'elevated' | 'high'
 
+export const RISK_BAND_CUTOFFS = { moderate: 10, elevated: 25, high: 45 } as const
+
 export function riskBand(value: number): RiskBand {
-  if (value < 30) return 'low'
-  if (value < 60) return 'moderate'
-  if (value < 80) return 'elevated'
+  if (value < RISK_BAND_CUTOFFS.moderate) return 'low'
+  if (value < RISK_BAND_CUTOFFS.elevated) return 'moderate'
+  if (value < RISK_BAND_CUTOFFS.high) return 'elevated'
   return 'high'
 }
 
@@ -102,7 +157,9 @@ export const FLAG_META: Record<string, { weight: FlagWeight; label: string; hint
   saturated: {
     weight: 'alert',
     label: 'saturated',
-    hint: 'Sensor range clipped; Impact and Loading Rate are suppressed',
+    // Since 2026-08-03 m1/m2 are still reported under saturation, as LOWER
+    // BOUNDS (BACKEND_SCHEMA §2, SPEC §3.7) — the UI renders them "≥ x".
+    hint: 'Sensor range clipped — Impact and Loading Rate are minimums, not exact values',
   },
   uncalibrated: {
     weight: 'warning',
@@ -127,7 +184,8 @@ export const FLAG_META: Record<string, { weight: FlagWeight; label: string; hint
   warming_up: {
     weight: 'muted',
     label: 'warming up',
-    hint: 'Movement Control / L-R Balance need ~1 min of movement — a value is coming',
+    // m4 also re-warms whenever a new movement-intensity band appears (SPEC §5.4)
+    hint: 'Movement Control / L-R Balance are learning this athlete’s baseline — a value is coming',
   },
   unvalidated: {
     weight: 'muted',

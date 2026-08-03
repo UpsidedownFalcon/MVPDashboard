@@ -115,19 +115,25 @@ critical with "no data". Active flag chips right-aligned.
 - Top row: the humanoid figure (compact variant, §10) **driven by real data**:
   sensor dots lit by per-sensor liveness (from `/api/devices` sensors + tick flow),
   ping animation running only while the device streams; when `m5` is non-null the
-  higher-loaded leg's glow is slightly stronger (no numeric claim, no side label —
-  SPEC §5.5 forbids directional claims; this is ambient emphasis only, capped subtle).
+  leg carrying more load glows slightly stronger — ambient emphasis matching the
+  side label on the `m5` row (updated 2026-08-03: BACKEND_SCHEMA §2 sanctions a
+  **neutral** side readout; what SPEC §5.5 forbids is the *claim* — "weaker", a
+  finding, or any cross-session comparison — not the factual side).
   Beside it, **current Injury Risk as the view's single hero figure**: ≥48px
   semibold sans, risk-band tint, band word, trend arrow vs 5 min ago.
   Below the pair: the SPEC §2 one-liner: "A monitoring aid, not a prediction."
 - Large composite live chart: uPlot, last 60 s, 2px `--composite` line, 10% area
   wash, hairline grid, y fixed 0–100, risk-band thresholds as faint hairlines.
 - Five compact stacked primitive charts (~64px tall each): label + current value
-  (ink, mark-colored dot key), 2px line in the metric's series color, y 0–100.
-  `null` renders as a gap — never 0; while `warming_up`, the panel is greyed with
-  a muted "warming up" chip; `degraded_sensors`/`partial` grey it with the §6
-  warning/alert chip instead ("no data from R-shin"). The two states must never
-  look alike (§6).
+  (ink, mark-colored dot key), 2px line in the metric's series color, y 0–100 —
+  **except `m5`, which is signed and uses −100..+100 with a hairline at 0**, its
+  row showing `|m5|` plus the neutral side label ("more load left").
+  When the tick carries `saturated`, `m1`/`m2` render as **"≥ x"** — they are
+  lower bounds, not exact values (BACKEND_SCHEMA §2).
+  `null` renders as a gap — never 0, and a measured 0 is a real value, not a gap;
+  while `warming_up`, the panel is greyed with a muted "warming up" chip;
+  `degraded_sensors`/`partial` grey it with the §6 warning/alert chip instead
+  ("no data from R-shin"). The two states must never look alike (§6).
 
 **Right column — three pill tabs** (old-mockup pattern: pill, inactive = muted text
 + transparent border, active = accent text + accent hairline border + 4% wash;
@@ -187,7 +193,20 @@ stays, frozen, with the overlay (deep links must not go blank).
 | connection (WS) | dot: `--status-good` connected / `--status-warning` reconnecting |
 | quality | % + 5-bar meter: fill `--status-good` ≥90, `--status-warning` 60–90, `--status-critical` <60; track = same hue at 20% opacity |
 | sensor liveness | micro-dot: fresh `--status-good`; stale (no packets ≤10 s) `--status-warning`; never-streamed/dead `--status-critical`; tooltip "limb · rate · last seen" |
-| risk bands (0–30/30–60/60–80/80–100) | low `--status-good` · moderate `--ink-2` (neutral) · elevated `--status-warning` · high `--status-critical`; band word always accompanies the color |
+| **risk bands (0–10 / 10–25 / 25–45 / 45–100)** | low `--status-good` · moderate `--ink-2` (neutral) · elevated `--status-warning` · high `--status-critical`; band word always accompanies the color |
+
+**⚠️ Band cutoffs re-cut 2026-08-03** (`RISK_BAND_CUTOFFS` in `lib/metrics.ts` is the
+implementation). The original 30/60/80 split was chosen when accumulated dose entered
+the composite as an additive floor. After the dose floor was removed (biomech SPEC
+§6.1a) a **fresh** athlete measures: squats 1.3, walk 2.6, jog 6.0, kick 8.4,
+single-leg landing 17, jump 21 — and the *same* jump when fatigued reads ~33. Against
+30/60/80 an entire worn protocol including fatigue collapses into "low", so the band
+would carry no information. The new cutoffs are anchored on those measured landmarks:
+low = ordinary activity; moderate = real athletic loading; **elevated = the same work
+costing more than it should — the measured fresh→fatigued jump crosses here**, which is
+the capacity model's whole point; high = beyond anything the protocol produced fresh.
+These are **display bands only** — the backend's `INSIGHT_WARN/ALERT_THRESHOLD` (85/92)
+is a separate, backend-owned calibration and is *not* implied by them.
 
 Chips always pair icon + label — color never carries meaning alone.
 
@@ -198,7 +217,7 @@ the calibration story's only surface, SPEC §10):
 |---|---|---|
 | `cal_failed` | sensor motionless but disagrees with gravity — hardware fault | alert |
 | `degraded_sensors` | fewer sensors than mapped / one never streamed: the metric is **never** coming | alert |
-| `saturated` | clipped window; `m1`/`m2` suppressed | alert |
+| `saturated` | clipped window; `m1`/`m2` are **lower bounds** — rendered "≥ x", never as exact (BACKEND_SCHEMA §2) | alert |
 | `uncalibrated` | running on defaults; `m4`/`m5` carry gain bias | warning |
 | `partial` | a required sensor went inactive mid-session | warning |
 | `no_shank` | impact falls back to all limbs | warning |

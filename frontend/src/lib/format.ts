@@ -34,6 +34,28 @@ export function metricValue(v: number | null | undefined, digits = 0): string {
   return v == null ? '—' : v.toFixed(digits)
 }
 
+/** Impact / Loading Rate under the `saturated` flag are LOWER BOUNDS, not
+ *  exact values — the ±16 g part clips inside real athletic movement and
+ *  35/42/60/100 g landings all read the same m1 (BACKEND_SCHEMA §2, SPEC §3.7).
+ *  They stay monotonic, so ordering is safe; only the magnitude is a floor. */
+export const SATURATION_AFFECTED = new Set(['m1', 'm2'])
+
+export function isLowerBound(metricId: string, flags: string[] | undefined): boolean {
+  return !!flags?.includes('saturated') && SATURATION_AFFECTED.has(metricId)
+}
+
+/** Formats a metric value, prefixing "≥" when it is a saturation lower bound. */
+export function boundedMetricValue(
+  metricId: string,
+  v: number | null | undefined,
+  flags: string[] | undefined,
+  digits = 0,
+): string {
+  const text = metricValue(v, digits)
+  if (v == null || !isLowerBound(metricId, flags)) return text
+  return `≥ ${text}`
+}
+
 export function pct(v: number | null | undefined): string {
   return v == null ? '—' : `${Math.round(v * 100)}%`
 }

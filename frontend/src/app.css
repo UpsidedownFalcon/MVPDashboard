@@ -872,6 +872,26 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* signed m5: the side carrying more load, stated neutrally beside the
+   magnitude (SPEC §5.5 — a within-session readout, never a verdict) */
+.live-row-side,
+.history-cell-side {
+  margin-left: auto;
+  font-size: 11.5px;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
+.live-row-side + .live-row-val,
+.history-cell-side + .history-cell-val {
+  margin-left: 8px;
+}
+
+.table-side {
+  color: var(--ink-3);
+  font-size: 11px;
+}
+
 .live-row-head .chip {
   margin-left: auto;
 }

@@ -78,10 +78,11 @@ function Hero({ deviceIds, names }: { deviceIds: string[]; names: Record<string,
         </h1>
         <p>
           Sensors on each thigh and shin stream motion hundreds of times a second.
-          We distill it into six 0–100 scores — how hard impacts land, how abruptly
-          load is applied, how much has accumulated, how well shock is absorbed and
+          We distill it into six scores — how hard impacts land, how abruptly load
+          is applied, how much has accumulated, how steady the movement stays and
           how evenly left and right share the work — combined into one{' '}
-          <b>Injury Risk</b> trend. A monitoring aid that flags who is worth a look,
+          <b>Injury Risk</b> trend that rises when the same work starts costing
+          more than it should. A monitoring aid that flags who is worth a look,
           now and in the coming session — not a prediction.
         </p>
         <ul className="hero-legend" aria-label="Metric legend">

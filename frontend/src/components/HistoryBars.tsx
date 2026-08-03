@@ -10,7 +10,15 @@ import { useMemo, useState } from 'react'
 import { fetchHistory, type History, type WindowEntry } from '../lib/api'
 import { HISTORY_MAX_BUCKETS, POLL_HISTORY_MS } from '../lib/config'
 import { evenBucketCount, metricValue, pct, shortClock, windowLabel } from '../lib/format'
-import { COMPOSITE, METRICS, type MetricMeta } from '../lib/metrics'
+import {
+  COMPOSITE,
+  isSignedMetric,
+  m5Side,
+  m5SideLabel,
+  METRICS,
+  metricMagnitude,
+  type MetricMeta,
+} from '../lib/metrics'
 import EChart from './EChart'
 
 /** Below this share of the window actually containing data, the averages are
@@ -25,6 +33,7 @@ function chartOption(
   meta: MetricMeta,
   metricIdx: number | 'composite',
 ): EChartsOption {
+  const signed = meta.id !== 'composite' && isSignedMetric(meta.id)
   const labels = history.buckets.map((b) => (b ? shortClock(b.t) : '·'))
   const values = history.buckets.map((b) => {
     if (!b) return null
@@ -49,11 +58,13 @@ function chartOption(
       axisTick: { show: false },
       axisLabel: { color: AXIS_INK, fontSize: 10, interval: 'auto' },
     },
+    // m5 is signed (−100 = right-dominant … +100 = left): a 0..100 axis would
+    // clip half its range (BACKEND_SCHEMA §2).
     yAxis: {
       type: 'value',
-      min: 0,
+      min: signed ? -100 : 0,
       max: 100,
-      interval: 25,
+      interval: signed ? 50 : 25,
       axisLabel: { color: AXIS_INK, fontSize: 10 },
       splitLine: { lineStyle: { color: GRIDLINE } },
     },
@@ -73,7 +84,12 @@ function chartOption(
           metricIdx === 'composite' && b.composite.min != null
             ? `<br/>range ${metricValue(b.composite.min)}–${metricValue(b.composite.max)}`
             : ''
-        return `${shortClock(b.t)}<br/><b>${metricValue(v, 1)}</b>${extra}<br/>quality ${
+        const shown = signed
+          ? `${metricValue(Math.abs(v ?? 0), 1)}${
+              m5SideLabel(v ?? null) ? ` · ${m5SideLabel(v ?? null)}` : ''
+            }`
+          : metricValue(v, 1)
+        return `${shortClock(b.t)}<br/><b>${shown}</b>${extra}<br/>quality ${
           b.quality != null ? Math.round(b.quality * 100) + '%' : '—'
         }`
       },
@@ -195,12 +211,17 @@ export default function HistoryBars({
                 ? latestBucket.composite.avg
                 : latestBucket.m[idx as number]
               : null
+            const signed = m.id !== 'composite' && isSignedMetric(m.id)
+            const side = signed ? m5SideLabel(latestVal) : null
             return (
               <div key={m.id} className="history-cell">
                 <div className="history-cell-head" title={m.tooltip}>
                   <span className="swatch" style={{ background: m.color }} aria-hidden />
                   {m.label}
-                  <span className="history-cell-val">{metricValue(latestVal)}</span>
+                  {side && <span className="history-cell-side">{side}</span>}
+                  <span className="history-cell-val">
+                    {metricValue(signed ? metricMagnitude(m.id, latestVal) : latestVal)}
+                  </span>
                 </div>
                 <EChart
                   option={chartOption(history, m, idx)}
@@ -233,9 +254,18 @@ export default function HistoryBars({
                     <tr key={i}>
                       <td>{shortClock(b.t)}</td>
                       <td>{metricValue(b.composite.avg, 1)}</td>
-                      {b.m.map((v, j) => (
-                        <td key={j}>{metricValue(v, 1)}</td>
-                      ))}
+                      {b.m.map((v, j) => {
+                        const meta = METRICS[j]
+                        const signed = isSignedMetric(meta.id)
+                        return (
+                          <td key={j}>
+                            {metricValue(signed ? metricMagnitude(meta.id, v) : v, 1)}
+                            {signed && v != null && (
+                              <span className="table-side"> {m5Side(v) === 'even' ? '' : m5Side(v)}</span>
+                            )}
+                          </td>
+                        )
+                      })}
                       <td>{b.quality != null ? `${Math.round(b.quality * 100)}%` : '—'}</td>
                     </tr>
                   ),

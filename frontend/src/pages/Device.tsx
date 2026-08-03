@@ -24,8 +24,16 @@ import Tabs from '../components/Tabs'
 import { fetchWindows } from '../lib/api'
 import { POLL_HISTORY_MS } from '../lib/config'
 import { useMergedDevices } from '../lib/devices'
-import { clockTime, metricValue } from '../lib/format'
-import { COMPOSITE, FLAG_META, METRICS } from '../lib/metrics'
+import { boundedMetricValue, clockTime, metricValue } from '../lib/format'
+import {
+  COMPOSITE,
+  FLAG_META,
+  isSignedMetric,
+  m5Side,
+  m5SideLabel,
+  METRICS,
+  metricMagnitude,
+} from '../lib/metrics'
 import { useLive } from '../lib/ws'
 
 /** Why is this primitive null right now? Ordered by severity (UIUX §6:
@@ -85,6 +93,11 @@ export default function Device() {
   }
 
   const getData = () => getBuffer(id)
+  // signed m5 -> which side is carrying more load right now ('even' and null
+  // both mean "no emphasis")
+  const side = m5Side(live?.m[4] ?? null)
+  const loadSide: 'left' | 'right' | null =
+    side === 'left' || side === 'right' ? side : null
 
   return (
     <div className="device-page">
@@ -115,6 +128,9 @@ export default function Device() {
               variant="compact"
               limbs={limbs}
               active={device.online}
+              // ambient emphasis on the side currently carrying more load;
+              // the m5 row states it in words (SPEC §5.5: neutral, in-session)
+              emphasis={loadSide}
             />
             <div className="device-live-risk">
               <RiskStat
@@ -148,17 +164,28 @@ export default function Device() {
 
           <div className="live-stack">
             {METRICS.map((m, i) => {
-              const value = live?.m[i] ?? null
-              const reason = value == null ? nullReason(live?.flags ?? []) : null
+              const raw = live?.m[i] ?? null
+              const signed = isSignedMetric(m.id)
+              // m5 is signed: show the MAGNITUDE as the value and the sign as a
+              // neutral side label (SPEC §5.5 — never "weaker", never
+              // cross-session). Its chart keeps the full −100..100 domain.
+              const value = signed ? metricMagnitude(m.id, raw) : raw
+              const side = signed ? m5SideLabel(raw) : null
+              const reason = raw == null ? nullReason(live?.flags ?? []) : null
               return (
-                <div key={m.id} className={`live-row ${value == null ? 'is-null' : ''}`}>
+                <div key={m.id} className={`live-row ${raw == null ? 'is-null' : ''}`}>
                   <div className="live-row-head" title={m.tooltip}>
                     <span className="swatch" style={{ background: m.color }} aria-hidden />
                     <span className="live-row-label">{m.label}</span>
                     {reason ? (
                       <span className={`chip flag flag-${reason.weight}`}>{reason.label}</span>
                     ) : (
-                      <span className="live-row-val">{metricValue(value)}</span>
+                      <>
+                        {side && <span className="live-row-side">{side}</span>}
+                        <span className="live-row-val">
+                          {boundedMetricValue(m.id, value, live?.flags)}
+                        </span>
+                      </>
                     )}
                   </div>
                   <LiveChart
@@ -168,6 +195,8 @@ export default function Device() {
                     height={56}
                     windowS={60}
                     frozen={!device.online}
+                    yRange={signed ? [-100, 100] : [0, 100]}
+                    zeroLine={signed}
                   />
                 </div>
               )

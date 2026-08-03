@@ -5,6 +5,7 @@
 import { useEffect, useRef } from 'react'
 import uPlot from 'uplot'
 import { RENDER_DELAY_S } from '../lib/config'
+import { RISK_BAND_CUTOFFS } from '../lib/metrics'
 import type { LiveData } from '../lib/ws'
 
 interface Props {
@@ -21,6 +22,11 @@ interface Props {
   frozen?: boolean
   /** faint hairlines at the risk-band thresholds (composite charts). */
   bandLines?: boolean
+  /** y domain. Defaults to 0–100; m5 is SIGNED −100..+100 and would have half
+   *  its range clipped by the default (BACKEND_SCHEMA §2). */
+  yRange?: [number, number]
+  /** draw a hairline at y=0 (signed series: the symmetry line). */
+  zeroLine?: boolean
 }
 
 const GRID = { stroke: 'rgba(255,255,255,0.06)', width: 1 }
@@ -36,6 +42,8 @@ export default function LiveChart({
   axes = false,
   frozen = false,
   bandLines = false,
+  yRange = [0, 100],
+  zeroLine = false,
 }: Props) {
   const hostRef = useRef<HTMLDivElement>(null)
   const plotRef = useRef<uPlot | null>(null)
@@ -52,7 +60,7 @@ export default function LiveChart({
       pxAlign: false,
       scales: {
         x: { time: false },
-        y: { range: [0, 100] },
+        y: { range: yRange },
       },
       series: [
         {},
@@ -81,31 +89,42 @@ export default function LiveChart({
           size: 32,
           grid: GRID,
           ticks: TICK,
-          splits: () => [0, 25, 50, 75, 100],
+          splits: () => {
+            const [lo, hi] = yRange
+            const step = (hi - lo) / 4
+            return [0, 1, 2, 3, 4].map((i) => lo + i * step)
+          },
         },
       ],
       legend: { show: false },
       cursor: { show: false },
-      hooks: bandLines
-        ? {
-            drawAxes: [
-              (u) => {
-                const ctx = u.ctx
-                ctx.save()
-                for (const yVal of [30, 60, 80]) {
-                  const y = u.valToPos(yVal, 'y', true)
-                  ctx.strokeStyle = 'rgba(255,255,255,0.09)'
-                  ctx.lineWidth = 1
-                  ctx.beginPath()
-                  ctx.moveTo(u.bbox.left, y)
-                  ctx.lineTo(u.bbox.left + u.bbox.width, y)
-                  ctx.stroke()
-                }
-                ctx.restore()
-              },
-            ],
-          }
-        : undefined,
+      hooks:
+        bandLines || zeroLine
+          ? {
+              drawAxes: [
+                (u) => {
+                  // band thresholds (composite) / symmetry line (signed m5)
+                  const marks = bandLines
+                    ? [RISK_BAND_CUTOFFS.moderate, RISK_BAND_CUTOFFS.elevated, RISK_BAND_CUTOFFS.high]
+                    : [0]
+                  const ctx = u.ctx
+                  ctx.save()
+                  for (const yVal of marks) {
+                    const y = u.valToPos(yVal, 'y', true)
+                    ctx.strokeStyle = zeroLine
+                      ? 'rgba(255,255,255,0.16)'
+                      : 'rgba(255,255,255,0.09)'
+                    ctx.lineWidth = 1
+                    ctx.beginPath()
+                    ctx.moveTo(u.bbox.left, y)
+                    ctx.lineTo(u.bbox.left + u.bbox.width, y)
+                    ctx.stroke()
+                  }
+                  ctx.restore()
+                },
+              ],
+            }
+          : undefined,
     }
 
     const empty: uPlot.AlignedData = [[], []]
@@ -148,7 +167,10 @@ export default function LiveChart({
       plot.destroy()
       plotRef.current = null
     }
-  }, [getData, seriesIdx, color, height, windowS, axes, bandLines])
+    // yRange is spread into scalars: an inline [lo, hi] literal is a new array
+    // identity every render and would tear down/rebuild the plot each time.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [getData, seriesIdx, color, height, windowS, axes, bandLines, yRange[0], yRange[1], zeroLine])
 
   return <div ref={hostRef} className="livechart" style={{ height }} />
 }
