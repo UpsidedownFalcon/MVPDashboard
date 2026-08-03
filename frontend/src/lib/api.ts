@@ -25,8 +25,14 @@ export interface WindowEntry {
   window: string
   from: string
   m: (number | null)[]
-  composite: { avg: number | null; min: number | null; max: number | null }
+  /** within-window std dev of m1..m5 (additive, 2026-08-03). */
+  sd: (number | null)[]
+  composite: { avg: number | null; min: number | null; max: number | null; sd: number | null }
   quality: number | null
+  /** observed rows ÷ expected rows for the window, 0..1. A "past 1h" average
+   *  built from 4 minutes of streaming is not comparable to a full hour —
+   *  surface this, never silently. */
+  coverage: number | null
   trend: 'up' | 'down' | 'flat'
 }
 

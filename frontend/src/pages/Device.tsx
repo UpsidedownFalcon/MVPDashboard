@@ -190,8 +190,8 @@ export default function Device() {
                 id: 'history',
                 label: 'History',
                 content:
-                  windowLabels.length > 0 ? (
-                    <HistoryBars device={id} windows={windowLabels} />
+                  windowsQuery.data && windowsQuery.data.windows.length > 0 ? (
+                    <HistoryBars device={id} windows={windowsQuery.data.windows} />
                   ) : (
                     <p className="notice">Loading…</p>
                   ),

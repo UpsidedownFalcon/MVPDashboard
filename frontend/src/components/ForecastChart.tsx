@@ -9,10 +9,11 @@ import type { EChartsOption } from 'echarts'
 import { Table2 } from 'lucide-react'
 import { useState } from 'react'
 import { fetchForecasts, fetchHistory } from '../lib/api'
-import { HISTORY_BUCKETS, POLL_FORECASTS_MS } from '../lib/config'
+import { HISTORY_MAX_BUCKETS, POLL_FORECASTS_MS } from '../lib/config'
 import {
   clockTime,
   durationToSeconds,
+  evenBucketCount,
   forecastBandLabel,
   forecastBandNote,
   horizonLabel,
@@ -44,7 +45,8 @@ export default function ForecastChart({
   // recent actuals for context: the shortest configured window
   const actuals = useQuery({
     queryKey: ['history', device, windows[0]],
-    queryFn: () => fetchHistory(device, windows[0], HISTORY_BUCKETS),
+    queryFn: () =>
+      fetchHistory(device, windows[0], evenBucketCount(windows[0], HISTORY_MAX_BUCKETS)),
     refetchInterval: POLL_FORECASTS_MS,
     enabled: windows.length > 0,
   })

@@ -75,3 +75,21 @@ export function durationToSeconds(label: string): number {
   const n = Number(m[1])
   return n * { s: 1, m: 60, h: 3600, d: 86400, w: 604800 }[m[2] as 's' | 'm' | 'h' | 'd' | 'w']
 }
+
+/** Bucket count for /api/metrics/history that divides the window EVENLY.
+ *  A count that doesn't divide the window (e.g. 24 into 30m = 75 s spans over
+ *  60 s source rows) makes one bucket in five absorb two rows — a repeating
+ *  density artifact — and fractional spans make the server's integer
+ *  `bucket_s` drift against real bucket starts. Windows >5m aggregate
+ *  1-minute rows, so their span must additionally be a whole number of
+ *  minutes. */
+export function evenBucketCount(windowLabel: string, maxBuckets = 30): number {
+  const s = durationToSeconds(windowLabel)
+  if (s <= 0) return 24
+  const unit = s > 300 ? 60 : 1
+  const units = Math.floor(s / unit)
+  for (let n = Math.min(maxBuckets, units); n >= 1; n--) {
+    if (units % n === 0) return n
+  }
+  return 1
+}

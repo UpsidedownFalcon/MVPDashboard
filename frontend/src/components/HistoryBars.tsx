@@ -5,13 +5,17 @@
 
 import { useQuery } from '@tanstack/react-query'
 import type { EChartsOption } from 'echarts'
-import { Table2 } from 'lucide-react'
+import { AlertTriangle, Table2 } from 'lucide-react'
 import { useMemo, useState } from 'react'
-import { fetchHistory, type History } from '../lib/api'
-import { HISTORY_BUCKETS, POLL_HISTORY_MS } from '../lib/config'
-import { metricValue, shortClock, windowLabel } from '../lib/format'
+import { fetchHistory, type History, type WindowEntry } from '../lib/api'
+import { HISTORY_MAX_BUCKETS, POLL_HISTORY_MS } from '../lib/config'
+import { evenBucketCount, metricValue, pct, shortClock, windowLabel } from '../lib/format'
 import { COMPOSITE, METRICS, type MetricMeta } from '../lib/metrics'
 import EChart from './EChart'
+
+/** Below this share of the window actually containing data, the averages are
+ *  not comparable to a fully covered window — say so, never silently. */
+const LOW_COVERAGE = 0.5
 
 const AXIS_INK = '#898781'
 const GRIDLINE = 'rgba(255,255,255,0.06)'
@@ -81,6 +85,10 @@ function chartOption(
         itemStyle: { color: meta.color, borderRadius: [4, 4, 0, 0] },
         barMaxWidth: 24,
         barCategoryGap: '25%',
+        // a measured ZERO draws a hairline bar; only null (no data) is a gap.
+        // Matters since the m3 re-anchor: short/light sessions legitimately
+        // read 0 and must not look like missing data (SPEC §4.1).
+        barMinHeight: 2,
       },
       ...(whisker.length
         ? [
@@ -118,14 +126,15 @@ export default function HistoryBars({
   windows,
 }: {
   device: string
-  windows: string[]
+  windows: WindowEntry[]
 }) {
-  const [window, setWindow] = useState(windows[0])
+  const labels = windows.map((w) => w.window)
+  const [window, setWindow] = useState(labels[0])
   const [showTable, setShowTable] = useState(false)
 
   const query = useQuery({
     queryKey: ['history', device, window],
-    queryFn: () => fetchHistory(device, window, HISTORY_BUCKETS),
+    queryFn: () => fetchHistory(device, window, evenBucketCount(window, HISTORY_MAX_BUCKETS)),
     refetchInterval: POLL_HISTORY_MS,
     enabled: !!window,
   })
@@ -133,12 +142,14 @@ export default function HistoryBars({
   const history = query.data
   const allMeta = useMemo(() => [COMPOSITE, ...METRICS], [])
   const nonEmpty = history?.buckets.filter(Boolean).length ?? 0
+  const entry = windows.find((w) => w.window === window)
+  const coverage = entry?.coverage ?? null
 
   return (
     <div className="history">
       <div className="history-controls">
         <div className="segmented" role="group" aria-label="History period">
-          {windows.map((w) => (
+          {labels.map((w) => (
             <button
               key={w}
               className={`segment ${w === window ? 'is-active' : ''}`}
@@ -149,6 +160,14 @@ export default function HistoryBars({
             </button>
           ))}
         </div>
+        {coverage != null && coverage < LOW_COVERAGE && (
+          <span
+            className="chip flag flag-warning"
+            title={`Only ${pct(coverage)} of ${windowLabel(window)} has data — these averages are not comparable to a fully covered window`}
+          >
+            <AlertTriangle aria-hidden /> partial · {pct(coverage)} of window
+          </span>
+        )}
         <button
           className={`segment table-toggle ${showTable ? 'is-active' : ''}`}
           aria-pressed={showTable}

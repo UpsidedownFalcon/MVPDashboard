@@ -27,5 +27,7 @@ export const WS_BACKOFF_MAX_MS = 10_000
 /** WS close code meaning "session expired" (BACKEND_SCHEMA §3). */
 export const WS_CLOSE_UNAUTHORIZED = 4401
 
-/** History tab bucket request (server may clamp; response bucket_s wins). */
-export const HISTORY_BUCKETS = 24
+/** Max buckets requested from /api/metrics/history. The actual count per
+ *  window comes from lib/format's evenBucketCount() so spans divide the
+ *  window exactly (no density artifacts, no label drift). */
+export const HISTORY_MAX_BUCKETS = 30
