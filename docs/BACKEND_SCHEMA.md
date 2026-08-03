@@ -108,7 +108,8 @@ resolution than `metrics_1m`, query `metrics` directly for windows < 5 min (the
   "type": "tick",
   "t":   "2026-08-02T21:14:03.250Z",  // server-aligned tick time (ISO, UTC)
   "dev": "30",
-  "m":   [42.2, 48.3, 24.2, 0.0, null],   // m1..m5, each 0..100 or null
+  "m":   [42.2, 48.3, 24.2, 0.0, -37.0],  // m1..m4 are 0..100 or null;
+                                          // m5 is SIGNED -100..100 (see below)
   "c":   45.3,                             // composite 0..100
   "q":   0.98,                             // quality 0..1
   "f":   ["unvalidated", "warming_up"]     // active biomech flags, sorted; null when none
@@ -123,7 +124,14 @@ when no flag is active. The vocabulary is fixed by [biomech/SPEC.md](biomech/SPE
 `unvalidated`. Flags are display/diagnostic state only — they are **not** written to the
 `metrics` table (the full diagnostic set goes to `biomech:diag:{device_id}`, §4).
 
-**Ranges (set by [biomech/SPEC.md](biomech/SPEC.md) §5, S1-T14):** `m1..m5` and `c` are
+⚠️ **`m5` is SIGNED, −100..+100** (changed 2026-08-03). **Positive = left-dominant, negative =
+right.** The magnitude to display is `|m5|`; the sign is which side is carrying more load *in this
+session*. It must never be presented as "this leg is weaker" or compared across sessions — limb
+dominance does not reproduce (κ = −0.14 to 0.60) and greater asymmetry has not been shown to
+predict injury. Anything treating m5 as a severity must take `abs()`. **Frontend: show `|m5|` as
+the value and the sign as a side label.**
+
+**Ranges (set by [biomech/SPEC.md](biomech/SPEC.md) §5, S1-T14):** `m1..m4` and `c` are
 **0–100** arbitrary units (the pre-SPEC stub emitted 0–1 — frontend axis bounds must match
 the model). `q` remains 0–1.
 

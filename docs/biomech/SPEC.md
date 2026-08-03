@@ -407,8 +407,8 @@ magnitude primitives only. Flagged for approval.)*
 
 | `m3` Accumulated Load | **0.5** | **60** (dose·min) | §5.3. One dose-minute is **one minute of hard-training equivalent**, so the floor is 30 s of that and the ceiling a full hard hour. Re-anchored 2026-08-03 with the dose law: the old floor of 0.01 was 0.6 s of hard-training equivalent, so *any* movement cleared it within a second and the bottom of the scale was unreachable — 90 s of slow walking read 30/100. Measured on the activity ladder at these bounds: 45 min continuous slow walk → 0, light jog → 56, hard run → 87; 10 min hard run → 61, 1 min → 14 **[V]** |
 | **`ω` term (inside `m3`)** | **5 °/s** | **1500 °/s** | **Was missing entirely — `m3` was unimplementable.** `lo` above measured still-standing mean `\|ω\|` = 1.6 °/s; squat mean = 82 °/s → score 49 **[V]**; `hi` covers sprint thigh (792 °/s) and inferred shank (1200–1900 °/s) **[L]** |
-| `m4` Movement Control | 0 | ±50% vs own baseline | §5.4 |
-| `m5` L/R Balance | 0 | 18% wUSI | §5.5 — **literature-derived** |
+| `m4` Movement Control | 0 | +100% tremor fraction vs own fresh baseline, per intensity band | §5.4 |
+| `m5` L/R Balance | −100 | ±18% wUSI — **SIGNED**: + = left-dominant, − = right | §5.5 — literature-derived magnitude; sign is a within-session readout (user decision 2026-08-03) |
 
 Reference bounds are **constants in `biomech.py`, not `.env` keys** — model parameters, not
 deployment wiring (TRD §7 permits file-local tuning constants). They are **provisional starting
@@ -558,7 +558,38 @@ minute of hard-training equivalent**, so `M3_HI = 60` is a full hard hour.
 
 ### 5.4 `m4` — Movement Control
 
-Shock **transmission ratio** between shank and thigh of the same leg:
+🚩 **REPLACED 2026-08-03. `m4` is now a TREMOR INDEX, not a shock-transmission ratio.**
+
+The worn protocol destroyed the ratio form. It was **null on 100% of ticks during jumps**, 70%
+during single-leg landings and 61% during rest — it needed a matched shank *and* thigh on the
+same leg with the shank above the move gate, so it vanished exactly when movement got
+interesting. It read **highest during kicks (41) and limping (40)**, neither of which is fatigue.
+And it went **6 → 4 during and after squats to failure**: it *fell* as the athlete fatigued.
+**[V]**
+
+The intent — well controlled when rested, losing control with fatigue through tremor, weakness
+and having to work harder for the same movement — is unchanged. The tremor band is the
+directly-evidenced signal for it: the 4–12 Hz power fraction is an established unitless index
+that scales across tasks and individuals, it is scale-free (so it survives any future change to
+the m1/m2 normalisation), and it needs **one** streaming limb rather than a matched pair. **[L]**
+
+Implementation is three extra one-pole low-passes on `amag` — a band-pass is the difference of
+two low-passes, and the 0.5 Hz edge is already the gravity baseline.
+
+Two behaviour changes follow, both asserted in the suite:
+- **m4 is available on any limb**, so §8's ladder gains it for the both-shanks and single-sensor
+  rows.
+- **m4 is DIRECTIONAL.** More tremor than fresh is a loss of control; *less* is not a problem and
+  no longer scores. The old `|·|` existed because the literature does not fix the sign of
+  shock-attenuation drift; it *does* fix the sign of tremor.
+
+m4 **freezes when the active limb set differs from the set its baseline was learned on** — the
+fraction is averaged over live limbs, so losing one shifts it against a baseline measured on a
+different set (**+33 points** when one sensor died). Same class of guard as before; the
+explosion it protected against is gone.
+
+*The superseded definition, for reference:* shock **transmission ratio** between shank and thigh
+of the same leg:
 ```
 R = mean(adyn, thigh, trailing 20 s) / mean(adyn, shank, trailing 20 s)
 ```
@@ -568,10 +599,11 @@ running gives *attenuation* (<1), so no absolute 0–100 scale is honest across 
 baseline-relative, per user decision:
 
 ```
-band     = intensity band of the current shank EMA |a_dyn|   (M4_BAND_EDGES)
-R_base[b] = time-weighted MEAN of R over 60 s of movement IN BAND b,
-            learned only after M4_SETTLE_S of movement, then locked
-m4       = 100 · clamp( |R / R_base[band] − 1| / 0.50 , 0, 1 )
+tremor    = mean power 4–12 Hz / mean power 0.5–20 Hz, over live limbs
+band      = intensity band of the current shank EMA |a_dyn|   (M4_BAND_EDGES)
+base[b]   = time-weighted MEAN of `tremor` over 60 s of movement IN BAND b,
+            learned only after M4_SETTLE_S, then locked (with the limb mask)
+m4        = 100 · clamp( max(tremor/base[band] − 1, 0) / 1.0 , 0, 1 )
 ```
 
 🚩 **The `|·|` is a correction forced by the literature, and it matters.** My first draft scored
@@ -725,7 +757,13 @@ Also note natural asymmetry in uninjured runners is highly parameter-specific �
 GRF but **12.1–33.8% for vertical average loading rate** — so the widely-quoted "10% threshold"
 has no injury-data basis and sits inside measurement error for several tests.
 
-**Do not report direction.** Agreement on *which* limb is dominant is poor across sessions
+🚩 **`m5` is SIGNED as of 2026-08-03 (user decision): positive = LEFT-dominant, negative = RIGHT.**
+The magnitude is `|m5|`, and everything that consumes it as a *severity* — the capacity term, the
+insight rules — takes `abs()`. It is a **within-session** readout of which side is carrying more
+right now, never a claim that a limb is weaker or at risk. The evidence below still stands and is
+why the sign must not be presented as a finding or compared across sessions.
+
+*The previous rule, superseded:* **Do not report direction.** Agreement on *which* limb is dominant is poor across sessions
 (Cohen's κ = −0.14 to 0.60). Report magnitude only; `raw` retains the sign for later study. **[L]**
 
 ---
@@ -737,14 +775,14 @@ has no injury-data basis and sits inside measurement error for several tests.
 ```
 demand_inst = 0.60·max(m1, m2) + 0.40·min(m1, m2)        soft-max, 0..100
 if saturated: demand_inst += (100−demand_inst)·ROT_ESCALATION·rot/100   (§3.7.1)
-demand      = EMA(demand_inst, DEMAND_TAU_S = 25 s)      EXPOSURE, not peak
-degradation = (0.45·m4 + 0.30·m5) / Σ(available weights)  m4,m5 only — renormalised
-capacity    = 100 − 0.15·degradation                     85..100
+demand      = EMA(demand_inst, DEMAND_TAU_S = 2 s)       fast; only de-noises
+degradation = (0.50·m3 + 0.30·m4 + 0.20·|m5|) / Σ(available weights)
+capacity    = 100 − 55·degradation/100                   45..100
 ratio       = demand / capacity                          load vs capacity
-acute       = min(100, 200 · ratio^n / (ratio^n + 1))    n = ACUTE_EXPONENT = 4
+composite   = min(100, 200 · ratio^n / (ratio^n + 1))    n = ACUTE_EXPONENT = 3.5
                                                          100 when demand == capacity
-floor       = 0.50 · m3                                  accumulated-fatigue residue
-composite   = floor + (100 − floor) · acute/100          0..100
+
+There is NO floor term. That is the point (§6.1a).
 ```
 
 ⚠️ **`acute` was rescaled 2026-08-02 after a live wearing session.** It was
@@ -783,6 +821,44 @@ Together with the §5.3 dose-law fix this is what moves the ladder to slow walk 
 **13.8**, hard run **57.4**, sprint **86.5** (§4.1). Note the two fixes are independent: the
 exponent alone took a slow walk from 26.0 to 15.9, and the remaining 15 points were the dose
 floor.
+
+### 6.1a The dose floor was removed — measured, 2026-08-03 **[V]**
+
+A 13-minute worn protocol (still, squats, walk, jog, jumps, single-leg landings, kicks, a limp,
+squats to failure, rest) produced a composite spanning **15.5 to 18.5 across all of it**.
+Standing still and squatting to failure were indistinguishable.
+
+| Block | m1 max | m2 max | m3 | m4 | m5 | **composite** |
+|---|---|---|---|---|---|---|
+| still | 0 | 75 | 31.8 | 29 | 37 | **15.8–16.0** |
+| squats | 13 | 31 | 31.1 | 16 | 38 | **15.6** |
+| walk | 29 | 100 | 31.1 | 24 | 37 | **15.5–15.7** |
+| jog | 32 | 74 | 33.1 | 32 | 32 | **15.6–18.2** |
+| jumps | 49 | 58 | 34.7 | *null* | 24 | **17.1–18.2** |
+| single-leg landing | 41 | 86 | 36.1 | 13 | 23 | **17.9–18.2** |
+| kicks | 35 | 86 | 36.5 | 41 | 28 | **18.1–18.5** |
+| limp | 28 | 40 | 36.9 | 40 | 30 | **18.4–18.5** |
+| squats to failure | 21 | 49 | 36.9 | 6 | 28 | **18.4–18.5** |
+| rest (85 s) | 0 | 0 | 36.9 | 4 | 27 | **18.4–18.5** |
+
+Worked through on the jump block: `demand` ~36 smeared to ~20 by a 25 s EMA, `capacity` 94.6,
+`ratio` 0.21 to the 4th power = 0.002, so `acute` contributed **0.33 points** and the other 16
+were `floor = 0.50·m3`. Four dampers had stacked — additive floor, 25 s EMA, 4th-power curve,
+capacity factor 0.15 — each defensible alone, never re-measured in combination. The synthetic
+ladder ran each activity for 200 s, which hides both the smearing and transients entirely.
+
+**Dose now reduces capacity instead of adding a floor**, which is what the load-vs-capacity model
+actually says: fatigue does not add risk at rest, it makes the *same movement* riskier.
+
+- still → demand 0 → **risk 0**, whatever the accumulated dose
+- transient → visible within a tick; stop moving → decays immediately
+- fatigued athlete → same movement, lower capacity, higher risk
+- and **every primitive contributes**: m1/m2 through demand, m3/m4/m5 through capacity
+
+`ACUTE_EXPONENT` 4 → **3.5**, fitted to the protocol's measured m1/m2 against the wearer's
+targets for a *fresh* athlete: squats 1.3, walk 2.6, jog 6.0, kick 8.4, single-leg landing 17,
+jump 21. The same jump at the capacity measured after the fatigue block reads ~33. Still inside
+the fatigue-damage exponent range 2.1–5.8 (Pattin 1996).
 
 🚩 **`CAPACITY_FACTOR` cut 0.70 → 0.15 on 2026-08-03: capacity now floors at 85, not 30.**
 `m4`/`m5` carry the `unvalidated` flag (§11.1 — synthetic fixtures only), yet at 0.70 they could
@@ -869,6 +945,8 @@ Per the evidence, the following are deliberately absent: **[L]**
 |---|---|---|---|---|---|---|
 | Standing still, 2–11 s (before work) | 0.0 | 0.0 | 0.0 | `null` | `null` | **0.0** |
 | Squatting, 16–31 s | 0.04 | 1.79 | 0.0 | `null` | `null` | **0.00** |
+
+*(unchanged by the §6.1a rebuild: with `m3` = 0 there was never a floor on this capture, so removing the floor moved nothing here. The capture still validates only that a low-load activity reads low — see open item 13.)*
 | Standing still, 34–41 s (after work) | 0.0 | 0.0 | 0.0 | `null` | `null` | **0.0** |
 
 ⚠️ **Re-measured 2026-08-03** after the §4 `m1`/`m2` re-anchoring, the §5.3 dose law and the §6.1
