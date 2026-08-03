@@ -144,11 +144,15 @@ def test_jerk_uses_radians_not_degrees():
     the radian form predicts. A deg/s implementation saturates m2 instead.
     """
     # |w x a| scales with BOTH the rotation rate and |a|. Gravity alone cannot
-    # clear the raised M2_LO (800 m/s^3) anywhere inside the +-2000 deg/s gyro
-    # range, so the fixture holds a constant 30 m/s^2 instead. Constant
-    # magnitude means da/dt is zero and the baseline converges, so m1 stays 0
-    # and the rotation term is isolated -- which is the point of the test.
-    A_MAG = 30.0
+    # clear M2_LO anywhere inside the +-2000 deg/s gyro range, so the fixture
+    # holds a large constant |a| instead. Constant magnitude means da/dt is zero
+    # and the baseline converges, so m1 stays 0 and the rotation term is
+    # isolated -- which is the point of the test.
+    #
+    # Raised 30 -> 100 m/s^2 on 2026-08-03 when M2_LO went 800 -> 2500: at 30
+    # the high arm produced only 995 m/s^3, which now sits BELOW the floor, so
+    # the sanity half of the test would have passed vacuously.
+    A_MAG = 100.0
 
     def gen_for(rate):
         def gen(k):
@@ -157,9 +161,9 @@ def test_jerk_uses_radians_not_degrees():
             return a, w
         return gen
 
-    # |w x a| = w_rad * 30. At 200 deg/s that is 105 m/s^3, well under M2_LO
-    # (800), so m2 must read 0. Under a deg/s bug the term is 57.3x bigger
-    # (1963 m/s^3), which lands solidly inside the scale and m2 would read > 0.
+    # |w x a| = w_rad * 100. At 200 deg/s that is 349 m/s^3, well under M2_LO
+    # (2500), so m2 must read 0. Under a deg/s bug the term is 57.3x bigger
+    # (20,000 m/s^3), which lands solidly inside the scale and m2 would read > 0.
     res, _ = _drive(gen_for(200.0), 150)
     assert res[-1].m2 == 0.0, (
         "m2 responded to a rotation term that should be below the noise floor "
@@ -167,7 +171,7 @@ def test_jerk_uses_radians_not_degrees():
     )
 
     # Sanity that the term exists at all: 1900 deg/s (just inside the +-2000
-    # gyro full scale, so nothing saturates) gives 995 m/s^3, above M2_LO.
+    # gyro full scale, so nothing saturates) gives 3316 m/s^3, above M2_LO.
     res_hi, _ = _drive(gen_for(1900.0), 150)
     assert res_hi[-1].m2 is not None and res_hi[-1].m2 > 0.0
 
@@ -299,10 +303,25 @@ def test_reconnecting_limb_does_not_spike_m1():
 # =============================================================================
 
 def _moving(k, limbs=LIMBS, scale=1.0):
+    """A moving limb at roughly hard-running load.
+
+    Amplitudes raised 4.0 -> 8.5 m/s^2 and 120 -> 300 deg/s on 2026-08-03 with
+    the m1/m2 re-anchoring: `M1_LO_FLOOR` went 2.0 -> 8.0 m/s^2 (a walk used to
+    read 40/100), so the old 4.0 sat BELOW the floor and every metric derived
+    from it read 0 -- which would make the assertions vacuous rather than
+    failing. The amplitude is what changed, not any claim.
+
+    8.5 and not more: the dynamic term must stay UNDER gravity or 9.81 + A*sin
+    goes negative and |a| FOLDS (SPEC §3.3), which makes a_dyn a non-linear
+    function of the amplitude and silently compresses any left/right ratio built
+    by scaling it. The gyro is likewise held at 300 deg/s rather than scaled to
+    match: callers pass `scale` up to 6, and 480*6 = 2880 deg/s exceeds the
+    +-2000 deg/s full scale, tripping saturation suppression to None.
+    """
     t = (k * NS + np.arange(NS)) / FS
-    a = np.stack([np.zeros(NS), 9.81 + scale * 4.0 * np.sin(2 * np.pi * 9 * t),
+    a = np.stack([np.zeros(NS), 9.81 + scale * 8.5 * np.sin(2 * np.pi * 9 * t),
                   np.zeros(NS)], 1)
-    w = np.tile([scale * 120.0, 0.0, 0.0], (NS, 1))
+    w = np.tile([scale * 300.0, 0.0, 0.0], (NS, 1))
     return a, w
 
 
@@ -358,7 +377,7 @@ def test_degradation_ladder(limbs, expect_m4, expect_m5):
     """SPEC §8: unavailable primitives are None; the composite still works."""
     state = {}
     res = []
-    for k in range(60 * 70):
+    for k in range(60 * 160):        # m4 needs 60 s settle + 60 s in-band
         a, w = _moving(k)
         frames, times = make_tick(a, w, limbs=limbs, t0=k * NS / FS)
         res.append(compute(frames, state, times))
@@ -467,7 +486,7 @@ def test_packet_loss_does_not_collapse_dose():
     rng = np.random.default_rng(3)
     state = {}
     for k in range(60 * 30):
-        a, w = _moving(k, scale=4.0)
+        a, w = _moving(k)
         keep = rng.random(NS) > 0.30          # drop ~30% of samples
         if not keep.any():
             keep[0] = True
@@ -499,12 +518,13 @@ def test_saturated_window_suppresses_m1_m2():
 def test_session_reset_clears_dose_but_keeps_calibration():
     state = {}
     # hard-run amplitude so the dose clears M3_LO -- see _HARD_A_MS2 above
-    res, _ = _drive(lambda k: _moving(k, scale=4.0), 60 * 20, state)
+    res, _ = _drive(lambda k: _moving(k), 60 * 20, state)
     assert res[-1].m3 > 0.0
     sess = state["_biomech"]
     sess.cal["left_shin"] = biomech.Calibration(k=1.01, gyro_bias=np.zeros(3), sigma=0.04)
     biomech.reset_session(state)
-    assert sess.dose == 0.0 and sess.move_t == 0.0 and sess.R_base is None
+    assert sess.dose == 0.0 and sess.move_t == 0.0
+    assert all(b is None for b in sess.r_base)
     assert sess.cal["left_shin"].k == 1.01, "calibration must survive a session reset"
 
 
@@ -663,10 +683,21 @@ def test_squats_replay_golden_values():
     assert mean(lambda m: m.composite) < 2.0
 
     squat, mean = phase(16, 31)
-    assert 9.0 <= mean(lambda m: m.m1) <= 18.0            # measured 13.5, unchanged
-    assert 13.0 <= mean(lambda m: m.m2) <= 23.0           # measured 17.7, unchanged
-    assert mean(lambda m: m.m3) == 0.0                    # measured 0.0 (see above)
-    assert 0.2 <= mean(lambda m: m.composite) <= 2.0      # measured 0.61
+    # Re-measured 2026-08-03 after M1_LO_FLOOR 2.0 -> 8.0 and M2_LO 800 -> 2500.
+    # This capture is 16 s of GENTLE bodyweight squatting whose peak dynamic
+    # acceleration is ~3.6 m/s^2 -- below the new impact floor, and genuinely
+    # below WALKING (~11 m/s^2), which is why SPEC §6.4 already noted "a squat
+    # has less heel strike than a step". So it now reads ~0 throughout.
+    #
+    # ⚠️ That means this capture no longer validates ANY metric numerically --
+    # it validates only that a low-load activity reads low. The synthetic
+    # fixtures and test_sustained_load_builds_dose_and_decays_to_the_floor carry
+    # the numeric validation until a real capture with running/jumping exists
+    # (docs/biomech/SPEC.md open item 13).
+    assert mean(lambda m: m.m1) < 1.0                     # measured 0.04
+    assert mean(lambda m: m.m2) < 5.0                     # measured 1.79
+    assert mean(lambda m: m.m3) == 0.0                    # measured 0.0
+    assert mean(lambda m: m.composite) < 1.0              # measured 0.000
 
     after, mean = phase(34, 41)
     assert mean(lambda m: m.m1) < 4.0
@@ -692,7 +723,7 @@ def test_sustained_load_builds_dose_and_decays_to_the_floor():
     accumulated-dose floor of exactly 0.50 * m3 rather than collapsing to zero.
     """
     state: dict = {}
-    res, _ = _drive(lambda k: _moving(k, scale=4.0), 60 * 600, state)   # 10 min
+    res, _ = _drive(lambda k: _moving(k), 60 * 600, state)   # 10 min
     worked = res[-1]
     assert worked.m3 > 20.0, f"10 min of hard load should build dose, got {worked.m3:.1f}"
     assert worked.m3 < 100.0, "and must not pin the scale"
@@ -711,7 +742,10 @@ def test_sustained_load_builds_dose_and_decays_to_the_floor():
     assert rested.m3 > 0.0, "dose must persist through a short rest, not reset"
     assert rested.m3 < worked.m3, "and must be decaying"
     # THE identity: at rest the composite IS the dose floor.
-    assert rested.composite == pytest.approx(0.5 * rested.m3, abs=1e-9)
+    # abs=1e-3, not 1e-9: `demand` is an EMA (DEMAND_TAU_S), so 30 s into a rest
+    # it is still decaying toward zero rather than exactly zero, leaving a
+    # vanishing but non-zero acute term. Measured residual here: 4.6e-5.
+    assert rested.composite == pytest.approx(0.5 * rested.m3, abs=1e-3)
     assert rested.composite > 0.0, (
         "the composite settles onto accumulated dose, never to a false zero"
     )
@@ -765,8 +799,9 @@ class TestSyntheticOnly:
         last = None
         for k in range(60 * 200):
             t_s = k * NS / FS
-            # after the 60 s baseline lock, scale the THIGH signal only
-            gain = 1.0 if t_s < 90.0 else direction
+            # after the band baseline locks (60 s settle + 60 s in-band),
+            # scale the THIGH signal only
+            gain = 1.0 if t_s < 150.0 else direction
             a_s, w_s = _moving(k, scale=1.0)
             a_t, w_t = _moving(k, scale=gain)
             fs_, ts_ = make_tick(a_s, w_s, limbs=("left_shin", "right_shin"), t0=t_s)
@@ -943,11 +978,11 @@ def test_mid_run_sensor_fault_is_isolated_and_recovers():
     n_dev = 3
     states = [{} for _ in range(n_dev)]
     control: dict = {}
-    fault_from, fault_to = 60 * 70, 60 * 72          # 2 s, after both warm-ups
+    fault_from, fault_to = 60 * 160, 60 * 162        # 2 s, after both warm-ups
     out: list[list] = [[] for _ in range(n_dev)]
     ctl = []
 
-    for k in range(60 * 75):
+    for k in range(60 * 170):        # m4 needs 60 s settle + 60 s in-band
         a, w = _moving(k)
         t0 = k * NS / FS
         for d in range(n_dev):

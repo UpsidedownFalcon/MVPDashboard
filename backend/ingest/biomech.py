@@ -79,14 +79,38 @@ MOVE_GATE_MS2 = 0.10         # tick-mean adyn: measured still 0.025-0.032,
 # impact was 11 m/s^2 against 30-150 in the landing literature, so anchoring the
 # top to it would peg a real athlete at 100 permanently. Raise the floor, keep
 # the headroom.
-M1_LO_FLOOR = 2.0            # m1 lo = max(M1_LO_FLOOR, M1_LO_SIGMAS * sigma)
+# Re-anchored 2026-08-03 against a worn session covering walk / jog / run / jump
+# / single-leg landing / deceleration / change-of-direction / kick / squat. Both
+# ends were wrong:
+#
+#   floor 2.0 m/s^2 put an ordinary WALK at 40/100, so 40 points of the scale
+#   covered 2 -> 11 m/s^2 (nothing happening) and the whole athletic range was
+#   squeezed into the remaining 60.
+#
+#   ceiling 150 m/s^2 is 15.3 g, which real movement EXCEEDS. Published
+#   resultant peak tibial acceleration: walking 2.7-3.7 g, running 5-12 g,
+#   max sprint 20.1 +- 9.0 g, single-leg hop landing 27.2 +- 7.9 g, and
+#   vertical jumping up to 42 g. So a jump read exactly 100 because the scale
+#   ENDED there -- censoring, not measurement. Jump, landing, kick and
+#   deceleration all reported 100 and were therefore indistinguishable.
+#
+# Back-solved from that session at the old bounds: walk/squat ~11 m/s^2,
+# jog ~14, run ~17, kick ~27, single-leg landing ~63, jump >=150 (censored).
+M1_LO_FLOOR = 6.0            # m1 lo = max(M1_LO_FLOOR, M1_LO_SIGMAS * sigma)
 M1_LO_SIGMAS = 5.0           # noise-adaptive: a noisier sensor must not read >0 at rest
-M1_HI = 150.0                # ~15 g, near accel full scale
+M1_HI = 400.0                # ~41 g: vertical jumping reaches 42 g
+# 🚩 The accelerometer is +-16 g per axis, so a resultant of 27.7 g clips every
+# axis and jumping reaches 42 g -- some landing peaks are already truncated
+# (SPEC open item 2 recommends >= +-32 g). Raising the ceiling does not create
+# that problem, it makes it VISIBLE instead of hiding it at a pinned 100.
 # m2 lo moves to the osteogenic jerk threshold (981 m/s^3, Jamsa 2011) rather
 # than the rest floor: below that the loading rate is not doing anything worth
 # scoring. Ceiling raised because 12,000 was being clipped by ordinary interval
 # work (session p90 hit 100 in three separate phases).
-M2_LO, M2_HI = 800.0, 30_000.0
+# Same re-anchoring as m1. 800 m/s^3 sat BELOW walking (which back-solves to
+# ~3,400 m/s^3, already inside the published running-impact jerk band of
+# 2,500-7,800), so a walk read 40/100; and 30,000 was exceeded by a small jump.
+M2_LO, M2_HI = 2_500.0, 80_000.0
 # dose-minutes, where 1 dose-minute == 1 minute of hard-training equivalent
 # (see A_DOSE_REF/W_DOSE_REF). Floor = 30 s of that, ceiling = a full hard hour.
 # Re-anchored 2026-08-03 with the dose law: the old 0.01 floor was 0.6 s of
@@ -94,7 +118,16 @@ M2_LO, M2_HI = 800.0, 30_000.0
 # bottom of the scale was unreachable. Measured on the ladder at these bounds:
 # 45 min continuous slow walk -> 0, light jog -> 56, hard run -> 87; 10 min hard
 # run -> 61, 1 min -> 14.
-M3_LO, M3_HI = 0.5, 60.0
+# Floor cut 0.5 -> 0.03 on 2026-08-03. 0.5 dose-minutes is 30 s of
+# hard-training equivalent, which was ABOVE every bout in a real worn session:
+# 60 s of running accumulates ~0.31 and a set of bodyweight squats ~0.005, so
+# m3 read exactly 0 for everything tested. 0.03 is ~2 s of hard-training
+# equivalent, low enough that a 30-60 s bout registers.
+#
+# ⚠️ A_DOSE_REF / W_DOSE_REF below are still measured on a SYNTHETIC generator,
+# so the absolute dose rate is an estimate. scripts/calibrate_capture.py closes
+# that against a real capture.
+M3_LO, M3_HI = 0.03, 60.0
 W_LO, W_HI = 5.0, 1500.0           # deg/s; still mean 1.6, squat mean 82, sprint >1200
 
 # --- m3 dose (SPEC Section 5.3) ---
@@ -118,11 +151,40 @@ A_DOSE_REF = 7.4             # m/s^2, cube-mean tick dynamic accel
 W_DOSE_REF = 540.0           # deg/s, cube-mean tick rotational rate
 
 # --- m4 control (SPEC Section 5.4) ---
-M4_BASELINE_LOCK_S = 60.0    # movement time before R_base locks
+M4_BASELINE_LOCK_S = 60.0    # movement time IN A BAND before its baseline locks
 M4_FULL_SCALE = 0.50         # |R/R_base - 1| of 0.5 reads 100
+# Shank-EMA |a_dyn| edges (m/s^2) splitting movement into intensity bands.
+# Rebuilt 2026-08-03: a SINGLE baseline made m4 an activity-change detector.
+# It locked from ONE tick's value at the moment cumulative movement first hit
+# 60 s -- whatever the athlete happened to be doing -- and was never re-learned.
+# Shock transmission genuinely differs between walking and running as
+# PHYSIOLOGY, not fatigue, so switching activity moved R/R_base past the 50%
+# full scale and pinned m4 at 100. Measured on a worn session: m4 sat at 90-100
+# (saturated) while jogging, 75-85 running, and unchanged during squats -- the
+# activity the baseline had locked on.
+#
+# Banding compares like with like, so m4 answers a question that is actually
+# answerable: "at the intensity being worked at RIGHT NOW, is shock being
+# transmitted differently than when fresh at this same intensity?"
+M4_BAND_EDGES = (0.3, 1.0, 3.0)
+M4_BANDS = len(M4_BAND_EDGES) + 1
+# Movement time before ANY band starts learning. THREE transmission time
+# constants, not one: at 1 tau the EMA is only 63% converged, so a baseline
+# learned then is still partly the warm-up transient and the band reads high
+# forever after. At 3 tau it is ~95% there.
+M4_SETTLE_S = 3.0 * CONTROL_TAU_S
 
 # --- m5 balance (SPEC Section 5.5) ---
 ASYM_HALFLIFE_S = 5 * 60.0
+# Fast asymmetry channel, DIAGNOSTIC ONLY (published in `raw.usi_fast_pct`).
+# The 5-minute accumulator is a chronic measure by design, so one second of
+# one-sided load displaces ~0.2% of it once the session is established -- a
+# single-leg landing barely moved m5 on a real worn session. Note the reported
+# m5's sensitivity is also NON-STATIONARY and never declared: the accumulators
+# start empty, so the effective averaging length is min(elapsed, 433 s) and m5
+# is roughly 14x more event-sensitive just after its 30 s warm-up gate than it
+# is seven minutes later. This channel is here to size a fix, not to ship one.
+ASYM_FAST_HALFLIFE_S = 10.0
 M5_WARMUP_S = 30.0           # the accumulator is rep-dominated before this
 PARTIAL_DEBOUNCE_S = 0.75    # `partial` must persist this long before it shows.
                              # A lossy link makes a limb's `active` flag flicker
@@ -158,8 +220,41 @@ CAL_CARRY_TTL_S = 30 * 24 * 3600
 # --- composite (SPEC Section 6.1) ---
 DEMAND_MAX_W, DEMAND_MIN_W = 0.60, 0.40
 DEGRADE_W_M4, DEGRADE_W_M5 = 0.45, 0.30    # m3 is NOT here: it drives `floor`
-CAPACITY_FACTOR = 0.70                     # capacity floors at 30
+# Capacity reduction per point of degradation. CUT 0.70 -> 0.15 on 2026-08-03,
+# so capacity floors at 85 rather than 30.
+#
+# m4 and m5 carry the `unvalidated` flag: synthetic fixtures only, no real-data
+# validation (SPEC Section 11.1). At 0.70 they could remove 42 capacity points,
+# and because `acute` raises demand/capacity to the FOURTH power that is far more
+# leveraged than the linear form suggests. Measured on a real worn session:
+#
+#   demand 60, m3 0    capacity   ratio   composite
+#   m4=0  m5=0            100.0   0.600      23
+#   m4=75 m5=14            64.6   0.929      85   <- crosses WARN
+#   m4=90 m5=0             62.2   0.965      93   <- crosses ALERT
+#   m4=90 m5=None          37.0   1.622     100   <- pinned
+#
+# The same physical session read 23 or 93 depending only on an unvalidated
+# number. The label said `unvalidated` on the metric's own card while the value
+# silently set the alert-severity headline; SPEC Section 2 forbids exactly that.
+#
+# The last row is the sharpest case: `degradation` renormalises over AVAILABLE
+# terms (SPEC Section 8, so fewer sensors are not scored as lower risk), which
+# means that whenever m5 is None -- common, it freezes on any missing side --
+# m4 ALONE sets degradation at full value and its 0.45 weight is cosmetic.
+# Renormalisation is kept; the cap is what makes it safe.
+#
+# Restore this toward 0.70 when m4/m5 gain real-data validation (open item 10).
+CAPACITY_FACTOR = 0.15
 FLOOR_FACTOR = 0.50
+# Demand is EXPOSURE, not peak. m1/m2 are 1 s peak-holds -- correct for metrics
+# named Impact and Loading Rate -- but feeding them straight into a risk index
+# made one landing outrank a minute of running. Measured on a worn session: a
+# small forward jump pinned the composite at 100 while sustained running, which
+# the wearer rated as the higher risk, read the same. Kalkhoven's model is about
+# damage accumulating toward a threshold, so the risk term should follow
+# exposure. m1/m2 are unchanged; only the composite sees the smoothed value.
+DEMAND_TAU_S = 25.0
 # Hill exponent on the load/capacity ratio. Raised 2 -> 4 on 2026-08-03: at n=2
 # the curve was far too eager at the bottom, and the wearer reported ordinary
 # activity reading as substantial injury risk -- a slow walk 20-30 and a light
@@ -216,6 +311,21 @@ class Metrics:
 
 
 HELD_ZERO = Metrics(0.0, 0.0, 0.0, None, None, 0.0, frozenset({"warming_up"}), {})
+
+
+def _intensity_band(sh_mean: float) -> int:
+    """Which m4 intensity band a shank-EMA |a_dyn| falls in (SPEC Section 5.4).
+
+    Bands exist so m4 compares shock transmission at like intensities. Walking
+    and running transmit differently as physiology; without banding that read as
+    maximum 'movement control' degradation the moment the athlete changed pace.
+    """
+    band = 0
+    for edge in M4_BAND_EDGES:
+        if sh_mean < edge:
+            return band
+        band += 1
+    return band
 
 
 def log_score(x: float, lo: float, hi: float) -> float:
@@ -327,15 +437,23 @@ class _Sess:
         self.dose = 0.0
         self.accL = 0.0
         self.accR = 0.0
+        self.fastL = 0.0        # m5 fast channel (diagnostic)
+        self.fastR = 0.0
         self.move_t = 0.0
         self.asym_t = 0.0      # time accumulated INTO accL/accR
         self.legs_bad = 0.0    # debounce integrators for `partial`
         self.sides_bad = 0.0
-        self.R_base: float | None = None
+        # m4's transmission baseline, learned PER INTENSITY BAND. A single
+        # scalar baseline made m4 an activity-change detector -- see the band
+        # helpers and the m4 block for why.
+        self.r_sum = [0.0] * M4_BANDS      # time-weighted sum of R, per band
+        self.r_time = [0.0] * M4_BANDS     # movement seconds accrued, per band
+        self.r_base: list[float | None] = [None] * M4_BANDS
         self.m4_hold: float | None = None
         self.m5_hold: float | None = None
         self.m4_stale = 0.0
         self.m5_stale = 0.0
+        self.demand_ema: float | None = None   # exposure-smoothed demand
         self.prev: Metrics | None = None
         self.last_tick_t: float | None = None
         self.session_start_t: float | None = None
@@ -445,13 +563,19 @@ class _Sess:
     # --- SPEC Section 7.4 snapshot ------------------------------------------
     def snapshot(self) -> dict:
         return {
-            "v": 1,
+            # v2: m4's single `R_base` scalar became a per-intensity-band table.
+            # A v1 snapshot is REJECTED rather than partly applied -- restoring a
+            # baseline learned under the old single-band rule would reintroduce
+            # exactly the activity-change confound the bands exist to remove.
+            "v": 2,
             "dose": self.dose,
             "accL": self.accL,
             "accR": self.accR,
             "move_t": self.move_t,
             "asym_t": self.asym_t,
-            "R_base": self.R_base,
+            "r_sum": list(self.r_sum),
+            "r_time": list(self.r_time),
+            "r_base": list(self.r_base),
             "last_tick_t": self.last_tick_t,
             "session_start_t": self.session_start_t,
             # Keyed by LIMB NAME, never by slot index: slots are assigned
@@ -462,7 +586,7 @@ class _Sess:
         }
 
     def restore(self, snap: dict, now: float, session_gap_s: float) -> bool:
-        if snap.get("v") != 1:
+        if snap.get("v") != 2:
             return False
         last = snap.get("last_tick_t")
         if last is None or now - last > session_gap_s:
@@ -474,7 +598,10 @@ class _Sess:
         self.accR = snap["accR"] * decay
         self.move_t = snap["move_t"]
         self.asym_t = snap.get("asym_t", 0.0)
-        self.R_base = snap["R_base"]
+        n = M4_BANDS
+        self.r_sum = (list(snap.get("r_sum") or []) + [0.0] * n)[:n]
+        self.r_time = (list(snap.get("r_time") or []) + [0.0] * n)[:n]
+        self.r_base = (list(snap.get("r_base") or []) + [None] * n)[:n]
         self.last_tick_t = last
         self.session_start_t = snap.get("session_start_t")
         src = snap.get("cal_src") or {}
@@ -500,13 +627,17 @@ class _Sess:
         """
         self.dose = 0.0
         self.accL = self.accR = 0.0
+        self.fastL = self.fastR = 0.0
         self.move_t = 0.0
         self.asym_t = 0.0      # time accumulated INTO accL/accR
         self.legs_bad = 0.0    # debounce integrators for `partial`
         self.sides_bad = 0.0
-        self.R_base = None
+        self.r_sum = [0.0] * M4_BANDS
+        self.r_time = [0.0] * M4_BANDS
+        self.r_base = [None] * M4_BANDS
         self.m4_hold = self.m5_hold = None
         self.m4_stale = self.m5_stale = 0.0
+        self.demand_ema = None
         self.session_start_t = None
         for i in range(len(self.limbs)):
             if self.cal_src[i] == "measured":
@@ -880,8 +1011,20 @@ def compute(
         if sess.session_start_t is None:
             sess.session_start_t = now_t
 
-    # m4's trailing transmission mean, as an O(1) EMA
-    alpha_ctl = 1.0 - math.exp(-step / CONTROL_TAU_S)
+    # Movement intensity for this tick. Hoisted above the m4 EMA because that
+    # EMA is now movement-gated; the dose block below reuses these.
+    a_int = float(tick_mean_adyn[active].mean()) if active.any() else 0.0
+    w_int = float(tick_mean_w[active].mean()) if active.any() else 0.0
+    moving = a_int > MOVE_GATE_MS2
+
+    # m4's trailing transmission mean, as an O(1) EMA.
+    # Advanced only while MOVING: rest ticks used to fold in too, dragging both
+    # the thigh and shank means toward the noise floor, so a baseline that
+    # locked shortly after a rest was measured against a partly-rest-loaded EMA.
+    # `ema_seen` still latches on any active tick -- that is a has-ever-streamed
+    # record used to tell "warming up" from "this sensor is dead", and gating it
+    # on movement would make a still athlete look like a hardware fault.
+    alpha_ctl = (1.0 - math.exp(-step / CONTROL_TAU_S)) if moving else 0.0
     upd = active & sess.ema_seen
     new = active & ~sess.ema_seen
     sess.ema_adyn = np.where(
@@ -953,14 +1096,11 @@ def compute(
     # kept and max()'d for the SPEC Section 5.3 reason -- |a| under-reads slow
     # horizontal gym movement, while mean |w| is the best-supported IMU fatigue
     # marker in resistance training (Brice 2020).
-    a_int = float(tick_mean_adyn[active].mean()) if active.any() else 0.0
-    w_int = float(tick_mean_w[active].mean()) if active.any() else 0.0
     load_ratio = max(a_int / A_DOSE_REF, w_int / W_DOSE_REF)
     # `intensity` is retained on the 0-100 scale for the diagnostics stream and
     # for anything reading biomech:diag -- it is no longer what drives the dose.
     intensity = max(log_score(a_int, m1_lo, M1_HI), log_score(w_int, W_LO, W_HI))
     sess.dose *= 0.5 ** (step / DOSE_HALFLIFE_S)
-    moving = a_int > MOVE_GATE_MS2
     if moving:
         sess.dose += load_ratio**DOSE_EXPONENT * (step / 60.0)
         sess.move_t += step
@@ -976,12 +1116,34 @@ def compute(
                and bool(active[shank_i].all()) and bool(active[thigh_i].all()))
     sh_mean = float(sess.ema_adyn[shank_i].mean()) if len(shank_i) else 0.0
     th_mean = float(sess.ema_adyn[thigh_i].mean()) if len(thigh_i) else 0.0
+    band = _intensity_band(sh_mean)
     if legs_ok and moving and sh_mean > MOVE_GATE_MS2:
         R_now = th_mean / sh_mean
-        if sess.R_base is None and sess.move_t >= M4_BASELINE_LOCK_S:
-            sess.R_base = R_now
-        if sess.R_base:
-            m4 = 100.0 * min(abs(R_now / sess.R_base - 1.0) / M4_FULL_SCALE, 1.0)
+        base = sess.r_base[band]
+        if base is None:
+            # Still learning THIS band. Accumulate a time-weighted MEAN rather
+            # than snapshotting one tick: the old code froze R_base to a single
+            # sample, so one unlucky tick set the reference for the session.
+            #
+            # Nothing is learned until the 20 s transmission EMA has settled.
+            # `ema_adyn` seeds from the first active tick, when the gravity
+            # baseline is still converging and `adyn` briefly carries most of
+            # 9.81 m/s^2 -- so sh_mean sweeps down through every band during
+            # warm-up. Without this gate a band could lock its baseline on that
+            # sweep and then read 100 for the rest of the session once R settled
+            # somewhere else. Measured: exactly that, on the activity ladder.
+            if sess.move_t >= M4_SETTLE_S:
+                sess.r_sum[band] += R_now * step
+                sess.r_time[band] += step
+            if sess.r_time[band] >= M4_BASELINE_LOCK_S:
+                learned = sess.r_sum[band] / sess.r_time[band]
+                # `> 0.0`, not truthiness: a baseline of exactly 0.0 would make
+                # the old `if sess.R_base:` test fail forever while the
+                # `is None` guard also failed, leaving m4 permanently dead with
+                # no value and no flag.
+                sess.r_base[band] = learned if learned > 0.0 else None
+        else:
+            m4 = 100.0 * min(abs(R_now / base - 1.0) / M4_FULL_SCALE, 1.0)
             sess.m4_hold = m4
             sess.m4_stale = 0.0
     if m4 is None:
@@ -995,14 +1157,19 @@ def compute(
             # `partial` means SENSORS are missing. Simply standing still also
             # freezes m4, but that is normal and must not raise a fault flag.
             flags.add("partial")
-    if sess.R_base is None:
+    if sess.r_base[band] is None:
         # R needs a shank AND a thigh. If either is unmapped OR mapped but never
-        # actually streamed (flat battery, bad strap), R_base can never lock --
-        # a permanently degraded sensor set, not a warm-up. Flagging it
+        # actually streamed (flat battery, bad strap), no baseline can ever lock
+        # -- a permanently degraded sensor set, not a warm-up. Flagging it
         # `warming_up` tells the UI to keep waiting for a value that is never
         # coming. `ema_seen` is the has-ever-produced-data record: testing the
         # static role indices alone caught only the unmapped case, so a dead
         # thigh still read `warming_up` for the whole session.
+        #
+        # Per BAND: entering a new intensity for the first time is a genuine
+        # warm-up for that band, and m4 is null until it has 60 s there. That is
+        # the honest answer -- the alternative is comparing against an unrelated
+        # activity, which is what pinned m4 at 100.
         pair_live = (len(shank_i) and len(thigh_i)
                      and bool(sess.ema_seen[shank_i].all())
                      and bool(sess.ema_seen[thigh_i].all()))
@@ -1031,10 +1198,19 @@ def compute(
         # where sigma is large. 0 is the correct floor: "this tick carries no
         # trustworthy asymmetry information", not "undo the last tick".
         w_noise = max(0.0, 1.0 - 2.0 * sigma**2 / (sigma**2 + L * L + R * R))
+    usi_fast_pct = None
     if sides_ok and moving:
         decay = 0.5 ** (step / ASYM_HALFLIFE_S)
         sess.accL = sess.accL * decay + w_noise * L * step
         sess.accR = sess.accR * decay + w_noise * R * step
+        # Fast channel, same estimator over a much shorter memory, so a discrete
+        # one-sided event is visible. Diagnostic only for now.
+        fast_decay = 0.5 ** (step / ASYM_FAST_HALFLIFE_S)
+        sess.fastL = sess.fastL * fast_decay + w_noise * L * step
+        sess.fastR = sess.fastR * fast_decay + w_noise * R * step
+        fast_denom = math.sqrt(sess.fastL**2 + sess.fastR**2)
+        if fast_denom > 0.0:
+            usi_fast_pct = 100.0 * (sess.fastL - sess.fastR) / fast_denom
         # Time actually accumulated INTO the accumulators. move_t counts all
         # movement including ticks where a side was inactive, so on a lossy link
         # it reached the warm-up threshold while the accumulators were still
@@ -1072,11 +1248,18 @@ def compute(
 
     # --- 9. composite (SPEC Section 6.1) ------------------------------------
     if m1 is None and m2 is None:
-        demand = 0.0
+        demand_inst = 0.0
     elif m1 is None or m2 is None:
-        demand = float(m1 if m2 is None else m2)
+        demand_inst = float(m1 if m2 is None else m2)
     else:
-        demand = DEMAND_MAX_W * max(m1, m2) + DEMAND_MIN_W * min(m1, m2)
+        demand_inst = DEMAND_MAX_W * max(m1, m2) + DEMAND_MIN_W * min(m1, m2)
+    # Exposure, not peak (see DEMAND_TAU_S). m1/m2 stay peak-holds for display;
+    # the risk index follows how long load is sustained, so one landing is a
+    # brief bump and a minute of running is a sustained reading.
+    alpha_dem = 1.0 - math.exp(-step / DEMAND_TAU_S)
+    sess.demand_ema = (demand_inst if sess.demand_ema is None
+                       else sess.demand_ema + alpha_dem * (demand_inst - sess.demand_ema))
+    demand = sess.demand_ema
     terms = [(DEGRADE_W_M4, m4), (DEGRADE_W_M5, m5)]
     avail = [(w, v) for w, v in terms if v is not None]
     degradation = (sum(w * v for w, v in avail) / sum(w for w, _ in avail)
@@ -1104,8 +1287,21 @@ def compute(
         flags=frozenset(flags),
         raw={
             "R": R_now if R_now is not None else float("nan"),
-            "R_base": sess.R_base if sess.R_base is not None else float("nan"),
+            # baseline FOR THE BAND currently being worked in, plus which band
+            # that is and how much of its 60 s lock has been served -- without
+            # these a null m4 is indistinguishable from a broken one.
+            "R_base": (sess.r_base[band] if sess.r_base[band] is not None
+                       else float("nan")),
+            "m4_band": float(band),
+            "m4_band_t": sess.r_time[band],
             "usi_pct": usi_pct if usi_pct is not None else float("nan"),
+            # m5's FAST channel (SPEC Section 5.5 open item). The reported m5 is
+            # a 5-minute accumulator, so one second of one-sided load displaces
+            # only ~0.2% of it -- measured on a worn session, a single-leg
+            # landing barely moved it. This short-window estimate is exposed for
+            # study before any decision to promote it; the reported metric is
+            # unchanged. Magnitude only, never a direction (SPEC Section 5.5).
+            "usi_fast_pct": usi_fast_pct if usi_fast_pct is not None else float("nan"),
             # per-tick wUSI noise weight (SPEC Section 10 item 3): near 1 during
             # movement, well below it at the noise floor. A constant 1.0 here
             # means the weighting is being applied to the accumulators.

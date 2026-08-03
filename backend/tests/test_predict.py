@@ -71,14 +71,14 @@ def test_m3_rest_decay_rate_is_derived_not_hardcoded() -> None:
 
     Derived from the module constants, never written down. The literal below is
     re-measured whenever the m3 range moves: it was 0.1771 pts/min while
-    M3_LO was 0.01, and is 0.3217 since the 2026-08-03 dose re-anchoring made
-    M3_LO 0.5 dose-minutes (a narrower log span decays faster in points/min).
+    M3_LO was 0.01, and is 0.2027 since M3_LO was re-anchored to 0.03
+    dose-minutes (a narrower log span decays faster in points/min).
     """
     expected = (100.0 * math.log(2.0)
                 / math.log(P.M3_HI / P.M3_LO) / P.DOSE_HALFLIFE_MIN)
     assert P.M3_DECAY_PTS_PER_MIN == pytest.approx(expected, rel=1e-12)
-    assert P.M3_DECAY_PTS_PER_MIN == pytest.approx(0.3217399, abs=1e-6)
-    assert P.M3_DECAY_PTS_PER_MIN * P.DOSE_HALFLIFE_MIN == pytest.approx(14.4783, abs=1e-3)
+    assert P.M3_DECAY_PTS_PER_MIN == pytest.approx(0.2026513, abs=1e-6)
+    assert P.M3_DECAY_PTS_PER_MIN * P.DOSE_HALFLIFE_MIN == pytest.approx(9.1193, abs=1e-3)
 
 
 @pytest.mark.parametrize("m3", [0.0, 1.0, 13.7, 40.0, 55.0, 100.0])
