@@ -30,7 +30,7 @@ export default function DeviceCard({ device }: { device: LiveDevice }) {
   const { latest, getBuffer } = useLive()
   const live = latest[device.device_id]
   const calibration = useCalibrationState(
-    device.device_id, device.online, live?.flags, device.lastSignalMs,
+    device.device_id, device.online, live?.flags, device.lastSignalMs, live?.cal,
   )
 
   const forecasts = useQuery({

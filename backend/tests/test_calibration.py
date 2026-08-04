@@ -59,6 +59,62 @@ def _sess(state):
 
 
 # =============================================================================
+# The stand-still countdown (`raw.cal_left` -> the tick's `cal` field).
+# =============================================================================
+
+def _cal_left(metrics):
+    v = metrics.raw.get("cal_left", float("nan"))
+    return None if v != v else v          # NaN -> None
+
+
+def test_countdown_starts_at_the_full_wait_and_falls_to_zero():
+    """The badge counts DOWN, so the value must start at ~13 s (3 s discard +
+    10 s window), decrease monotonically while the athlete holds still, and
+    become None the moment there is nothing left to calibrate."""
+    res, state = _drive(lambda k: _still(k), 60 * 20)
+
+    first = _cal_left(res[0])
+    assert first is not None and 12.5 <= first <= 13.5, (
+        f"countdown should open at the full 13 s wait, got {first}"
+    )
+    # monotone while still (allow the float dust of a 1/60 s step)
+    seq = [_cal_left(m) for m in res[: 60 * 13]]
+    seq = [v for v in seq if v is not None]
+    assert all(b <= a + 1e-6 for a, b in zip(seq, seq[1:])), "must not go up while still"
+    assert min(seq) < 0.2, "should reach ~0 as the window closes"
+
+    assert all(src == "measured" for src in _sess(state).cal_src)
+    assert _cal_left(res[-1]) is None, "nothing left to calibrate -> no countdown"
+
+
+def test_countdown_rises_again_when_the_athlete_moves():
+    """Moving really does cost the accumulated stillness, so the honest
+    countdown goes back up rather than pretending progress was kept."""
+    res, state = _drive(lambda k: _still(k), 60 * 8)          # part-way in
+    part = _cal_left(res[-1])
+    assert part is not None and part < 12.0
+
+    res2, _ = _drive(lambda k: _moving(k), 30, state=state, t0=8.0)
+    after = _cal_left(res2[-1])
+    assert after is not None and after > part, (
+        "a reset window must show MORE time remaining, not less"
+    )
+
+
+def test_countdown_ignores_a_limb_that_never_streams():
+    """A sensor that is not worn cannot be calibrated by standing still. If it
+    pinned the countdown the athlete would be told to keep waiting forever —
+    the sensor dots and `degraded_sensors` report that case instead."""
+    live = ("left_shin", "left_thigh", "right_thigh")
+    res, state = _drive(lambda k: _still(k), 60 * 20, limbs=live)
+    sess = _sess(state)
+    # the unworn limb is still in the session's limb list but never streamed
+    assert _cal_left(res[-1]) is None, (
+        f"countdown pinned by a non-streaming limb: cal_src={sess.cal_src}"
+    )
+
+
+# =============================================================================
 # Still-window detection: what it accepts, and what it must refuse.
 # =============================================================================
 

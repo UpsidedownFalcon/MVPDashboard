@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from datetime import datetime, timezone
 
@@ -31,15 +32,21 @@ RECONNECT_MAX_S = 5.0
 
 
 def tick_to_json(tick: TickInput, metrics: Metrics) -> bytes:
-    """Exactly the §2 schema: {"type","t","dev","m","c","q"}.
+    """Exactly the §2 schema: {"type","t","dev","m","c","q","f","cal"}.
 
     m entries are nullable (§2): m4/m5 are None for the first minute of every
     session, and whenever a leg loses a sensor. round(None, 4) raises TypeError,
     and this runs synchronously inside the ticker task — so an unguarded round()
     here would permanently kill that device's ticker on the very first tick.
+
+    `cal` is seconds of continued stillness before calibration completes, or
+    null when nothing is calibrating. It rides the tick rather than a poll
+    because it is a COUNTDOWN the athlete is watching — anything slower than
+    the tick makes it visibly jump.
     """
     dt = datetime.fromtimestamp(tick.t_server, tz=timezone.utc)
     iso = dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
+    cal_left = metrics.raw.get("cal_left") if metrics.raw else None
     return orjson.dumps({
         "type": "tick",
         "t": iso,
@@ -48,6 +55,11 @@ def tick_to_json(tick: TickInput, metrics: Metrics) -> bytes:
         "c": round(metrics.composite, 2),
         "q": round(tick.quality, 3),
         "f": sorted(metrics.flags) or None,
+        "cal": (
+            round(cal_left, 1)
+            if cal_left is not None and math.isfinite(cal_left)
+            else None
+        ),
     })
 
 

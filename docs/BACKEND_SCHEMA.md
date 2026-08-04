@@ -130,9 +130,20 @@ resolution than `metrics_1m`, query `metrics` directly for windows < 5 min (the
                                           // m5 is SIGNED -100..100 (see below)
   "c":   45.3,                             // composite 0..100
   "q":   0.98,                             // quality 0..1
-  "f":   ["unvalidated", "warming_up"]     // active biomech flags, sorted; null when none
+  "f":   ["unvalidated", "warming_up"],    // active biomech flags, sorted; null when none
+  "cal": 8.4                               // stand-still countdown, seconds; null when idle
 }
 ```
+
+**`cal`** is the seconds of continued stillness still required before every *streaming*
+sensor is calibrated, or `null` when nothing is calibrating. It rides the 60Hz tick rather
+than a poll because it is a **countdown the athlete is watching** — anything slower makes it
+visibly jump. It is derived from the real per-sensor accumulators (`cal_age`, `cal_dur`), so
+it **goes back up when the athlete moves**: the 10 s window must be continuous, and a reset
+genuinely costs them the progress. Limbs that have never produced a sample are excluded — an
+unworn sensor cannot be calibrated by standing still, and letting it pin the countdown would
+tell the athlete to wait for something that is never going to happen (`degraded_sensors` and
+the sensor dots report that case instead).
 
 **`f` (flags)** carries the sorted `Metrics.flags` set from the biomech model, or `null`
 when no flag is active. The vocabulary is fixed by [biomech/SPEC.md](biomech/SPEC.md) §10:

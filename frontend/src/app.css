@@ -653,10 +653,25 @@
   font-variant-numeric: tabular-nums;
 }
 
-.calibrating-spin {
+/* a slow breathing dot: "hold still", not "busy" */
+.calibrating-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex: none;
+  animation: calibrating-flash 1.8s ease-in-out infinite;
+}
+
+.calibrated {
+  color: var(--status-good);
+  border-color: color-mix(in srgb, var(--status-good) 40%, transparent);
+  background: color-mix(in srgb, var(--status-good) 10%, transparent);
+}
+
+.calibrated svg {
   width: 12px;
   height: 12px;
-  animation: calibrating-rotate 1.6s linear infinite;
 }
 
 @keyframes calibrating-flash {
@@ -677,7 +692,7 @@
 
 @media (prefers-reduced-motion: reduce) {
   .calibrating,
-  .calibrating-spin,
+  .calibrating-dot,
   .battery-critical .battery-fill {
     animation: none;
   }

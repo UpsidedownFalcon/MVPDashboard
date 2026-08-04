@@ -243,25 +243,36 @@ Chips always pair icon + label — color never carries meaning alone.
 
 ### 6a. Calibration badge — SET
 
-A pulsing **"Calibrating · M:SS"** chip appears on the overview card and the detail header
-while a freshly-online device is still settling (any of `uncalibrated` / `warming_up` on the
-tick). It shows **elapsed time, counting up**.
+A **"Stand still · Ns" countdown** chip appears on the overview card and the detail header
+while a device is calibrating, then a brief verdict — **"Calibrated ✓"** or
+**"Calibration failed"** — for ~8 s. Its whole job is to tell the athlete *how much longer to
+stand still*, and whether it worked.
 
-⚠️ **It is deliberately NOT a countdown or a progress bar.** Calibration has no knowable
-duration (biomech SPEC §3.8): it discards the first 3 s, then needs **10 s of *continuous*
-stillness**, resets to zero on any movement or dropout, and **never times out** — it just
-keeps seeking. The per-sensor accumulators exist in `_Sess` but are published nowhere, and
-even if they were, a bar that visibly resets every time the athlete shifts would mislead more
-than it informs. Counting up is the honest form.
+It is driven **only** by the tick's `cal` field (BACKEND_SCHEMA §2) and `cal_failed`. The
+countdown comes from the real per-sensor stillness accumulators, so it **goes back up if the
+athlete moves** — the 10 s window has to be continuous, and pretending otherwise would have
+the number hit zero while calibration silently restarted.
 
-**Shown only at the start of a session** (user decision 2026-08-04): once a device settles,
-the badge latches off for the rest of that session, so `m4`'s later per-intensity-band
-re-warms do not re-trigger it. The latch resets only on a **real absence** — silent longer
-than `OFFLINE_HIDE_MS` (10 s), i.e. the device has dropped out of the UI entirely and its
-return counts as a new session. It deliberately does **not** key on the `online` flag, which
-flips after ~2 s: a brief packet dropout mid-session would otherwise re-arm the badge and
-restart the count, which is exactly what "only at the very start" exists to prevent.
-Frontend-only — no backend involvement.
+🚩 **It must NEVER be driven by `warming_up`.** That flag is `m4`/`m5`'s warm-up, which needs
+**60 s / 30 s of MOVEMENT** to clear, while calibration needs **stillness** — the two are
+mutually exclusive, so a badge watching both can never stop while the athlete stands still.
+That was a real shipped bug: an owner stood still for over 30 s and the badge span forever.
+`carried_over` is excluded for a different reason — it means "running last session's values",
+which is a state, not a wait, and it has its own info chip.
+
+**Shown only at the start of a session** (user decision 2026-08-04). The verdict latch resets
+only on a **real absence** — silent longer than `OFFLINE_HIDE_MS` (10 s), i.e. the device has
+dropped out of the UI entirely and its return counts as a new session. It deliberately does
+**not** key on the `online` flag, which flips after ~2 s: a brief packet dropout mid-session
+would otherwise re-arm the badge and restart the count.
+
+**Also worth knowing** (from the backend investigation, 2026-08-04): calibration itself is
+sound — a carried-over device *does* keep seeking a still window and upgrades to `measured`,
+and the gravity guard runs on the **calibrated** magnitude, so there is no chicken-and-egg
+trap for a device with history. But `carried_over` is an **any-limb** flag and a single 0.25 s
+gap or one over-threshold tick wipes that limb's accumulated stillness, so on a lossy link
+(or with one unworn sensor) it can persist far longer than the nominal 13 s. The countdown
+makes that visible rather than mysterious: it stalls or climbs instead of finishing.
 
 ### 6b. Battery — SET
 

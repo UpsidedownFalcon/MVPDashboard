@@ -35,6 +35,9 @@ export interface DeviceLatest {
   c: number
   q: number
   flags: string[]
+  /** seconds of stillness still needed to finish calibrating, or null when
+   *  nothing is calibrating (BACKEND_SCHEMA §2 `cal`). */
+  cal: number | null
 }
 
 export interface StatusEvent {
@@ -62,6 +65,7 @@ interface TickMsg {
   c: number
   q: number
   f?: string[] | null
+  cal?: number | null
 }
 
 interface StatusMsg {
@@ -79,6 +83,7 @@ export function LiveProvider({ children }: { children: ReactNode }) {
   const buffers = useRef<Record<string, LiveData>>({})
   const flags = useRef<Record<string, string[]>>({})
   const quality = useRef<Record<string, number>>({})
+  const calLeft = useRef<Record<string, number | null>>({})
   const backfilled = useRef<Set<string>>(new Set())
   const paused = useRef(false)
   const [conn, setConn] = useState<ConnState>('reconnecting')
@@ -162,6 +167,7 @@ export function LiveProvider({ children }: { children: ReactNode }) {
         if (msg.type !== 'tick') return
         flags.current[msg.dev] = msg.f ?? []
         quality.current[msg.dev] = msg.q
+        calLeft.current[msg.dev] = msg.cal ?? null
         if (!backfilled.current.has(msg.dev)) {
           backfilled.current.add(msg.dev)
           void backfill(msg.dev)
@@ -200,6 +206,7 @@ export function LiveProvider({ children }: { children: ReactNode }) {
           c: (buf[6] as number[])[n - 1],
           q: quality.current[dev] ?? 1,
           flags: flags.current[dev] ?? [],
+          cal: calLeft.current[dev] ?? null,
         }
       }
       setLatest(snap)

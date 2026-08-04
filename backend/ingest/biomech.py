@@ -871,6 +871,36 @@ def _still_window_update(sess: _Sess, limbs: tuple[str, ...], counts: list[int],
             sess.finish_calibration(i, limb)
 
 
+def calibration_seconds_left(sess, limbs: tuple[str, ...]) -> float | None:
+    """Seconds of continued stillness before EVERY streaming sensor is measured,
+    or None when there is nothing left to calibrate.
+
+    This is what the UI counts down: the athlete is being asked to stand still,
+    so they need a number that means "how much longer". It is the MAX across
+    sensors, because the device is not calibrated until the slowest one is, and
+    it RISES again when the window resets -- which is honest, since moving
+    genuinely costs them the accumulated stillness.
+
+    Limbs that have never produced a sample (`cal_age == 0`) are excluded. A
+    sensor that is not worn or has a flat battery cannot be calibrated by
+    standing still, and letting it pin the countdown forever would tell the
+    athlete to keep waiting for something that is never going to happen; the
+    sensor dots and `degraded_sensors` are what report that case.
+    """
+    worst: float | None = None
+    for i in range(len(limbs)):
+        if sess.cal_src[i] == "measured":
+            continue
+        if sess.cal_age[i] <= 0.0:
+            continue                      # never streamed: not a waiting game
+        discard_left = max(0.0, CAL_DISCARD_S - float(sess.cal_age[i]))
+        window_left = max(0.0, CAL_WINDOW_S - float(sess.cal_dur[i]))
+        left = discard_left + window_left
+        if worst is None or left > worst:
+            worst = left
+    return worst
+
+
 def calibrate(frames: dict[str, np.ndarray]) -> dict[str, Calibration] | None:
     """Per-sensor gain/bias/noise from an explicit still-stand window.
 
@@ -1156,8 +1186,10 @@ def compute(
     # ticker keeps emitting throughout: the transition shows up in `flags`, so
     # the UI can mark the step change instead of presenting it as a change in
     # the athlete.
+    cal_left: float | None = None
     if not all(src == "measured" for src in sess.cal_src):
         _still_window_update(sess, limbs, counts, a_raw, w_dps, wmag, step)
+        cal_left = calibration_seconds_left(sess, limbs)
 
     flags: set[str] = set()
     # `saturated` now means exactly "m1/m2 are LOWER BOUNDS, render them as >=",
@@ -1525,6 +1557,12 @@ def compute(
             "m1_lo": m1_lo,
             "demand": demand,
             "degradation": degradation,
+            # Seconds of continued stillness before every streaming sensor is
+            # measured; NaN when nothing is calibrating. The UI counts this
+            # down -- it is the only honest way to tell an athlete how long to
+            # keep standing still, and it RISES again if they move, because
+            # moving really does cost them the accumulated window.
+            "cal_left": cal_left if cal_left is not None else float("nan"),
         },
     )
     sess.prev = metrics

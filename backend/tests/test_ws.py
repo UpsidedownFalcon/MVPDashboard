@@ -146,7 +146,7 @@ def test_ws_throughput_and_schema(app_client: TestClient) -> None:
 
     # schema: exactly the BACKEND_SCHEMA §2 fields, as the real producer emits them
     assert first is not None
-    assert set(first) == {"type", "t", "dev", "m", "c", "q", "f"}
+    assert set(first) == {"type", "t", "dev", "m", "c", "q", "f", "cal"}
     assert isinstance(first["m"], list) and len(first["m"]) == 5
     # 0..100, not the pre-SPEC stub's 0..1; entries may be null (§2)
     for v in first["m"]:
@@ -155,6 +155,9 @@ def test_ws_throughput_and_schema(app_client: TestClient) -> None:
     assert 0.0 <= first["q"] <= 1.0
     assert first["t"].endswith("Z")
     assert first["f"] is None or set(first["f"]) <= FLAG_VOCABULARY
+    # `cal` is the stand-still countdown: seconds remaining, or null when
+    # nothing is calibrating. Never negative — the UI renders it verbatim.
+    assert first["cal"] is None or first["cal"] >= 0.0
 
     for dev, n in counts.items():
         assert n / DURATION_S >= 55.0, f"device {dev}: only {n / DURATION_S:.1f} msg/s"
