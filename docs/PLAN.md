@@ -15,6 +15,11 @@ historical rolling windows, regression-based future predictions of the composite
 and rules-based insights, behind a login with preset users.
 Everything favors simplicity, stubs with stable interfaces, and configuration over code.
 
+> **STATUS 2026-08-03: all three stages are built and deployed.** The stage list below is the
+> plan of record, now history rather than forecast — the real biomech, the VPS deployment with
+> persistence/forecasts/insights, and the designed product frontend with login are all live.
+> The only remaining stage-3 item is the S3-T08 acceptance run.
+
 **Build order (revised 2026-08-02 — user-mandated stages):**
 1. **Stage 1 — local only:** real biomech model (5 primitives + 1 composite) on live
    real-time data; tested locally with simulator + LAN wearables + a minimal debug
@@ -51,7 +56,8 @@ Everything favors simplicity, stubs with stable interfaces, and configuration ov
 
 ## Architecture (SET IN STONE)
 
-Five containers via Docker Compose (identical locally on Docker Desktop and on the VPS):
+Five runtime containers via Docker Compose, identical locally and on the VPS (plus two
+`debug`-profile socat shims that expose redis/postgres on 127.0.0.1 for local poking):
 
 ```
 Wearables ──UDP :5005──▶ ┌─ ingest (Python #1) ───────────────────────────┐

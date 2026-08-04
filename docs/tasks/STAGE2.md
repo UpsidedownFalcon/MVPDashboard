@@ -6,6 +6,12 @@
 > Required reading: [../PLAN.md](../PLAN.md), [../TRD.md](../TRD.md) §§1,5–8,
 > [../BACKEND_SCHEMA.md](../BACKEND_SCHEMA.md) (all), [../APPFLOW.md](../APPFLOW.md) §2.
 > Precondition: stage-1 exit signed off (S1-T15).
+>
+> ⚠️ **HISTORICAL — stage 2 is complete and partly superseded.** Auth is now enforced on every
+> route and the WS (S3-T05), the crude UI has been deleted (S3-T07), and the predict/insight
+> sections below describe a linreg stub and 3 starter rules that have since been replaced by
+> `trend-ols-1` (+ bootstrap) and an 8-rule catalogue. Where this file disagrees with the code
+> or [../ANALYTICS.md](../ANALYTICS.md), those win.
 
 ---
 
@@ -100,6 +106,9 @@ Steps:
    interface**. Stub implementation: numpy `polyfit(deg=1)` on (minutes_from_start,
    composite avg from `metrics_1m`); `pred = clip(intercept + slope·(t_end+h))`;
    `ci = ±1.96·residual_std·sqrt(1 + h/train_span)`. `model_version='linreg-stub-1'`.
+   **Superseded:** shipped as `trend-ols-1` with a correct t-based OLS prediction
+   interval (the ±1.96 form was ~38% too narrow), plus `trend-ols-boot-1` for the
+   first few minutes. `fit()`'s signature is unchanged.
    *(Real model: dedicated session later — only this function changes.)*
 2. Job loop in api lifespan: every `PREDICT_INTERVAL_S`, per device with ≥10
    buckets in `PREDICT_TRAIN_WINDOW`: fit → INSERT one `forecasts` row per horizon
@@ -244,7 +253,7 @@ Steps:
    | `EXPECTED_INPUT_HZ` | **640** | Measured device rate. Must be present explicitly; an omitted key falls back to the code default and depresses `quality` ~6%, which trips the `data_quality` insight for no reason. |
    | `DOMAIN` | `dash.<domain>` | `.env.example` ships `dash.example.com`; Caddy will fail/rate-limit ACME against it. |
    | `POSTGRES_PASSWORD`, `JWT_SECRET` | `openssl rand -hex 32` | Both ship as `changeme`. |
-   | `SEED_USERS` | real credentials | Ships as `trainer:changeme`. Unused until stage 3, but this box is public. |
+   | `SEED_USERS` | real credentials | Ships as `trainer:changeme`. **Now the only way into the dashboard** — re-seeded by the api entrypoint on every start. |
    | windows / horizons | leave at test values | User flips them when they want production durations. |
 
    ⚠️ **Start on a fresh `db_data` volume. Never seed or restore from the local dev
@@ -262,8 +271,10 @@ Steps:
 
    Judge ingest by **`/api/health`'s per-sensor `rate_hz`**, not `docker compose ps`:
    ingest has no healthcheck, so "Up" says nothing about whether packets are
-   arriving. Expect the first forecast at **~10–15 min**, not 10 —
-   `PREDICT_INTERVAL_S=300` plus the 10 one-minute buckets `predict.py` requires.
+   arriving. **Superseded:** the bootstrap path (sub-minute buckets off the raw
+   hypertable) now puts the first forecast at **~2.5–3.5 min**, and
+   `PREDICT_INTERVAL_S` is 60. *(Originally ~10–15 min: `PREDICT_INTERVAL_S=300`
+   plus the 10 one-minute buckets the steady path requires.)*
    Note the simulator's own defaults are now `--rate 640` and
    `--target 127.0.0.1:5010`, so always pass `--target` explicitly here.
 4. Resilience: `reboot` the VPS → stack self-heals (`restart: unless-stopped`);

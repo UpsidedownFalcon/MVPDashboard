@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | Approved. Delivered in 3 stages (see §7) — feature set unchanged, order staged. |
+| Status | Approved and **delivered** — all 3 stages built and deployed 2026-08-03 (see §7). The stage table is a record of what shipped, not a forecast; F1–F9 are live and the F1–F10 acceptance run (S3-T08) is the one open item. |
 | Owner | bhavy@hippos.life |
 | Date | 2026-08-02 |
 | Related | [PLAN.md](PLAN.md) · [TRD.md](TRD.md) · [UIUX.md](UIUX.md) · [APPFLOW.md](APPFLOW.md) |

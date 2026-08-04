@@ -54,12 +54,16 @@ This diagram is the **end state**; components turn on per stage
 | redis, ingest | ✔ (real biomech is stage 1's goal) | ✔ | ✔ |
 | api | minimal: WS fan-out + `/debug` viewer page | + writer, REST, predict/insight jobs | + auth on every route |
 | db (TimescaleDB) | — | ✔ | ✔ |
-| caddy | — (direct `localhost:8000`) | ✔ (TLS, serves crude UI) | ✔ (serves product UI) |
-| frontend | `/debug` page only | crude disposable AI-generated UI | designed product UI + login |
-| auth | none | **none — fully public temporarily (accepted risk)** | JWT cookie enforced |
+| caddy | — (direct `localhost:8000`) | ✔ (TLS, served the crude UI) | ✔ **shipped** — serves the product UI |
+| frontend | `/debug` page only | crude disposable AI-generated UI *(deleted)* | ✔ **shipped** — designed product UI + login |
+| auth | none | none — was fully public temporarily (accepted risk) | ✔ **shipped** — JWT cookie enforced everywhere |
+
+> **Status 2026-08-03: all three stages are built and deployed.** The stage-1 and stage-2 columns
+> are history, not current state — auth is enforced on every route and the WS, and the crude UI has
+> been deleted. The only stage-3 item still open is the S3-T08 acceptance run.
 
 Wearables in stage 1 target the dev machine's LAN IP `:5005/udp`; from stage 2 the
-VPS IP. Nothing except the stage-2 crude UI is throwaway.
+VPS IP. Nothing except the stage-2 crude UI was throwaway, and it has been deleted.
 
 ## 2. Runtime & stack — SET IN STONE
 
@@ -146,12 +150,22 @@ assumes the exact rate: it measures per-sensor rate live and computes quality ag
      gravity-free and rotation-invariant *identically*, from measured accel+gyro only
      (SPEC §3.4); this requires accel and gyro to stay synchronised — they share one packet.
    - **Primitives:** `m1` Impact (peak dynamic accel), `m2` Loading Rate (exact linear jerk),
-     `m3` Accumulated Load (power-law-weighted decaying dose, exponent 3), `m4` Movement
-     Control (**|drift|** of shank→thigh shock transmission vs. session baseline —
-     direction-agnostic, as the literature does not fix the sign), `m5` L/R Balance (weighted
-     Universal Symmetry Index of accumulated load, full scale 18%). `composite` =
-     load-vs-capacity injury risk.
-   - **All six outputs are 0–100**, not 0–1. Log-scaled for `m1..m3`, linear for `m4`,`m5`.
+     `m3` Accumulated Load (power-law-weighted decaying dose, exponent 3, applied to the
+     **physical load ratio** — dose-minutes against a hard-running reference — and split into
+     **two decay pools**: 15 min for easy work, 90 min for hard), `m4` Movement Control
+     (**tremor index** since 2026-08-03: the 4–12 Hz share of accel power vs. 0.5–20 Hz,
+     relative to this athlete's own fresh baseline **at the same movement intensity**;
+     **directional** — more tremor than fresh is a loss of control, less scores 0 — and
+     available on **any single streaming limb**, not a matched shank/thigh pair), `m5` L/R
+     Balance (weighted Universal Symmetry Index of accumulated load, full scale 18%,
+     **signed**). `composite` = load-vs-capacity injury risk: `demand/capacity` raised to
+     `ACUTE_EXPONENT = 3.5`, where `capacity = 100 − 55·degradation/100` (floors at 45) and
+     `degradation` is a renormalised blend of `m3`/`m4`/`m5`. **There is no dose floor** —
+     accumulated load reduces capacity rather than adding a baseline, so an athlete at rest
+     reads 0 whatever their dose, and the same movement reads higher when depleted (SPEC §6.1a).
+   - **`m1..m4` and `composite` are 0–100**, not 0–1. Log-scaled for `m1..m3`, linear for `m4`.
+     **`m5` is SIGNED, −100..+100** (+ = left-dominant, − = right); the magnitude is what a
+     severity consumer uses, the sign is a within-session readout of which side carries more.
    - **Low-pass cutoff is 75 Hz, not the stale model's 50 Hz:** 50 Hz retains 97% of peak
      acceleration but only 36–75% of peak jerk (SPEC §3.6).
    - **⚠️ Claims limits (SPEC §2):** these are surrogates for *external impact loading rate*,
@@ -160,8 +174,10 @@ assumes the exact rate: it measures per-sensor rate live and computes quality ag
      false. `composite` is a monitoring/triage aid, not a prediction — UI copy must say so.
    - **🚩 Hardware flag:** ±16 g will clip on the **shank during running/jumping** (published
      resultant peaks 20–27 g; literature recommends ≥±32 g). Fine for thigh and for all
-     strength training. Ingest counts saturation and suppresses `m1`/`m2` above 2.6% saturated
-     samples rather than reporting a truncated peak.
+     strength training. Ingest counts saturation and, above 2.6% saturated samples, **flags
+     `m1`/`m2` as LOWER BOUNDS rather than suppressing them** (reversed 2026-08-03: suppressing
+     removed Impact and Loading Rate on ~2% of ticks at 27 g, which is exactly when they matter).
+     They stay monotonic, so ordering is safe; the UI renders them as "≥ x".
    - **Sample context:** needs **1 s of trailing history** per limb, not just the ~10 newest
      samples — a single tick underestimates peak acceleration by ~2.3×. Stored as **60
      per-tick float32 summaries**, not 600 raw samples (~3 KB/device total). Raw frames are
@@ -251,7 +267,10 @@ numpy releases the GIL. Escape hatch if the real biomech is heavy: per-device
 - **Auth (activated in stage 3):** bcrypt (passlib) password hashes; JWT (HS256,
   `JWT_SECRET`) in an httpOnly/Secure/SameSite=Lax cookie, `JWT_EXPIRE_HOURS`
   (default 24). Cookie authenticates REST and the WS handshake. Users seeded by
-  `seed_users.py` from env. Stages 1–2 run all routes unauthenticated (§1.1).
+  `seed_users.py` from env, run by the api entrypoint on every start. Stages 1–2 *ran* all routes
+  unauthenticated; **from stage 3 the only open routes are `POST /api/auth/login`,
+  `POST /api/auth/logout` and `GET /api/health/live`** — everything else, including `/debug` and
+  the WS handshake, requires the cookie. The api **refuses to start without `JWT_SECRET`**.
 - **Jobs (asyncio loops in the api process):**
   - *predict* every `PREDICT_INTERVAL_S` (default 300): per device, fit on recent
     `metrics_1m` composite over `PREDICT_TRAIN_WINDOW`; write one row per horizon in
@@ -297,9 +316,15 @@ Everything that connects components lives in **one root `.env`** (template:
 | `SESSION_GAP_S` | 300 | gap after which biomech resets accumulated load/baselines (biomech SPEC §7); deliberately ≫ `OFFLINE_AFTER_S` |
 | `PAST_WINDOWS` | `5m,30m,2h` | **3 durations. Deployment: `1h,1d,7d` recommended** (1 h ≈ the session scale at 1.3 dose half-lives, 1 d the day, 7 d a training week; 3 d is neither) — [ANALYTICS.md](ANALYTICS.md) §7. Provisional: no multi-day data exists yet |
 | `FUTURE_HORIZONS` | `10m,30m,1h` | ⚠️ **Keep these in production; the earlier `1d,3d,1w` is struck.** Accumulated dose has a 45-min half-life, so by 1 day it has decayed to ~10⁻⁴ and the "forecast" is only "returns to baseline"; the acute term is not forecastable beyond persistence at all. Forecasting this composite a week ahead is not defensible under biomech SPEC §2 — [ANALYTICS.md](ANALYTICS.md) §7 |
-| `PREDICT_INTERVAL_S` / `PREDICT_TRAIN_WINDOW` | 300 / 2h | |
+| `PREDICT_INTERVAL_S` / `PREDICT_TRAIN_WINDOW` | **60** / 2h | |
+| `PREDICT_BOOTSTRAP_BUCKET_S` | 15 | sub-minute bucket size for the bootstrap forecast (reads the raw hypertable before `metrics_1m` can serve the device) |
+| `PREDICT_BOOTSTRAP_WINDOW` | 15m | how far back the bootstrap reads |
+| `PREDICT_BOOTSTRAP_HORIZONS` | `1m,2m,5m` | early horizons, capped by the observed span; `model_version='trend-ols-boot-1'` and the response carries `provisional: true` |
+| `INSIGHT_LIVE_WINDOW` | 30s | the window every rule means by **now**, read from the raw 60Hz `metrics` table (never `metrics_1m`, which is materialized-only and missing its newest 1–2 min) |
+| `INSIGHT_HOLD_S` | 150 | how long an action stays on `/api/insights/current`. **MUST exceed `INSIGHT_COOLDOWN_S`** — at equality a still-true condition drops off for one tick before it re-fires, which reads as flicker |
+| `INSIGHT_MAX_ACTIONS` | 3 | hard cap on simultaneous actions |
 | `INSIGHT_WARN_THRESHOLD` / `INSIGHT_ALERT_THRESHOLD` | 85 / 92 | composite 0–100. Raised from 70/85 after the SPEC §6.1 rescale: a measured hard interval session reads ~77, so 70 warned during ordinary hard training. At 85 acute effort alone does not fire — accumulated dose is what raises the flag |
-| `INSIGHT_INTERVAL_S` / `INSIGHT_COOLDOWN_S` | 60 / 600 | |
+| `INSIGHT_INTERVAL_S` / `INSIGHT_COOLDOWN_S` | **15 / 120** | tuned as a set with `INSIGHT_LIVE_WINDOW` and `INSIGHT_HOLD_S` — see ANALYTICS §4.6 |
 | `METRICS_RETENTION` | 30d | hypertable retention |
 | `MAX_DEVICES` | 5 | hard cap on concurrently tracked devices; a 6th while all 5 are live is dropped and counted in `ingest:stats/global:dev_dropped`, never merged into another device's stream (biomech SPEC §7.2). Raising it needs an ingest restart |
 | `POSTGRES_HOST` / `POSTGRES_PORT` | db / 5432 | expanded from the `POSTGRES_*` row above, which listed no per-key defaults |
@@ -331,10 +356,12 @@ Duration syntax everywhere: `<int><s|m|h|d|w>`.
 - UDP port is open to the world: accepted MVP risk. Mitigations: strict length/sync/CRC
   validation, drop+count anything malformed, all values parameterized into SQL.
   *Post-MVP (TBD): truncated per-packet HMAC with a shared key; device allow-list.*
-- Dashboard: **stage 2 is fully public temporarily (user-accepted risk** — no auth
-  until stage 3; revisit immediately if identifiable trainee data appears before then).
-  From stage 3: HTTPS only, httpOnly cookies, bcrypt, no signup surface, rate-limited
-  login, all routes + WS authenticated.
+- Dashboard — **current posture, shipped 2026-08-03**: HTTPS only, httpOnly/Secure/SameSite=Lax
+  session cookie, bcrypt password hashes (bcrypt used directly, not passlib), no signup surface,
+  rate-limited login (5 fails/min/IP → 429), **all routes + `/debug` + the WS authenticated**
+  (WS closes 4401 on a missing or expired cookie, re-checked every 60 s mid-connection). The api
+  refuses to boot without `JWT_SECRET`. *(Stage 2 ran fully public as an accepted interim risk;
+  that window is closed.)*
 - Secrets only in `.env` (never committed; `.env.example` has placeholders).
 
 ## 10. Observability — SET IN STONE
@@ -355,10 +382,10 @@ required 21 read exactly like "device not connected" (§3).
 | Item | Where decided | Placeholder until then |
 |---|---|---|
 | ~~5 primitives + composite definitions, units, calibration~~ | **DECIDED** — [biomech/SPEC.md](biomech/SPEC.md) (S1-T14) | — implemented in S1-T15 |
-| Asymmetry full-scale threshold (`SI_FULL_SCALE`) + reference-bound calibration | biomech SPEC §13 open items | 15%; provisional bounds |
-| ~~Prediction model + CI method~~ | **DECIDED** — [ANALYTICS.md](ANALYTICS.md) §2, `model_version='dose-scenario-1'` | — two-component dose+activity model with a scenario band |
-| Insight rule catalogue + thresholds | insights session (stage 2+) | 3 starter rules. ⚠️ `composite_high`'s 85/92 are **miscalibrated**: chosen against *instantaneous* composite but applied to a window **mean** ([ANALYTICS.md](ANALYTICS.md) §4). Re-calibration is gated on data that does not exist |
+| Asymmetry full-scale threshold (`M5_FULL_SCALE_USI`) + reference-bound calibration | biomech SPEC §13 open items | **18%** (literature-derived, Delgado-García 2025); reference bounds still provisional |
+| ~~Prediction model + CI method~~ | **DECIDED** — [ANALYTICS.md](ANALYTICS.md) §2, `model_version='trend-ols-1'` (+ `trend-ols-boot-1` for the first ~2.5–3.5 min, response flagged `provisional`) | — OLS trend with a genuine two-sided **prediction interval**. The earlier `dose-scenario-1` band was retired with the dose floor: under the current composite "if they stop now" is trivially 0 |
+| ~~Insight rule catalogue~~ | **DECIDED** — [ANALYTICS.md](ANALYTICS.md) §4, **8 rules** grouped onto ≤3 actions | — thresholds still open: ⚠️ `composite_high`'s 85/92 were chosen against *instantaneous* composite readings. The `INSIGHT_LIVE_WINDOW` (30 s off the raw table) was added to narrow that mismatch, but re-calibration is still gated on data that does not exist |
 | Window statistic choice (mean vs peak/percentile) | needs a `metrics_1m` rebuild | ⚠️ m1/m2 are peak-hold extremes reported as **means**, m3 is an accumulator reported as a **mean** ([ANALYTICS.md](ANALYTICS.md) §5). Free to fix now (712 rows), impossible later for old buckets |
-| Final UI design | **stage 3** frontend session (`mockup/`) | stage-2 crude disposable UI |
+| ~~Final UI design~~ | **DECIDED 2026-08-03** — [UIUX.md](UIUX.md) is the binding spec (design session S3-T01, from `mockup/`) | — shipped and deployed |
 | Production window/horizon durations | config flip at deploy | test durations |
 | Per-packet auth (HMAC) | post-MVP | open UDP + validation |

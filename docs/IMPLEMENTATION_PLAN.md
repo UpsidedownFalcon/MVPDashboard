@@ -19,7 +19,7 @@ Anti-rework rules (apply to every task):
   **when components turn on** (TRD §1.1 table).
 - Stable interfaces ([BACKEND_SCHEMA.md](BACKEND_SCHEMA.md) §5) and config keys
   ([TRD.md](TRD.md) §7) may only change together with a doc update in the same task.
-- Only the stage-2 crude UI is throwaway. Metric count is fixed: m1..m5 + composite.
+- Only the stage-2 crude UI was throwaway, and it has been deleted (S3-T07). Metric count is fixed: m1..m5 + composite.
 
 ## How to brief an agent on a task
 

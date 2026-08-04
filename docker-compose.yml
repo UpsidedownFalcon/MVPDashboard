@@ -1,5 +1,6 @@
-# Stage-2 stack: redis + ingest + api + db (caddy still profiled off until
-# S2-T08). All wiring comes from the root .env.
+# Full stack: redis + ingest + api + db + caddy, all default-on. The only
+# profile is `debug`, which adds socat shims exposing redis/postgres on
+# 127.0.0.1 for local poking. All wiring comes from the root .env.
 services:
   redis:
     image: redis:7-alpine
@@ -83,8 +84,8 @@ services:
       - db
 
 
-  # caddy image = frontend/Dockerfile: node build stage bakes the crude UI
-  # into /srv of a caddy:2 image (Caddyfile-simplest option from S2-T08).
+  # caddy image = frontend/Dockerfile: node build stage bakes the stage-3
+  # product UI into /srv of a caddy:2 image.
   caddy:
     build: ./frontend
     environment:

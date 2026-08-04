@@ -209,20 +209,32 @@ def test_accumulated_load_needs_both_high_and_rising() -> None:
     assert ev["severity"] == "alert"
 
 
-def test_residual_load_reads_the_stop_now_branch() -> None:
-    """Fires on ci_low — where risk settles if the athlete stops NOW. That is
-    decay of load already taken, not a prediction about behaviour."""
+def test_residual_load_reads_the_low_end_of_the_interval() -> None:
+    """Fires on `ci_low` at the furthest horizon — risk stays above the review
+    threshold even at the OPTIMISTIC end of the projection.
+
+    ⚠️ The copy must NOT say "if they stop now". That was exact under
+    `dose-scenario-1`, where `ci_low` was a stop-now counterfactual; under
+    `trend-ols-1` it is the lower bound of a statistical prediction interval,
+    and claiming a behavioural counterfactual the model does not compute is the
+    SPEC §2 failure mode. This asserts the copy stays honest.
+    """
     rule = RULE["residual_load"]
     w = make_windows()
     quiet = [{"horizon": "1h", "pred": 95.0, "ci_low": 40.0, "ci_high": 99.0}]
     assert rule.evaluate(ctx_from(w, forecasts=quiet)) is None, (
-        "a high central projection must NOT fire this rule — only the floor does"
+        "a high central projection must NOT fire this rule — only the low end does"
     )
     loaded = [{"horizon": "10m", "pred": 99.0, "ci_low": 50.0, "ci_high": 99.0},
               {"horizon": "1h", "pred": 99.0, "ci_low": 88.0, "ci_high": 99.0}]
-    ev = rule.evaluate(ctx_from(w, forecasts=loaded))
+    ctx = ctx_from(w, forecasts=loaded)
+    ev = rule.evaluate(ctx)
     assert ev["settles_at"] == pytest.approx(88.0) and ev["horizon"] == "1h"
-    assert "stop" in rule.message(ctx_from(w, forecasts=loaded), ev).lower()
+    for text in (rule.message(ctx, ev), rule.rationale(ctx, ev), rule.reason(ctx, ev)):
+        assert "stop now" not in text.lower(), (
+            "retired dose-scenario-1 semantics: ci_low is no longer a stop-now branch"
+        )
+        assert "88" in text, "the low-end value must be quoted"
 
 
 def test_impact_and_movement_rules_stay_info_and_marked() -> None:

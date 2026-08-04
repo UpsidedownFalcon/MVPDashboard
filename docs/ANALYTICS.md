@@ -155,16 +155,19 @@ and `accumulated_load` combines the dose's past trend with the future residual.
 
 ### 4.3 The rules
 
-| Rule | Severity | Fires on | Time axis | Action |
+Headlines below are the `ACTIONS` catalogue entries (§4.7 is the authoritative table — these two
+must not drift apart again; the previous copy here still carried the pre-2026-08-04 wording).
+
+| Rule | Severity | Fires on | Time axis | Action (`action_id`) |
 |---|---|---|---|---|
-| `load_spike` | warning → alert at 3 sd | composite ≥ 2 sd above own baseline | past + present + future | *Ease off for the rest of this session* |
-| `accumulated_load` | warning → alert | `m3` ≥ 2 sd above own baseline **and** trending up | past + present + future | *Cap this session and protect recovery* |
-| `residual_load` | warning | forecast `ci_low` at the furthest horizon ≥ warn threshold | future | *Schedule recovery before the next session* |
-| `impact_deviation` | info | `m1` or `m2` ≥ 2 sd above own baseline | past + present | *Review landing mechanics* |
-| `movement_quality` | info, `unvalidated` | `m4` or `m5` ≥ 2 sd above own baseline | past + present | *Flag for review at the next check-in* |
-| `composite_high` | warning → alert | live-window mean ≥ configured threshold | present | *Reduce training intensity* |
-| `rising_risk` | warning | mid-window trend up **and** a projection crossing alert | past + future | *Schedule rest before the next block* |
-| `data_quality` | info | live-window quality < 0.8 × own baseline | data health | *Check sensor fit* |
+| `load_spike` | warning → alert at 3 sd | composite ≥ 2 sd above own baseline | past + present + future | *Drop the next block down one level* (`ease_off`) |
+| `accumulated_load` | warning → alert | `m3` ≥ 2 sd above own baseline **and** trending up | past + present + future | *No more hard sets — easy work only* (`cap_session`) |
+| `residual_load` | warning | forecast `ci_low` at the furthest horizon ≥ warn threshold | future | *Leave a longer gap before the next hard block* (`plan_recovery`) |
+| `impact_deviation` | info | `m1` or `m2` ≥ 2 sd above own baseline | past + present | **routes by metric**: m1 → *Lower the landing height or cut the reps* (`lower_landings`); m2 → *Soften the landings — check the surface* (`soften_landings`) |
+| `movement_quality` | info, `unvalidated` | `m4` or `m5` ≥ 2 sd above own baseline | past + present | *Worth a look at the next check-in* (`flag_review`) |
+| `composite_high` | warning → alert | live-window mean ≥ configured threshold | present | *Drop the next block down one level* (`ease_off`) |
+| `rising_risk` | warning | mid-window trend up **and** a projection crossing alert | past + future | *Leave a longer gap before the next hard block* (`plan_recovery`) |
+| `data_quality` | info | live-window quality < 0.8 × own baseline | data health | *Re-seat the straps and check the battery* (`check_sensors`) |
 
 "Own baseline" is always the **longest** configured window; "live window" is `INSIGHT_LIVE_WINDOW`
 (§4.6). Before 2026-08-04 the *now* side was the shortest `PAST_WINDOWS` entry (5 m).
@@ -177,10 +180,15 @@ and `accumulated_load` combines the dose's past trend with the future residual.
 - `accumulated_load` follows Kalkhoven's first-principles model: repetitive loading accumulates
   damage, damage lowers the critical threshold, and injury occurs when load exceeds that
   *declining* threshold. High-and-still-rising is the mechanistically meaningful state.
-- `residual_load` is the one genuinely new capability the `dose-scenario-1` forecast unlocked. It
-  reads `ci_low` — where risk settles **if the athlete stops right now** — which is closed-form
-  decay of load already taken, not a prediction about behaviour. That distinction is what makes
-  it safe to act on under SPEC §2.
+- `residual_load` reads `ci_low` at the furthest horizon. ⚠️ **Its meaning changed when
+  `dose-scenario-1` was retired (§2).** Under that model `ci_low` was a genuine counterfactual —
+  "where risk settles if the athlete stops right now", closed-form decay of load already taken —
+  and that is what made a recovery instruction safe to derive from it under SPEC §2. Under
+  `trend-ols-1` it is the **lower bound of a statistical prediction interval**: estimator
+  uncertainty around a trend, not a stop-now branch. The rule still fires on a defensible
+  signal (projected risk stays above the review threshold even at the optimistic end of the
+  interval), but **copy must not say "even if they stop now"** — that asserts a behavioural
+  counterfactual the current model does not compute.
 - `impact_deviation` is held at `info` deliberately: IMU jerk has never been validated against
   GRF loading rate (SPEC §5.2) and peak tibial acceleration does not track internal tibial load
   (Matijevich 2019, r = −0.29 ± 0.37). They are surrogates for *external* impact loading.

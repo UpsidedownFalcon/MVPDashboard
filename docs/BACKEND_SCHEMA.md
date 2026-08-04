@@ -5,7 +5,13 @@
 | Status | Set in stone for the MVP build. Metric *names* (`m1..m5`, `composite`) are stable column/field IDs (**5 primitives + 1 composite — confirmed**). Their meanings are now **DECIDED** — [biomech/SPEC.md](biomech/SPEC.md) (S1-T14): `m1` Impact, `m2` Loading Rate, `m3` Accumulated Load, `m4` Movement Control, `m5` L/R Balance, `composite` Injury Risk; all **0–100**, nullable except `composite`. Display names live only in the frontend (SPEC §10). Staged activation: §1 DDL + REST routes from stage 2 (`users` table used from stage 3); §2 tick format and §4 Redis contract from stage 1; auth on routes from stage 3 (until then all routes open — TRD §1.1). |
 | Related | [TRD.md](TRD.md) · [APPFLOW.md](APPFLOW.md) |
 
-## 1. Database DDL (TimescaleDB) — `backend/migrations/001_init.sql`
+## 1. Database DDL (TimescaleDB) — current schema (`001_init.sql` + `002` + `003`)
+
+> The block below is the **merged current schema**, not one file: the `insights` table shows the
+> columns added by migrations 002 and 003 (marked inline). Two mechanics are not visible here —
+> `001_init.sql` carries `-- NOTRANSACTION` markers so the continuous-aggregate DDL runs in
+> autocommit (Timescale forbids it inside a transaction), and the runner maintains its own
+> `schema_migrations(filename, applied_at)` bookkeeping table in every database.
 
 ```sql
 CREATE EXTENSION IF NOT EXISTS timescaledb;
@@ -32,8 +38,9 @@ CREATE TABLE devices (
 CREATE TABLE metrics (
     time        TIMESTAMPTZ NOT NULL,            -- server-aligned tick time
     device_id   TEXT        NOT NULL,
-    m1 REAL, m2 REAL, m3 REAL, m4 REAL, m5 REAL, -- primitives (defs TBD)
-    composite   REAL NOT NULL,                   -- risk index (def TBD)
+    m1 REAL, m2 REAL, m3 REAL, m4 REAL, m5 REAL, -- primitives, nullable (SPEC §8);
+                                                 -- m1..m4 are 0-100, m5 is SIGNED -100..100
+    composite   REAL NOT NULL,                   -- injury risk 0-100
     quality     REAL NOT NULL                    -- 0..1 share of expected samples
 );
 SELECT create_hypertable('metrics', 'time', chunk_time_interval => INTERVAL '1 day');
@@ -174,7 +181,8 @@ Status event (WS only, emitted by api on transitions):
 
 ## 3. HTTP API (api service, proxied by Caddy under `/api` and `/ws`)
 
-All routes require the auth cookie except `POST /api/auth/login` and liveness
+All routes require the auth cookie except `POST /api/auth/login`, `POST /api/auth/logout`
+(it only clears the cookie) and liveness
 `GET /api/health/live`. Errors: `{"detail": "..."}` with 4xx/5xx.
 
 | Method & path | Request | Response (200) |
@@ -190,8 +198,9 @@ All routes require the auth cookie except `POST /api/auth/login` and liveness
 | GET `/api/forecasts/latest` | `?device=30` | `{"made_at":ts,"model_version","provisional":bool,"points":[{"horizon":"10m","target_time":ts,"pred","ci_low","ci_high"},…]}` (404-shaped empty if no run yet). **`provisional`** is true while the forecast comes from the bootstrap path (`model_version` `"trend-ols-boot-1"`) — the first ~11 min of a session, fitted to sub-minute buckets off the raw table. The **horizon set is not fixed**: provisional runs publish only horizons no longer than the data observed so far (`1m`/`2m`/`5m` filtered by span), and the configured `FUTURE_HORIZONS` resume once `metrics_1m` can serve the device. Clients MUST read horizons from `points` and never assume a count (docs/ANALYTICS.md §2.1) |
 | GET `/api/insights` | `?device=30&limit=20` (device optional) | `[{"insight_id","created_at","device_id","severity","rule_id","message","context","action":str\|null,"rationale":str\|null,"action_id":str\|null,"reason":str\|null},…]` newest first — the append-only **event log** (`action`/`rationale`: migration 002; `action_id`/`reason`: migration 003, §1) |
 | GET `/api/insights/current` | `?device=30` (**required**) | `{"device_id","generated_at":ts,"hold_s":int,"max_actions":int,"actions":[{"action_id","action","tip":str\|null,"severity","updated_at":ts,"unvalidated":bool,"reasons":[{"rule_id","severity","text","unvalidated":bool,"created_at":ts},…]},…]}` — the **state** view: the advice standing right now, ≤ `INSIGHT_MAX_ACTIONS` (3) actions ordered strongest-severity first, each carrying every reason currently supporting it. `reasons[].text` is one complete short sentence intended to render as a bullet with **no expander**. An action is included while any rule behind it fired within `INSIGHT_HOLD_S`; `unvalidated` is true only when *every* reason comes from `m4`/`m5`. Empty `actions` is a normal state, not an error (docs/ANALYTICS.md §4.6–4.7). **`tip`** is a STATIC coaching cue from the action catalogue — identical every time that action fires and **not** derived from the athlete's data; the UI must render it under a "General cue — not measured" label so it cannot read as a finding. `context`/`rationale` are deliberately **not** on this route: a client needing the evidence joins the event log on `(rule_id, created_at)`, which is exact since both routes ISO-format via the same helper |
-| GET `/api/health` | — | `{"status","db":bool,"redis":bool,"ingest":{per-device/sensor rates, last_seen, drop counters},"api":{"ws_clients","ws_dropped","db_buffer","db_dropped"}}` |
+| GET `/api/health` | — | `{"status","db":bool,"redis":bool,"ingest":{the whole `ingest:stats` hash — §4},"biomech":{device_id: {the `biomech:diag` hash — §4}},"api":{"ws_clients","ws_dropped","db_buffer","db_dropped","rows_written","bad_ticks"},"jobs":{"predict":{"last_run","runs","last_error"},"insights":{…}}}` |
 | GET `/api/health/live` | — | `{"status":"ok"}` (unauthenticated liveness) |
+| GET `/debug` | — | the stage-1 live-viewer HTML page. **Cookie-authed** like everything else — it shows live data |
 | **WS** `/ws/live` | `?devices=30,31` (omit = all) — cookie-authed handshake | server→client stream of `tick` and `status` messages; closes 4401 on auth expiry |
 
 ## 4. Redis contract
@@ -201,9 +210,9 @@ All routes require the auth cookie except `POST /api/auth/login` and liveness
 | `ticks` | pub/sub channel | ingest → api | tick JSON (§2), all devices on one channel |
 | `last_seen:dev:{device_id}` | string (unix ms) | ingest → api | refreshed ≤1s while packets flow |
 | `last_seen:sensor:{dev}:{src}:{sen}` | string (unix ms) | ingest → api | per-sensor liveness (detects one dead leg) |
-| `ingest:stats` | hash, rewritten 1s | ingest → api (`/api/health`) | per-sensor `rate_hz`, counters: `recv, crc_fail, late_drop, buf_drop, ticks_out, sat_count` |
-| `biomech:diag:{device_id}` | hash, rewritten 1s, TTL `2×SESSION_GAP_S` | ingest → api (`/api/health`) | biomech diagnostics (SPEC §10 item 3), all values formatted `%.6g`: `flags` (comma-separated), signed transmission ratio `R`, `R_base`, signed **`usi_pct`** (`m5`'s pre-normalisation USI, in percent), `dose`, `move_t`, `intensity`, `a_int`, `w_int`, `sat_frac`, `m1_lo`, per-tick noise weight `W`, `demand`, `degradation` — for tuning the provisional reference bounds against real trial data |
-| `biomech:state:{device_id}` | **string (JSON), rewritten 1s, TTL `2×SESSION_GAP_S`** | ingest → **ingest** | **Warm-restart snapshot** (~200 B, SPEC §7.4). A single JSON document, *not* a hash — it is written and read whole, so one `SET` beats a multi-field `HSET`. Fields: `v` (schema version, currently `1` — a mismatch is rejected and the session starts fresh), `dose`, `accL`, `accR`, `move_t`, `R_base`, `session_start_t`, `last_tick_t` (both unix seconds), `cal` = `{limb_name: {k, gyro_bias[3], sigma}}` **keyed by limb name, never by slot index** (§7.4), and `cal_src` = `{limb_name: "default"\|"carried"\|"measured"}` (calibration provenance, §5). Written fire-and-forget; **read only by ingest**, applying elapsed-time decay before use, and discarded when `now − last_tick_t > SESSION_GAP_S`. Without it an ingest restart silently resets a mid-session athlete to zero accumulated load. |
+| `ingest:stats` | hash, rewritten 1s | ingest → api (`/api/health`, `/api/devices`) | **Namespaced keys in three scopes** (consumers key on these exact strings — `queries.devices()` reads `dev:{id}:quality` and `sensor:…:rate_hz` by name). **Global:** `uptime_s`, `global:crc_fail`, `global:bad_sync`, `global:bad_len`, `global:pub_dropped`, `global:published`, `global:dev_dropped`. **Per device:** `dev:{id}:ticks_out`, `dev:{id}:tick_rate`, `dev:{id}:quality`. **Per sensor:** `sensor:{dev}:{src}:{sen}:` + `rate_hz`, `recv`, `late_drop`, `buf_drop`, `sat_count`. Note `crc_fail` is **global**, not per-sensor (a bad record has no trustworthy identity), and `ticks_out` is **per device**, not per sensor |
+| `biomech:diag:{device_id}` | hash, rewritten 1s, TTL `2×SESSION_GAP_S` | ingest → api (`/api/health`) | biomech diagnostics (SPEC §10 item 3), all values formatted `%.6g`: `flags` (comma-separated), **unsigned tremor fraction `R`** (m4's raw ratio — *not* a signed transmission ratio; m4 became a tremor index 2026-08-03), `R_base` (the learned fresh baseline **for the band currently in use**), `m4_band` (current intensity-band index), `m4_band_t` (seconds served of that band's 60 s lock), signed **`usi_pct`** (`m5`'s pre-normalisation USI, in percent), signed `usi_fast_pct` (10 s diagnostic channel), `dose`, `dose_fast`, `dose_slow` (the two decay pools; their sum is `dose`), `move_t`, `intensity`, `a_int`, `w_int`, `sat_frac`, `m1_lo`, per-tick noise weight `W`, `demand`, `degradation` — for tuning the provisional reference bounds against real trial data |
+| `biomech:state:{device_id}` | **string (JSON), rewritten 1s, TTL `2×SESSION_GAP_S`** | ingest → **ingest** | **Warm-restart snapshot** (~200 B, SPEC §7.4). A single JSON document, *not* a hash — it is written and read whole, so one `SET` beats a multi-field `HSET`. Fields: `v` (schema version, **currently `3`** — a mismatch is rejected and the session starts fresh; v1 and v2 both fail, v2 predating the fast/slow dose split), `dose` (**informational total only**), `dose_fast`, `dose_slow` (**the two pools `restore()` actually rebuilds from**, each decayed at its own half-life), `accL`, `accR`, `move_t`, `asym_t` (m5's 30 s warm-up gate), `r_sum`, `r_time`, `r_base` (**per-band lists**, length `M4_BANDS` — lower-case, not the old scalar `R_base`), `session_start_t`, `last_tick_t` (both unix seconds), `cal` = `{limb_name: {k, gyro_bias[3], sigma}}` **keyed by limb name, never by slot index** (§7.4), and `cal_src` = `{limb_name: "default"\|"carried"\|"measured"}` (calibration provenance, §5). Written fire-and-forget; **read only by ingest**, applying elapsed-time decay before use, and discarded when `now − last_tick_t > SESSION_GAP_S`. Without it an ingest restart silently resets a mid-session athlete to zero accumulated load. |
 | `biomech:cal:{device_id}` | string (JSON), rewritten 1s, **TTL 30 days** | ingest → **ingest** | **Last-known-good calibration, carried BETWEEN sessions** (SPEC §3.8): `{limb_name: {k, gyro_bias[3], sigma}}`, limb-keyed for the same reason as above. Deliberately *not* the §7.4 snapshot, which is discarded after `SESSION_GAP_S` — that is exactly the case this key exists for, an athlete returning the next day. Read once when a device appears and applied immediately, so a device with any history starts calibrated and only refines from there; upgraded in place when a fresh still window lands. Only a device with no history ever runs on defaults. |
 
 `sat_count` counts samples with any axis within 1% of full scale (±16 g / ±2000 °/s). The
@@ -218,12 +227,16 @@ No Redis persistence needed (`appendonly no`); everything in Redis is reconstruc
 ```python
 # backend/ingest/biomech.py — algorithm specified in docs/biomech/SPEC.md (S1-T14),
 # implemented in S1-T15. The SIGNATURE below is unchanged by the spec.
-def compute(frames: dict[str, np.ndarray], state: DeviceState) -> Metrics:
+def compute(frames: dict[str, np.ndarray], state: dict,
+            times: dict[str, np.ndarray] | None = None) -> Metrics:
     """frames: limb name -> float32[n_samples, 6] (ax..gz, raw counts) since last
     tick, already time-aligned across limbs. Called at OUTPUT_HZ per device.
-    Returns Metrics(m1..m5, composite), all 0..100. `state` persists across calls
-    per device and holds the 1 s derived-scalar ring buffers, filter state, and
-    session accumulators (SPEC §7). No calibration input is required: compute()
+    `times`: matching server-mapped timestamps per limb — NOT optional in
+    practice: m2 is a derivative, so without real timestamps dt falls back to
+    1/NOMINAL_INPUT_HZ and the loading rate is wrong.
+    `state` is a plain dict (keyed '_biomech'), persisting across calls per
+    device: the 1 s derived-scalar ring buffers, filter state, and session
+    accumulators (SPEC §7). No calibration input is required: compute()
     detects still windows itself and calibrates in place (SPEC §3.8)."""
 
 @dataclass
@@ -232,7 +245,9 @@ class Metrics:
     m2: float | None    # Loading Rate    0..100
     m3: float | None    # Accumulated Load 0..100
     m4: float | None    # Movement Control 0..100 (None while warming up)
-    m5: float | None    # L/R Balance     0..100 (None while warming up)
+    m5: float | None    # L/R Balance  −100..+100 SIGNED (+ left, − right; None
+                        #   while warming up). Anything treating it as a
+                        #   severity must take abs() — see §2
     composite: float    # Injury Risk     0..100  — never None
     flags: frozenset[str]     # SPEC §10: 'warming_up','partial','no_shank','saturated'
                               #   ('saturated' => m1/m2 are LOWER BOUNDS, render ">= x"),
@@ -261,34 +276,59 @@ def fit(history: pd.DataFrame, horizons: list[timedelta]) -> dict[timedelta, For
     """history: metrics_1m rows (bucket, composite, m3, …) over
     PREDICT_TRAIN_WINDOW. Returns per-horizon Forecast(pred, ci_low, ci_high)."""
 
-# ⚠️ Under model_version 'dose-scenario-1' (docs/ANALYTICS.md), `ci_low`/`ci_high`
-# carry a SCENARIO BAND, not a confidence interval:
-#     ci_low  = "if they stop now"                     -> the decaying dose floor
-#     pred    = "if recent load continues"
-#     ci_high = "if load returns to this session's hardest"
-# The columns are unchanged (they are just numbers) but the MEANING follows
-# model_version, and the frontend must label it accordingly — calling two
-# counterfactuals a "CI" asserts a 95% probability that the truth lies between
-# them, which biomech SPEC §2 forbids. Consumers that cannot read model_version
-# must not present these as uncertainty. 'linreg-stub-1' rows (a plain OLS
-# prediction interval) may still exist in `forecasts` from before the change.
+# Current models: 'trend-ols-1' (steady) and 'trend-ols-boot-1' (bootstrap, while
+# metrics_1m has too few buckets — the response also carries provisional=true).
+# Under BOTH, `ci_low`/`ci_high` are a genuine two-sided OLS PREDICTION INTERVAL
+#     t(.975, n-2) * sigma_hat * sqrt(1 + 1/n + (x*-xbar)^2/Sxx)
+# so "CI" is the correct label and the frontend's forecastBandNote() applies.
+#
+# ⚠️ HISTORY: 'dose-scenario-1' rows may still exist in `forecasts`. Under THAT
+# model the same two columns were a SCENARIO BAND (ci_low = "if they stop now",
+# ci_high = "if load returns to this session's hardest"), NOT uncertainty, and
+# must not be labelled "CI" — calling two counterfactuals a CI asserts a 95%
+# probability that biomech SPEC §2 forbids. The model was retired 2026-08-03
+# with the dose floor: under the current composite "if they stop now" is
+# trivially 0, so the band carried no information. Meaning follows
+# model_version; consumers that cannot read it must not present these as
+# uncertainty. 'linreg-stub-1' rows also predate the change.
 
-# backend/api/jobs/insights.py — rule list is the extension point
-# backend/api/jobs/insights.py — RULES is the stable extension point
+# backend/api/jobs/insights.py — RULES is the stable extension point, and
+# ACTIONS is a second one: an action_id that does not key into it falls back to
+# raw text, so the catalogue is as much a contract as the rules.
 @dataclass
 class Rule:
     rule_id:   str
     severity:  str                                    # default; evidence may raise it
     evaluate:  Callable[[Ctx], Evidence | None]
     message:   Callable[[Ctx, Evidence], str]         # standalone summary
-    action:    Callable[[Ctx, Evidence], str] | None  # short imperative (UI headline)
+    action:    Callable[[Ctx, Evidence], str] | None  # short imperative (per rule)
     rationale: Callable[[Ctx, Evidence], str] | None  # the why, with the numbers
+    # migration 003 — what /api/insights/current groups on:
+    action_id: str | Callable[[Ctx, Evidence], str] | None  # keys into ACTIONS;
+                        #   CALLABLE lets one rule pick by evidence (impact_deviation
+                        #   routes m1 -> lower_landings, m2 -> soften_landings)
+    reason:    Callable[[Ctx, Evidence], str] | None  # ONE short sentence, no expander
 
-RULES: list[Rule]
+    def resolve_action_id(self, ctx, evidence) -> str | None: ...   # unwraps the callable
+
+@dataclass(frozen=True)
+class Action:
+    action_id: str
+    text:      str   # imperative headline, names the LEVER the trainer controls
+    rank:      int   # tie-break within equal severity; lower surfaces first
+    tip:       str   # STATIC coaching cue, never data-derived; the UI must render
+                     # it under a "General cue — not measured" label
+
+RULES:   list[Rule]
+ACTIONS: dict[str, Action]
 
 # `Ctx` gives a rule the WHOLE picture, not one number (docs/ANALYTICS.md §4.2):
 #   ctx.metrics   -> {'m1'..'m5','composite': MetricView}  each across every window
-#   ctx.horizons  -> every projected point incl. the ci_low/ci_high scenario band
+#   ctx.horizons  -> every projected point with its prediction interval
+#   ctx.furthest  -> the last projected horizon (where this is heading)
+#   ctx.live / ctx.now_window -> the INSIGHT_LIVE_WINDOW read (30 s, off the raw
+#                    60 Hz table). `now_window` is what every athlete-facing rule
+#                    actually means by "now" — not the shortest PAST_WINDOWS entry
 #   ctx.shortest / ctx.mid / ctx.longest / ctx.windows / ctx.forecasts
 #   ctx.trustworthy -> coverage + quality-match gate for athlete-facing claims
 #

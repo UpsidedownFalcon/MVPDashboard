@@ -5,13 +5,17 @@ A trainer-facing web dashboard that predicts when trainees are approaching injur
 biomechanical pipeline converts it into constant 60Hz metric streams (5 primitives +
 1 composite risk index per device); the dashboard shows live charts, historical
 rolling windows, regression-based forecasts of the composite, and rules-based
-insights. Built in three stages: local real-time biomech, public VPS deployment with
-intelligence, then the designed product frontend with login.
+insights.
+
+**Status: all three stages are built and deployed** (2026-08-03) — local real-time
+biomech, public VPS deployment with intelligence, and the designed product frontend
+with login. Live at `https://<your-domain>`; the only stage-3 item still open is the
+S3-T08 acceptance run.
 
 **Start here: read [docs/PLAN.md](docs/PLAN.md) first.** It anchors the full doc
 suite (TRD, backend schema, app flow, implementation plan, and per-stage task lists).
 
-## Quickstart (stage 1: local real-time pipeline)
+## Quickstart (full local stack)
 
 Prereqs: Docker Desktop (WSL2 backend) and [uv](https://docs.astral.sh/uv/)
 (`irm https://astral.sh/uv/install.ps1 | iex`). Then, from the repo root:
@@ -21,7 +25,9 @@ Prereqs: Docker Desktop (WSL2 backend) and [uv](https://docs.astral.sh/uv/)
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }   # never clobber an existing .env
 uv sync --dev                        # creates .venv with Python 3.12 + deps
 
-# 2. start the backend services (redis + ingest + api)
+# 2. start the full stack (redis + ingest + api + db + caddy)
+#    NOTE: caddy binds host :80 and :443 — free them first if something else uses them.
+#    .env MUST carry a JWT_SECRET: the api refuses to start without one.
 docker compose up -d --build
 
 # 3. feed it data — replay recorded squats as N wearable devices
@@ -35,15 +41,30 @@ uv run python simulator/simulate.py --devices 5
 #                           with a run already streaming)
 #    --duration SECONDS     stop after N seconds   (default: run until Ctrl-C)
 
-# 4. watch it live
-Start-Process http://localhost:8000/debug
+# 4. watch it live — the product dashboard, served by caddy
+Start-Process http://localhost
+#    Sign in with an account from SEED_USERS in .env (default: trainer / changeme).
+#    Accounts are seeded by the api entrypoint on every start.
+```
+
+**Everything is behind the login cookie from stage 3 on** — `/debug` and
+`/api/health` included. Only `POST /api/auth/login`, `POST /api/auth/logout` and
+`GET /api/health/live` are open, so a cold `curl` to `/api/health` returns 401,
+not data. To poke the API from a shell, log in first and keep the cookie:
+
+```powershell
+curl -s -c cj.txt -H "Content-Type: application/json" `
+     -d '{"username":"trainer","password":"changeme"}' http://localhost/api/auth/login
+curl -s -b cj.txt http://localhost/api/health      # now 200
 ```
 
 Every device panel shows the composite + m1..m5 charts at 60Hz, quality %,
-online badge, active flags and per-sensor input rates. All six metrics are
-**0–100** ([docs/biomech/SPEC.md](docs/biomech/SPEC.md)).
-`GET localhost:8000/api/health` is the first place to look when anything
+online badge, active flags and per-sensor input rates. `m1..m4` and the
+composite are **0–100**; **`m5` is signed, −100..+100** (+ = left-dominant,
+− = right) ([docs/biomech/SPEC.md](docs/biomech/SPEC.md)).
+`GET /api/health` (cookie required) is the first place to look when anything
 misbehaves; it also carries the per-device `biomech` diagnostics block.
+`GET /api/health/live` needs no cookie and is the liveness probe.
 
 Expect **`m4` (control) and `m5` (balance) to be blank at first** — they need
 60 s and 30 s of *movement* respectively before they emit, and they go blank

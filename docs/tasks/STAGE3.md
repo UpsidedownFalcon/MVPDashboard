@@ -61,8 +61,10 @@ real backend.
 
 **Goal:** UIUX §3 for real.
 **Depends:** ⛓ S3-T02.
-**Files:** `src/pages/Overview.tsx`, `src/components/DeviceCard.tsx`,
-`StatusBadge.tsx`, `QualityMeter.tsx`, `RenameInline.tsx`, `LiveSparkline.tsx`.
+**Files:** `src/pages/Overview.tsx`, `src/components/DeviceCard.tsx`.
+*(As built: `StatusBadge` / `QualityMeter` / `RenameInline` / `SensorDots` / `SeverityChip` /
+`FlagChips` all live together in `src/components/bits.tsx`; the sparkline is `LiveChart.tsx`
+rendered at sparkline size, not a separate component.)*
 
 Steps: device grid per UIUX §3 — online-first sort, live composite sparkline
 (60Hz, uPlot, 30s buffer), 5 primitive live numbers, quality meter, highest-severity
@@ -76,7 +78,9 @@ rename persists; badges flip ≤2s.
 **Goal:** UIUX §4 for real (live left column + Insights/History/Projections tabs).
 **Depends:** ⛓ S3-T03 (shares components), ⛓ S3-T10 (history endpoint + insight fields).
 **Files:** `src/pages/Device.tsx`, `src/components/LiveChart.tsx`,
-`HistoryBars.tsx`, `ForecastChart.tsx`, `InsightFeed.tsx`, `Tabs.tsx`.
+`HistoryBars.tsx`, `ForecastChart.tsx`, `Tabs.tsx`.
+*(As built: the insight panel is `InsightsPanel.tsx` with helpers in `lib/evidence.ts`.
+`InsightFeed.tsx` and `ActionPanel.tsx` were interim components, since deleted.)*
 
 Steps: live column — data-driven humanoid figure + current-risk hero + large
 composite chart + stacked primitives (backfill-then-splice per UIUX §5, ~250ms

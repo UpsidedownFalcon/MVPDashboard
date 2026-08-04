@@ -88,7 +88,8 @@ Panel contents, top to bottom:
    `message`). One line, ellipsized.
 5. Active biomech flag chips (§6), if any.
 - No forecast yet → the "now" value is promoted to the headline slot with
-  "First forecast in ~N min" beneath (N from `PREDICT_INTERVAL_S`).
+  "waiting for the first projection…" beneath. **No minute estimate**: the client is never
+  told `PREDICT_INTERVAL_S`, and inventing a number would be a guess.
 
 ## 4. Device detail — SET
 
@@ -172,9 +173,11 @@ muted text + transparent border, active = accent text + accent hairline border +
    single-series bars in that metric's color (≤24px wide, 4px rounded top, 2px
    surface gaps, square baseline), y 0–100, hairline grid, per-bar hover tooltip
    (t, value, quality). Composite's chart adds a min–max whisker per bucket.
-   Buckets with no rows render as gaps. Partial coverage: "collecting… (n min of
-   5m)". A table-view toggle (one table for all metrics × buckets) sits at the
-   row's right end — every charted value is reachable without hover.
+   Buckets with no rows render as gaps. Low coverage (<50%) shows a warning chip
+   "partial · N% of window"; a window with no data at all reads "collecting… no data yet in
+   past X". Bucket counts are chosen to divide the window **exactly** (`evenBucketCount`),
+   so bars have uniform span and labels do not drift. A table-view toggle (one table for all
+   metrics × buckets) sits at the row's right end — every charted value is reachable without hover.
 3. **Projections** (`GET /api/forecasts/latest?device`, poll 60 s) — composite
    only (PRD; confirmed). **The horizon set is not fixed** — it starts 1m/2m and
    becomes 10m/30m/1h — so horizons are always read from `points` and never
@@ -186,7 +189,8 @@ muted text + transparent border, active = accent text + accent hairline border +
    Below: one ECharts chart — recent actuals (solid 2px composite line, from the
    shortest configured history window) continuing into per-horizon forecast
    points (≥8px markers with 2px surface ring) with a CI band (composite hue at
-   10% opacity); "made at HH:MM · linreg-stub-1" stamp in muted ink. Crosshair +
+   10% opacity); "Made <relative time> · <model_version from the response>" stamp in muted
+   ink — **never a hardcoded version string**. Crosshair +
    tooltip; table-view toggle (horizon, prediction, CI). Empty: "First forecast
    in ~N min."
 
@@ -253,6 +257,9 @@ the calibration story's only surface, SPEC §10):
 panel vs alert chip + explicit "no data from <limb>". The uncalibrated→calibrated
 transition is a visible step in `m4`/`m5`: when `uncalibrated`/`carried_over` clears,
 show a muted "calibrated ✓" chip for ~10 s — a system event, not a change in the
+athlete. ⚠️ **NOT YET IMPLEMENTED** — `FlagChips` renders only flags that are currently
+present; nothing tracks the clear transition. Tracked as outstanding UI work.
+Original rationale: the step change is in the
 athlete (SPEC §3.8).
 
 ## 7. Empty & error states — SET
@@ -260,7 +267,8 @@ athlete (SPEC §3.8).
 - No devices online: hero stays; panel area shows "Waiting for devices… point
   wearables at `<IP>:<UDP_PORT>`" (+ "N offline hidden" when applicable).
 - No insights: "No insights yet — all metrics in normal range."
-- History without enough data: "collecting… (n min of 5m)".
+- History without enough data: "collecting… no data yet in past X"; partial coverage shows a
+  "partial · N% of window" chip beside the period selector.
 - Forecast before first run: "Waiting for the first projection run…" (the client
   does not know `PREDICT_INTERVAL_S`, so no minute estimate is shown).
 - API errors: non-blocking toast + retry; stale panels hold last render at reduced
@@ -389,10 +397,18 @@ checks PASS (lightness band, chroma, CVD ΔE worst adjacent 8.4, normal-vision
 | live sparkline/charts, current values, flags | `WS /ws/live` (+ `GET /api/metrics/recent` backfill) | 60Hz |
 | projected-risk blocks, Projections tab | `GET /api/forecasts/latest` | 60 s poll |
 | History tab | `GET /api/metrics/history` (window ∈ `PAST_WINDOWS`) | 60 s poll |
-| insight chips + Insights tab | `GET /api/insights` (`action`/`rationale` fields) | 30 s poll |
+| insight chip on an Overview panel | `GET /api/insights?limit=5` | 30 s poll (`POLL_INSIGHTS_MS`) |
+| Insights tab (the advice cards) | `GET /api/insights/current` **+** `GET /api/insights?limit=50` (evidence join on `(rule_id, created_at)`) | 10 s poll (`POLL_ADVICE_MS`) |
 | rename | `PATCH /api/devices/:id` | on action |
 | auth | `POST /api/auth/login|logout`, `GET /api/auth/me` | on action |
 
-Frontend constants (`lib/config.ts`): `OFFLINE_HIDE_MS = 10_000`, poll intervals
+Evidence rendering (`lib/evidence.ts`) owns the expander contract: which `context` keys are
+hidden, their display order, and the translation of jargon into trainer language (`z` renders as
+"vs their normal range", `sd` as "their usual spread", quality/coverage as percentages). That is
+a §11-copy-rules-level decision, so it lives in one module rather than in a component.
+
+Frontend constants (`lib/config.ts`): `OFFLINE_HIDE_MS = 10_000`, `POLL_ADVICE_MS = 10_000`,
+`HISTORY_MAX_BUCKETS = 30`, the live-chart set (`LIVE_BUFFER_S`, `BACKFILL_S`,
+`RENDER_DELAY_S`), the WS set (`WS_BACKOFF_MIN_MS`/`MAX_MS`, `WS_CLOSE_UNAUTHORIZED`), poll intervals
 above, metric map (`lib/metrics.ts` — SPEC §9 names/tooltips + §8 colors). Window
 and horizon labels are always generated from config strings — never hardcoded.

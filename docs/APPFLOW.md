@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | Set in stone (mirrors [TRD.md](TRD.md); updates only if the TRD changes). Describes the **end state**: auth flows (§1.1, §3) activate in stage 3 — stages 1–2 run unauthenticated; data flows 2.2–2.4 activate in stage 2 (no DB in stage 1). See TRD §1.1 for the stage table. |
+| Status | Set in stone (mirrors [TRD.md](TRD.md); updates only if the TRD changes). **This end state is the CURRENT state** — all three stages shipped 2026-08-03, so the auth flows (§1.1, §3) and data flows 2.2–2.4 are live, not pending. See TRD §1.1. |
 | Related | [UIUX.md](UIUX.md) · [BACKEND_SCHEMA.md](BACKEND_SCHEMA.md) |
 
 ## 1. User flows
@@ -28,9 +28,15 @@ from REST or a WS close with code 4401 → redirect `/login`.
    └─▶ click card ─▶ /device/:id
          ├─ GET /api/metrics/recent?device=:id&seconds=30  (chart backfill)
          ├─ WS stream splices in (live section)
-         ├─ GET /api/metrics/windows?device=:id            (history cards)
-         ├─ GET /api/forecasts/latest?device=:id           (forecast chart)
-         └─ GET /api/insights?device=:id  (+ poll every 30s)
+         ├─ GET /api/metrics/windows?device=:id            (window meta, poll 60s)
+         ├─ GET /api/metrics/history?device=:id&window=&buckets=  (History tab, poll 60s)
+         ├─ GET /api/forecasts/latest?device=:id           (Projections tab, poll 60s;
+         │                                                  `provisional` while bootstrapping)
+         ├─ GET /api/insights/current?device=:id           (Insights tab — the STATE view:
+         │                                                  ≤3 grouped actions, poll 10s)
+         └─ GET /api/insights?device=:id&limit=50          (evidence join for those cards,
+                                                            same 10s. The Overview chip uses
+                                                            the same route at limit=5 / 30s)
 ```
 
 ### 1.3 Device lifecycle (trainer's view)
@@ -38,6 +44,8 @@ from REST or a WS close with code 4401 → redirect `/login`.
 wearable powers on ─▶ first packet ─▶ auto-registered (name = device ID)
   ─▶ card appears "online" ─▶ trainer renames to wearer
 wearable silent > OFFLINE_AFTER_S ─▶ status event ─▶ card shows offline + last-seen
+  ─▶ silent > 10 s (OFFLINE_HIDE_MS) ─▶ card and sidebar entry disappear entirely,
+     replaced by an "N offline hidden" footer note (user decision 2026-08-02)
 wearable returns ─▶ online again (same identity, same name)
 ```
 
@@ -61,13 +69,21 @@ sensor sample ─UDP─▶ ingest: raw deque (bounded)
 metrics (60Hz rows, 30d retention)
   ─continuous aggregate policy (in-DB, ~1min)─▶ metrics_1m (forever)
   ─GET /api/metrics/windows─▶ for each PAST_WINDOWS duration:
-      SELECT avg(...) FROM metrics_1m WHERE bucket > now()-duration
+      windows <= 5m read the RAW `metrics` table; larger ones read `metrics_1m`.
+      (`metrics_1m` is materialized-only, so its newest 1-2 min do not exist yet —
+       up to 40% of a 5m window. The raw table has no such lag.)
   ─▶ window cards (frontend polls every 60s)
 ```
 
 ### 2.3 Prediction: history → forecast chart
 ```
-every PREDICT_INTERVAL_S, per device:
+every PREDICT_INTERVAL_S (60s), per device:
+  BOOTSTRAP path (until metrics_1m holds >=10 buckets for this device):
+    read PREDICT_BOOTSTRAP_BUCKET_S (15s) buckets off the RAW hypertable over
+    PREDICT_BOOTSTRAP_WINDOW, project PREDICT_BOOTSTRAP_HORIZONS capped by the
+    observed span -> model_version 'trend-ols-boot-1', response `provisional: true`.
+    First forecast lands in ~2.5-3.5 min instead of 15-20.
+  STEADY path:
   read composite from metrics_1m over PREDICT_TRAIN_WINDOW
   ─▶ predict.fit(history) ─▶ {horizon: (pred, ci_low, ci_high)}
   ─▶ INSERT forecasts (one row per horizon, keyed by made_at)
@@ -76,11 +92,16 @@ GET /api/forecasts/latest ─▶ newest made_at per device ─▶ forecast chart
 
 ### 2.4 Insights: trends + forecasts → feed
 ```
-every INSIGHT_INTERVAL_S, per device:
-  inputs: window aggregates (2.2) + latest forecasts (2.3)
+every INSIGHT_INTERVAL_S (15s), per device:
+  inputs: the INSIGHT_LIVE_WINDOW read (30s off the RAW table — this is what every
+          rule means by "now") + window aggregates (2.2) + latest forecasts (2.3)
   ─▶ rule list evaluates (each: predicate → severity, message, evidence)
-  ─▶ cooldown check (INSIGHT_COOLDOWN_S per device+rule)
-  ─▶ INSERT insights ─▶ GET /api/insights (frontend poll 30s) ─▶ feed + card chips
+  ─▶ cooldown check (INSIGHT_COOLDOWN_S per device+rule, severity-ranked)
+  ─▶ INSERT insights (append-only EVENT log)
+       ├─▶ GET /api/insights            ─▶ Overview chip + the evidence join
+       └─▶ GET /api/insights/current    ─▶ the STATE view: rows inside INSIGHT_HOLD_S
+             grouped on action_id, newest row per rule, ranked, cut to
+             INSIGHT_MAX_ACTIONS (3) ─▶ the Insights tab's advice cards
 ```
 
 ### 2.5 Online/offline status

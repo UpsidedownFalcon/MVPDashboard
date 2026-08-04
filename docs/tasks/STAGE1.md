@@ -115,7 +115,8 @@ Steps:
    compose is green before T06+.
 
 **Done check:** `docker compose up -d` → all three healthy;
-`curl localhost:8000/api/health/live` → `{"status":"ok"}`; `docker compose --profile stage2 config` validates.
+`curl localhost:8000/api/health/live` → `{"status":"ok"}`; `docker compose config` validates. *(The `stage2` profile was removed — the only
+profile now is `debug`.)*
 
 ## S1-T05 — Simulator
 

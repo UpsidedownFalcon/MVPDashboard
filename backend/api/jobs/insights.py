@@ -378,7 +378,7 @@ def _deviation_rationale(ctx: Ctx, ev: Evidence) -> str:
     ]
     if ev.get("settles_at") is not None:
         bits.append(
-            f"Even with no further load it settles around"
+            f"Even at the low end of the projection it stays near"
             f" {ev['settles_at']:.0f} over the next {ev['horizon']}."
         )
     elif ev.get("projected") is not None:
@@ -464,11 +464,11 @@ def _accumulated_load(ctx: Ctx) -> Evidence | None:
     accumulates damage, damage lowers the tissue's critical threshold, and
     injury occurs when load exceeds that declining threshold. So a dose that is
     both high and still rising is the mechanistically meaningful state, which is
-    also why the composite carries m3 as a floor it decays onto rather than as
-    another averaged term.
+    also why the composite carries m3 through `degradation` at the largest
+    weight -- dose lowers capacity, so the same movement costs more.
 
-    Uses PAST (dose vs the athlete's baseline, and its trend) and FUTURE (where
-    the dose settles if they stop now) together.
+    Uses PAST (dose vs the athlete's baseline, and its trend) and FUTURE (the
+    low end of the projected interval) together.
     """
     if not ctx.trustworthy:
         return None
@@ -488,15 +488,21 @@ def _accumulated_load(ctx: Ctx) -> Evidence | None:
 
 
 def _residual_load(ctx: Ctx) -> Evidence | None:
-    """Even if the athlete stops right now, risk stays elevated.
+    """Risk stays above the review threshold even at the low end of the
+    projected interval.
 
-    `ci_low` under `dose-scenario-1` is the "if they stop now" branch: closed-
-    form decay of the already-accumulated dose onto the composite's floor. It is
-    arithmetic about load already taken, NOT a prediction about what the athlete
-    will do -- which is what makes it safe to act on under SPEC Section 2, where
-    behavioural prediction is not defensible.
+    🚩 The MEANING of `ci_low` changed on 2026-08-03. Under `dose-scenario-1`
+    it was the "if they stop now" branch -- closed-form decay of the dose
+    already taken, i.e. arithmetic rather than behavioural prediction, and that
+    is what the original copy leaned on. That model was retired with the dose
+    floor (under the current composite "if they stop now" is trivially 0). Under
+    `trend-ols-1` / `trend-ols-boot-1`, `ci_low` is the lower bound of an OLS
+    PREDICTION INTERVAL: estimator uncertainty around a trend.
 
-    The actionable content is recovery scheduling rather than stopping.
+    The rule survives the change because the useful property survives it -- the
+    optimistic end of the interval still sits above the review threshold -- but
+    the copy must not claim a stop-now counterfactual the model does not
+    compute (SPEC Section 2). The actionable content is recovery scheduling.
     """
     far = ctx.furthest
     if far is None or far.get("ci_low") is None:
@@ -646,21 +652,32 @@ RULES: list[Rule] = [
         rule_id="residual_load",
         severity="warning",
         evaluate=_residual_load,
+        # 🚩 Copy corrected 2026-08-04. It used to say "even if they stop now",
+        # which was exact under `dose-scenario-1`, where `ci_low` WAS the
+        # stop-now branch (closed-form decay of dose already taken). That model
+        # was retired with the dose floor; under `trend-ols-1` `ci_low` is the
+        # lower bound of an OLS PREDICTION INTERVAL -- estimator uncertainty
+        # around a trend, not a behavioural counterfactual. Saying "if they stop
+        # now" asserted something the model no longer computes, which is the
+        # SPEC Section 2 failure mode. The signal is unchanged and still
+        # actionable: even at the optimistic end of the interval, projected risk
+        # stays above the review threshold.
         message=lambda ctx, ev: (
-            f"{ctx.display_name}: risk stays around {ev['settles_at']:.0f} over the"
-            f" next {ev['horizon']} even if they stop now."
+            f"{ctx.display_name}: risk is projected to stay around"
+            f" {ev['settles_at']:.0f} over the next {ev['horizon']}, even at the"
+            f" low end of the projection."
         ),
         action=lambda ctx, ev: "Leave a longer gap before the next hard block",
         rationale=lambda ctx, ev: (
-            f"Load already accumulated decays slowly: even with no further"
-            f" training, projected risk only falls to about"
+            f"Even the optimistic end of the projection keeps risk near"
             f" {ev['settles_at']:.0f} over the next {ev['horizon']}, still above"
-            f" the {ev['threshold']:.0f} review threshold. This is decay of load"
-            f" already taken, not a prediction of what they will do next."
+            f" the {ev['threshold']:.0f} review threshold. That is the lower"
+            f" bound of the prediction interval, not a forecast of what they"
+            f" will choose to do next."
         ),
         action_id="plan_recovery",
         reason=lambda ctx, ev: (
-            f"Even if they stop now, risk only falls to about"
+            f"Even at the low end of the projection, risk stays near"
             f" {ev['settles_at']:.0f} over the next {ev['horizon']} — still above"
             f" the {ev['threshold']:.0f} review threshold."
         ),
