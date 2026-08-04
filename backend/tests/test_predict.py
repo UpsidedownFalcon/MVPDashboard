@@ -18,7 +18,9 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from api.jobs import predict as P
-from api.jobs.predict import MODEL_VERSION, PredictJob, fit
+from api.jobs.predict import (
+    MODEL_VERSION, MODEL_VERSION_BOOTSTRAP, PredictJob, fit,
+)
 from api.routes.forecasts import router as forecasts_router
 from db_utils import connect_admin, create_scratch_db, drop_scratch_db
 from migrations.migrate import dsn
@@ -340,6 +342,112 @@ async def test_job_and_endpoint(scratch_app) -> None:
            WHERE device_id='30' AND horizon = interval '10 minutes'""")
     assert row["target_time"] == t_end + timedelta(minutes=10)
     assert row["target_time"] < row["made_at"] + timedelta(minutes=10)
+
+
+async def _seed_raw(conn, device: str, minutes: float, hz: int = 60,
+                    start: float = 20.0, rise: float = 10.0) -> None:
+    """`minutes` of raw 60Hz-ish metrics ending at now(), rising linearly.
+
+    Dense on purpose: the bootstrap query drops any bucket holding less than
+    half a bucket's worth of samples, which is what stops a trailing partial
+    bucket being averaged as though it were a full one.
+    """
+    t_now = (await conn.fetchrow("SELECT now() AS n"))["n"]
+    n = int(minutes * 60 * hz)
+    rows = [
+        (t_now - timedelta(seconds=i / hz), device,
+         None, None, None, None, None, start + rise * (n - i) / n, 1.0)
+        for i in range(n)
+    ]
+    await conn.copy_records_to_table(
+        "metrics", records=rows,
+        columns=("time", "device_id", "m1", "m2", "m3", "m4", "m5",
+                 "composite", "quality"),
+    )
+
+
+async def test_bootstrap_forecasts_minutes_after_first_data(scratch_app) -> None:
+    """The latency fix, measured.
+
+    The steady model trains on `metrics_1m` and needs 10 one-minute buckets, so
+    it cannot speak until ~10 min of streaming plus 1-2 min of materialization
+    lag. This asserts BOTH halves: the aggregate genuinely cannot serve this
+    device yet, and a forecast is produced anyway.
+    """
+    settings, conn, pool, client = scratch_app
+    await conn.execute("INSERT INTO devices (device_id, display_name) VALUES ('30','30')")
+    await _seed_raw(conn, "30", minutes=3)
+    await conn.execute("CALL refresh_continuous_aggregate('metrics_1m', NULL, NULL)")
+
+    cagg_buckets = await conn.fetchval(
+        "SELECT count(*) FROM metrics_1m WHERE device_id='30'")
+    assert cagg_buckets < P.MIN_BUCKETS, (
+        "precondition: the steady path must be unable to fire on 3 minutes of data"
+    )
+
+    job = PredictJob(settings, pool)
+    assert await job.run_once() == 1, "the bootstrap path must forecast at ~3 min"
+    assert job.last_error is None
+
+    body = (await client.get("/api/forecasts/latest", params={"device": "30"})).json()
+    assert body["model_version"] == MODEL_VERSION_BOOTSTRAP
+    assert body["provisional"] is True, "early projections must be marked"
+    assert body["points"], "a provisional forecast still carries points"
+    for p in body["points"]:
+        assert 0.0 <= p["pred"] <= 100.0
+        assert p["ci_low"] <= p["pred"] <= p["ci_high"]
+
+
+async def test_bootstrap_horizons_are_capped_by_observed_span(scratch_app) -> None:
+    """Projecting an hour from three minutes of data is a straight line with an
+    uninformative error bar, not a forecast. Horizons are bounded by the data
+    actually observed, which is why the earliest projections are short ones."""
+    settings, conn, pool, client = scratch_app
+    await conn.execute("INSERT INTO devices (device_id, display_name) VALUES ('30','30')")
+    await _seed_raw(conn, "30", minutes=3)
+
+    assert await PredictJob(settings, pool).run_once() == 1
+    body = (await client.get("/api/forecasts/latest", params={"device": "30"})).json()
+    horizons = {p["horizon"] for p in body["points"]}
+    # ~3 min of data -> span ~2.75 min: 1m and 2m are supported, 5m is not
+    assert "1m" in horizons
+    assert "5m" not in horizons, "a horizon longer than the data must not publish"
+    assert horizons <= {"1m", "2m"}
+    # and the unit rule itself, independent of the data above
+    span = timedelta(minutes=2, seconds=30)
+    assert P._capped_horizons(
+        [timedelta(minutes=1), timedelta(minutes=5), timedelta(hours=1)], span
+    ) == [timedelta(minutes=1)]
+
+
+async def test_established_device_hands_over_to_the_aggregate(scratch_app) -> None:
+    """Bootstrapping is a warm-up, not a replacement: once `metrics_1m` can
+    serve the device, the steady model and the CONFIGURED horizons return, so
+    steady-state behaviour is exactly what it was before."""
+    settings, conn, pool, client = scratch_app
+    await conn.execute("INSERT INTO devices (device_id, display_name) VALUES ('30','30')")
+    m_now = (await conn.fetchrow("SELECT date_trunc('minute', now()) AS m"))["m"]
+    rows = [
+        (m_now - timedelta(minutes=20 - minute) + timedelta(seconds=6 * i),
+         "30", None, None, None, None, None, 20.0 + minute, 1.0)
+        for minute in range(20) for i in range(10)
+    ]
+    await conn.copy_records_to_table(
+        "metrics", records=rows,
+        columns=("time", "device_id", "m1", "m2", "m3", "m4", "m5",
+                 "composite", "quality"),
+    )
+    await conn.execute("CALL refresh_continuous_aggregate('metrics_1m', NULL, NULL)")
+    assert await conn.fetchval(
+        "SELECT count(*) FROM metrics_1m WHERE device_id='30'") >= P.MIN_BUCKETS
+
+    assert await PredictJob(settings, pool).run_once() == 1
+    body = (await client.get("/api/forecasts/latest", params={"device": "30"})).json()
+    assert body["model_version"] == MODEL_VERSION
+    assert body["provisional"] is False
+    assert {p["horizon"] for p in body["points"]} == {"2m", "5m", "10m"}, (
+        "the configured FUTURE_HORIZONS, not the bootstrap ladder"
+    )
 
 
 async def test_stale_device_is_not_forecast(scratch_app) -> None:

@@ -120,7 +120,17 @@ def test_defaults_load_without_env_file(clean_env: pytest.MonkeyPatch) -> None:
     assert s.future_horizons == [timedelta(minutes=10), timedelta(minutes=30), timedelta(hours=1)]
     assert s.predict_train_window == timedelta(hours=2)
     assert s.metrics_retention == timedelta(days=30)
-    assert s.predict_interval_s == 300
+    # Was 300 with no bootstrap, which put the first forecast 15-20 min into a
+    # session: 10 one-minute cagg buckets (~10 min) + 1-2 min materialization lag
+    # + up to one 5-minute job interval (docs/ANALYTICS.md §3.4).
+    assert s.predict_interval_s == 60
+    assert s.predict_bootstrap_bucket_s == 15
+    assert s.predict_bootstrap_window == timedelta(minutes=15)
+    assert s.predict_bootstrap_horizons == [
+        timedelta(minutes=1), timedelta(minutes=2), timedelta(minutes=5)]
+    # MIN_BUCKETS(10) x 15s = 2.5 min to the first forecast, vs 10 min of
+    # aggregate buckets before
+    assert s.predict_bootstrap_bucket_s * 10 <= 150
     # Insight cadence, retuned 2026-08-04 (docs/ANALYTICS.md "Insight cadence").
     # Was 60/600 with detection on the 5m window, which made the first insight of
     # a session take 5-9 min to appear: a 5-minute MEAN needs ~1.5-2 min of new

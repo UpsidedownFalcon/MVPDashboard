@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from api.jobs.predict import MODEL_VERSION_BOOTSTRAP
 from api.queries import _iso, device_exists
 from common.durations import format_duration
 
@@ -29,6 +30,12 @@ async def forecasts_latest(request: Request, device: str = Query(...)) -> dict:
     return {
         "made_at": _iso(rows[0]["made_at"]),
         "model_version": rows[0]["model_version"],
+        # True while the forecast is still fitted to sub-minute buckets off the
+        # raw table, i.e. during roughly the first 11 minutes of a session. Same
+        # model and the same prediction interval — but short, span-capped
+        # horizons and far less data behind them, which the UI must say rather
+        # than presenting an early projection as an established one.
+        "provisional": rows[0]["model_version"] == MODEL_VERSION_BOOTSTRAP,
         "points": [
             {
                 "horizon": format_duration(r["horizon"]),

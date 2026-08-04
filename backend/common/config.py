@@ -66,8 +66,29 @@ class Settings(BaseSettings):
 
     past_windows_raw: str = Field("5m,30m,2h", validation_alias="PAST_WINDOWS")
     future_horizons_raw: str = Field("10m,30m,1h", validation_alias="FUTURE_HORIZONS")
-    predict_interval_s: int = 300
+    predict_interval_s: int = 60
     predict_train_window_raw: str = Field("2h", validation_alias="PREDICT_TRAIN_WINDOW")
+    # --- forecast bootstrap ---------------------------------------------------
+    # The steady-state model trains on `metrics_1m`, so it cannot produce
+    # anything until TEN ONE-MINUTE BUCKETS exist — and that aggregate is
+    # materialized-only with end_offset 1m + schedule_interval 1m, so its newest
+    # bucket lands 1-2 min late. First forecast was therefore 15-20 min into a
+    # session (docs/ANALYTICS.md §3.4).
+    #
+    # The bootstrap path fits the SAME model to sub-minute buckets read straight
+    # off the raw hypertable, which reaches MIN_BUCKETS in ~2.5 min instead. It
+    # is used ONLY until the aggregate can take over, so steady-state behaviour
+    # is unchanged.
+    predict_bootstrap_bucket_s: int = 15
+    predict_bootstrap_window_raw: str = Field(
+        "15m", validation_alias="PREDICT_BOOTSTRAP_WINDOW")
+    # Horizons offered while bootstrapping, each published only while it is no
+    # longer than the data actually observed (see _capped_horizons). Projecting
+    # an hour ahead from two minutes of data is not a forecast, it is a straight
+    # line with a huge error bar — so early projections are deliberately short,
+    # and the configured FUTURE_HORIZONS resume once the aggregate takes over.
+    predict_bootstrap_horizons_raw: str = Field(
+        "1m,2m,5m", validation_alias="PREDICT_BOOTSTRAP_HORIZONS")
     # --- insight cadence ------------------------------------------------------
     # These four numbers together decide how fast an action appears, how often it
     # is re-affirmed, and how long it lingers once the condition clears. They are
@@ -162,6 +183,14 @@ class Settings(BaseSettings):
     @property
     def predict_train_window(self) -> timedelta:
         return parse_duration(self.predict_train_window_raw)
+
+    @property
+    def predict_bootstrap_window(self) -> timedelta:
+        return parse_duration(self.predict_bootstrap_window_raw)
+
+    @property
+    def predict_bootstrap_horizons(self) -> list[timedelta]:
+        return parse_duration_list(self.predict_bootstrap_horizons_raw)
 
     @property
     def metrics_retention(self) -> timedelta:

@@ -50,6 +50,50 @@ known, now intensity-dependent rate), against **demand** persisted from recent b
 is not. That is the honest decomposition under the new composite. It is recorded rather than
 guessed at.
 
+### 2.1 Time to first forecast — the bootstrap path
+
+**The problem.** The steady model trains on `metrics_1m` and needs `MIN_BUCKETS = 10` one-minute
+buckets. That aggregate is materialized-only with `end_offset` 1 min and `schedule_interval`
+1 min, so its newest bucket lands 1–2 min late, and the job then ran only every 5 min. Observed
+on the VPS: **no projection at 5 min, none at 10 min, first one 15–20 min in.**
+
+| Stage | Cost |
+|---|---|
+| 10 × 1-minute buckets must exist | ~10 min |
+| cagg `end_offset` + `schedule_interval` | +1–2 min |
+| `PREDICT_INTERVAL_S = 300`, first run 5 min after API start | +0–5 min |
+
+**The fix.** A **bootstrap path** fits the *same* model with the *same* prediction interval to
+sub-minute buckets read straight off the raw hypertable — no materialization lag, and no
+1-minute floor on bucket width. `PREDICT_INTERVAL_S` also drops to 60.
+
+Measured (`test_bootstrap_forecasts_minutes_after_first_data`, and directly on a scratch DB
+2026-08-04):
+
+| Streaming time | Bootstrap buckets | Span | Forecast? | Horizons |
+|---|---|---|---|---|
+| 2.00 min | 8 | 1m45s | no | — |
+| 2.25 min | 9 | 2m00s | no | — |
+| **2.50 min** | **10** | **2m15s** | **yes** | `1m`, `2m` |
+| 3.00 min | 12 | 2m45s | yes | `1m`, `2m` |
+
+So the floor is **2.5 min of streaming**, plus up to one 60 s job interval → **first projection
+at 2.5–3.5 min**.
+
+**Horizons are capped by the observed span.** OLS extrapolation error grows with the *square* of
+the distance from the sample mean — the `(x*−x̄)²/Sxx` leverage term. Projecting an hour ahead
+from two minutes of data is not a forecast, it is a straight line with an error bar wide enough
+to be uninformative, and publishing it would be false precision under SPEC §2. `_capped_horizons`
+therefore publishes a horizon only while `h ≤ observed span`, which is why the earliest
+projections are deliberately short ones.
+
+**It is a warm-up, not a replacement.** As soon as `metrics_1m` holds `MIN_BUCKETS` for a device,
+that device returns to the steady path with the configured `FUTURE_HORIZONS` — steady-state
+behaviour is unchanged. Bootstrap rows carry `model_version = "trend-ols-boot-1"` and
+`/api/forecasts/latest` sets `provisional: true`, so the UI can say the projection is early
+rather than presenting it as established. The bootstrap query only runs for devices the
+aggregate cannot yet serve; once all devices are established it is skipped entirely.
+
 ## 3. Windows
 
 - **Bucket means are weighted by row count.** A `metrics_1m` row is a 1-minute bucket

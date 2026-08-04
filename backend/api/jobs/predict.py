@@ -59,6 +59,12 @@ from common.config import Settings
 log = logging.getLogger("api.jobs.predict")
 
 MODEL_VERSION = "trend-ols-1"
+# Same model, same prediction interval — the only differences are the source
+# table, the bucket width and the (shorter, span-capped) horizons. A distinct
+# version string so the UI can label these as provisional and so a stored row
+# says which path produced it. The frontend's band note keys off "scenario" and
+# correctly treats both of these as a statistical prediction interval.
+MODEL_VERSION_BOOTSTRAP = "trend-ols-boot-1"
 MIN_BUCKETS = 10
 
 # --- dose-model constants -----------------------------------------------------
@@ -187,6 +193,24 @@ def fit(history: pd.DataFrame, horizons: list[timedelta]) -> dict[timedelta, For
     return _fit_linear_fallback(x, y, horizons)
 
 
+def _capped_horizons(horizons: list[timedelta],
+                     observed_span: timedelta) -> list[timedelta]:
+    """Horizons no longer than the data actually observed.
+
+    OLS extrapolation error grows with the SQUARE of the distance from the mean
+    of the sample — the `(x* - xbar)^2 / Sxx` leverage term in the prediction
+    interval. Projecting an hour from two minutes of data is not a forecast; it
+    is a straight line with an error bar wide enough to be uninformative, and
+    publishing it would be false precision under SPEC §2.
+
+    Bounding the horizon by the observed span keeps every published point inside
+    roughly one sample-length of extrapolation. It is a deliberately
+    conservative rule and it is the reason the very first projections are short
+    ones — which is the intended behaviour, not a limitation of the bootstrap.
+    """
+    return [h for h in horizons if h <= observed_span]
+
+
 class PredictJob:
     """Every PREDICT_INTERVAL_S: per device with ≥10 buckets in
     PREDICT_TRAIN_WINDOW, fit → one forecasts row per horizon (same made_at).
@@ -219,6 +243,41 @@ class PredictJob:
                 self.last_error = str(exc)
                 log.exception("predict run failed")
 
+    async def _bootstrap_buckets(
+        self, made_at: datetime, device_ids: list[str],
+    ) -> dict[str, list]:
+        """Sub-minute buckets straight off the raw hypertable.
+
+        Same shape as the `metrics_1m` rows the steady path uses, so `fit()`
+        consumes either unchanged. Reading raw is what removes the aggregate's
+        materialization lag AND the 1-minute floor on bucket width, which
+        together are what made the first forecast take 15-20 minutes.
+
+        The HAVING clause drops the trailing partial bucket (and any bucket the
+        device only half-covered): `time_bucket` floors, so the newest bucket is
+        always incomplete and would otherwise contribute a mean computed from a
+        handful of samples as though it carried the same weight as a full one.
+        """
+        s = self._settings
+        bucket = timedelta(seconds=s.predict_bootstrap_bucket_s)
+        min_samples = int(0.5 * s.output_hz * s.predict_bootstrap_bucket_s)
+        rows = await self._pool.fetch(
+            """SELECT device_id,
+                      time_bucket($2::interval, time) AS bucket,
+                      avg(composite) AS composite,
+                      avg(m3)        AS m3
+               FROM metrics
+               WHERE time >= $1 AND device_id = ANY($3::text[])
+               GROUP BY device_id, bucket
+               HAVING count(*) >= $4
+               ORDER BY device_id, bucket""",
+            made_at - s.predict_bootstrap_window, bucket, device_ids, min_samples,
+        )
+        out: dict[str, list] = {}
+        for r in rows:
+            out.setdefault(r["device_id"], []).append(r)
+        return out
+
     async def run_once(self) -> int:
         """One prediction sweep; returns number of devices forecast."""
         made_at = datetime.now(tz=timezone.utc)
@@ -240,12 +299,37 @@ class PredictJob:
         for r in rows:
             by_device.setdefault(r["device_id"], []).append(r)
 
+        # Devices the aggregate can already serve take the steady path unchanged.
+        # Everything else — a brand-new device, or one still inside its first ~11
+        # minutes — is a bootstrap candidate. A device absent from `metrics_1m`
+        # entirely cannot be discovered from the query above, so the candidate
+        # list comes from the registry. Once every device is established this
+        # set is empty and no raw query runs at all.
+        established = {d for d, r in by_device.items() if len(r) >= MIN_BUCKETS}
+        registered = {
+            r["device_id"] for r in await self._pool.fetch("SELECT device_id FROM devices")
+        }
+        candidates = sorted(registered - established)
+        boot = await self._bootstrap_buckets(made_at, candidates) if candidates else {}
+
         forecast_count = 0
-        for device_id, dev_rows in by_device.items():
-            if len(dev_rows) < MIN_BUCKETS:
-                log.info("skip %s: only %d/%d buckets in train window",
-                         device_id, len(dev_rows), MIN_BUCKETS)
-                continue
+        for device_id in sorted(established | set(boot)):
+            if device_id in established:
+                dev_rows, model, use_horizons = by_device[device_id], MODEL_VERSION, horizons
+            else:
+                dev_rows = boot[device_id]
+                if len(dev_rows) < MIN_BUCKETS:
+                    log.info("skip %s: only %d/%d bootstrap buckets",
+                             device_id, len(dev_rows), MIN_BUCKETS)
+                    continue
+                model = MODEL_VERSION_BOOTSTRAP
+                span = dev_rows[-1]["bucket"] - dev_rows[0]["bucket"]
+                use_horizons = _capped_horizons(
+                    self._settings.predict_bootstrap_horizons, span)
+                if not use_horizons:
+                    log.info("skip %s: %s of data supports no bootstrap horizon",
+                             device_id, span)
+                    continue
             # MIN_BUCKETS is a raw count over the whole train window: it says
             # nothing about RECENCY, so a device that streamed for 20 minutes
             # and then went offline an hour ago still passes it. Without this
@@ -262,7 +346,7 @@ class PredictJob:
                      "composite": [r["composite"] for r in dev_rows],
                      "m3": [r["m3"] for r in dev_rows]}
                 )
-                forecasts = fit(history, horizons)
+                forecasts = fit(history, use_horizons)
                 await self._pool.executemany(
                     """INSERT INTO forecasts (made_at, device_id, horizon, target_time,
                                               composite_pred, ci_low, ci_high, model_version)
@@ -276,7 +360,7 @@ class PredictJob:
                         # these `made_at + h` overstated every horizon by the
                         # size of that lag.
                         (made_at, device_id, h, t_end + h,
-                         f.pred, f.ci_low, f.ci_high, MODEL_VERSION)
+                         f.pred, f.ci_low, f.ci_high, model)
                         for h, f in forecasts.items()
                     ],
                 )
