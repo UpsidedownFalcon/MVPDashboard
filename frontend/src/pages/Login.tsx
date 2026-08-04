@@ -3,7 +3,7 @@
 
 import { useState, type FormEvent } from 'react'
 import { Navigate, useNavigate } from 'react-router-dom'
-import logoMark from '../assets/logo-mark.svg'
+import { LogoMark } from '../components/Logo'
 import { ApiError } from '../lib/api'
 import { useAuth } from '../lib/auth'
 import '../app.css'
@@ -40,7 +40,7 @@ export default function Login() {
     <div className="login">
       <div className="login-glow" aria-hidden />
       <form className="login-card" onSubmit={(e) => void submit(e)}>
-        <img className="login-mark" src={logoMark} alt="" aria-hidden />
+        <LogoMark className="login-mark" />
         <h1 className="login-title">HIPPOS</h1>
         <div className="eyebrow login-eyebrow">Motion Intelligence</div>
         <label className="login-label" htmlFor="username">

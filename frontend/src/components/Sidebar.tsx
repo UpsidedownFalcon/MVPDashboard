@@ -4,7 +4,7 @@
 
 import { LayoutGrid, LogOut } from 'lucide-react'
 import { NavLink } from 'react-router-dom'
-import logoFull from '../assets/logo-full.svg'
+import { LogoFull } from './Logo'
 import { useAuth } from '../lib/auth'
 import { useVisibleDevices } from '../lib/devices'
 import { metricValue } from '../lib/format'
@@ -19,7 +19,7 @@ export default function Sidebar() {
   return (
     <aside className="sb">
       <NavLink to="/" className="sb-logo" aria-label="HIPPOS overview">
-        <img src={logoFull} alt="HIPPOS" />
+        <LogoFull className="sb-logo-mark" />
         <span className="eyebrow">Motion Intelligence</span>
       </NavLink>
 

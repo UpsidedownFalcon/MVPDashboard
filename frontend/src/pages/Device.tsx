@@ -14,6 +14,8 @@ import {
   SensorDots,
   StatusBadge,
 } from '../components/bits'
+import Battery from '../components/Battery'
+import CalibrationBadge, { useCalibrationState } from '../components/CalibrationBadge'
 import ForecastChart from '../components/ForecastChart'
 import HistoryBars from '../components/HistoryBars'
 import HumanoidFigure, { type LimbState } from '../components/HumanoidFigure'
@@ -93,6 +95,7 @@ export default function Device() {
   }
 
   const getData = () => getBuffer(id)
+  const calibration = useCalibrationState(id, device.online, live?.flags)
   // signed m5 -> which side is carrying more load right now ('even' and null
   // both mean "no emphasis")
   const side = m5Side(live?.m[4] ?? null)
@@ -107,9 +110,14 @@ export default function Device() {
         </Link>
         <RenameInline device={device} />
         <StatusBadge online={device.online} />
+        <CalibrationBadge state={calibration} />
         <QualityMeter quality={live?.q ?? device.quality} />
         <SensorDots sensors={device.sensors} detailed />
         <FlagChips flags={live?.flags ?? []} />
+        {/* battery, top-right */}
+        <span className="device-head-battery">
+          <Battery soc={device.soc} />
+        </span>
       </header>
 
       <div className="device-cols">

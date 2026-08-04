@@ -112,10 +112,14 @@ class DeviceSim:
 
     def __init__(self, device_id: int, streams: dict[tuple[int, int], np.ndarray],
                  rate: float, drift_ppm: float, rng: random.Random, start: float,
-                 dead_sensors: frozenset[tuple[int, int]] = frozenset()) -> None:
+                 dead_sensors: frozenset[tuple[int, int]] = frozenset(),
+                 soc: int = 100, soc_drain_per_min: float = 0.0) -> None:
         self.device_id = device_id
         self.stats = DeviceStats()
         self._streams: list[_Stream] = []
+        self._start = start
+        self._soc0 = soc
+        self._soc_drain = soc_drain_per_min
         # one µs counter per (device, source): both sensors of a leg MCU share it
         source_ts0 = {src: float(rng.randrange(0, 2**32)) for src in (0, 1)}
         for src, sen in STREAM_KEYS:
@@ -137,13 +141,19 @@ class DeviceSim:
     def due_payloads(self, now: float) -> list[bytes]:
         """All payloads whose send time has arrived; advances clocks (loops file)."""
         out: list[bytes] = []
+        # Battery: source 1 drains at 1.5x source 0, so the two leg MCUs differ
+        # and the UI's "show the lowest" rule is actually exercised.
+        elapsed_min = max(0.0, (now - self._start)) / 60.0
         for st in self._streams:
             while st.next_send <= now:
                 imu6 = st.imu[st.index % len(st.imu)]
                 # device time at the scheduled sample moment, from the source clock
                 ts_us = st.ts_base + (st.next_send - st.t0) * 1e6 * st.skew
+                drain = self._soc_drain * elapsed_min * (1.5 if st.source_id else 1.0)
+                soc = int(max(0, min(100, round(self._soc0 - drain))))
                 out.append(packet.encode(st.device_id, st.source_id, st.sensor_id,
-                                         int(ts_us) & 0xFFFFFFFF, imu6))  # natural u32 wrap
+                                         int(ts_us) & 0xFFFFFFFF, imu6,  # natural u32 wrap
+                                         soc=soc))
                 st.index += 1
                 st.next_send += st.period_s
         return out
@@ -175,7 +185,8 @@ async def run(args: argparse.Namespace) -> None:
     if dead:
         print(f"simulating dead sensors (src,sen): {sorted(dead)}")
     devices = [DeviceSim(args.base_id + d, streams, args.rate, args.drift, rng, start,
-                         dead_sensors=dead)
+                         dead_sensors=dead, soc=args.soc,
+                         soc_drain_per_min=args.soc_drain)
                for d in range(args.devices)]
     delayed: list[tuple[float, int, bytes, int]] = []  # (release_time, seq, payload, dev_idx)
     seq = 0
@@ -238,6 +249,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="clock skew (ppm) split between the two sources (legs drift apart)")
     p.add_argument("--seed", type=int, default=None, help="RNG seed for reproducibility")
     p.add_argument("--duration", type=float, default=None, help="stop after N seconds (default: run forever)")
+    p.add_argument("--soc", type=int, default=100,
+                   help="starting battery state of charge (0-100) in the trailing "
+                        "soc byte of every datagram (TRD §3)")
+    p.add_argument("--soc-drain", type=float, default=0.0, dest="soc_drain",
+                   help="battery drain per minute; source 1 drains 1.5x faster than "
+                        "source 0, so the two leg MCUs diverge and the UI's "
+                        "'show the lowest' rule is exercised")
     p.add_argument("--dead-sensors", default="",
                    help="simulate sensor failure: comma-separated src:sen pairs that "
                         "never transmit, e.g. '0:1' or '0:1,0:2'. Exercises the biomech "

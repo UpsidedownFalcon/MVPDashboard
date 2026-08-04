@@ -36,11 +36,15 @@
   padding: 0 20px 18px;
 }
 
-.sb-logo img {
+/* Inline SVG, so currentColor resolves against this rule. (An <img>-loaded SVG
+   is an isolated document where currentColor is black, and the old
+   `filter: brightness(10)` could not fix it — brightness multiplies, so pure
+   black stays pure black. That is why the logo was invisible.) */
+.sb-logo-mark {
   height: 20px;
   width: auto;
   align-self: flex-start;
-  filter: brightness(10); /* force pure white regardless of svg ink */
+  color: var(--ink);
 }
 
 .sb-nav {
@@ -282,14 +286,20 @@
   justify-content: center;
 }
 
-.figure-hero svg {
-  width: 190px;
+.figure-canvas {
+  display: block;
+  position: relative;
+  z-index: 1;
+}
+
+.figure-hero .figure-canvas {
+  width: 200px;
   height: 380px;
 }
 
-.figure-compact svg {
-  width: 108px;
-  height: 216px;
+.figure-compact .figure-canvas {
+  width: 120px;
+  height: 220px;
 }
 
 .figure-glow {
@@ -565,6 +575,114 @@
   border-radius: 1.5px;
 }
 
+/* --- battery ------------------------------------------------------------- */
+
+.device-card-battery,
+.device-head-battery {
+  margin-left: auto;
+}
+
+.battery {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  white-space: nowrap;
+}
+
+.battery-shell {
+  position: relative;
+  width: 26px;
+  height: 13px;
+  border: 1.5px solid var(--ink-2);
+  border-radius: 3px;
+  padding: 1.5px;
+  display: block;
+}
+
+.battery-fill {
+  display: block;
+  height: 100%;
+  border-radius: 1px;
+  transition: width 0.6s ease;
+}
+
+.battery-bolt {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 9px;
+  height: 9px;
+  color: var(--bg);
+}
+
+.battery-cap {
+  width: 2px;
+  height: 6px;
+  border-radius: 0 1px 1px 0;
+  display: block;
+}
+
+.battery-pct {
+  margin-left: 6px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* a critically low battery is the one case worth pulling the eye */
+.battery-critical .battery-fill {
+  animation: battery-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes battery-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+/* --- calibration badge --------------------------------------------------- */
+
+.calibrating {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  background: rgba(33, 243, 252, 0.08);
+  animation: calibrating-flash 1.8s ease-in-out infinite;
+  font-variant-numeric: tabular-nums;
+}
+
+.calibrating-spin {
+  width: 12px;
+  height: 12px;
+  animation: calibrating-rotate 1.6s linear infinite;
+}
+
+@keyframes calibrating-flash {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+
+@keyframes calibrating-rotate {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .calibrating,
+  .calibrating-spin,
+  .battery-critical .battery-fill {
+    animation: none;
+  }
+}
+
 .sensors {
   display: inline-flex;
   gap: 6px;
@@ -722,8 +840,9 @@
 
 .login-mark {
   height: 40px;
+  width: auto;
   align-self: center;
-  filter: brightness(10);
+  color: var(--ink); /* inline SVG: currentColor, no filter hack */
   margin-bottom: 12px;
 }
 

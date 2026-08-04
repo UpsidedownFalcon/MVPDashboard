@@ -366,9 +366,14 @@ async def devices(
                 "last_seen": _iso_ms(float(sensor_seen_raw)) if sensor_seen_raw else None,
             })
 
+        # Battery state of charge, 0-100. `dev:{id}:soc` is already the minimum
+        # across the device's leg MCUs (publish.py) -- a dying unit must not
+        # hide behind a healthy one. None until a datagram has been seen.
+        soc_raw = stats.get(f"dev:{dev}:soc")
         out.append({
             "device_id": dev,
             "display_name": row["display_name"],
+            "soc": int(soc_raw) if soc_raw is not None else None,
             "online": (
                 last_seen_ms is not None and (now_ms - last_seen_ms) <= threshold_ms
             ),

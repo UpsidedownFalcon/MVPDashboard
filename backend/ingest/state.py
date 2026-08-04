@@ -92,6 +92,12 @@ class DeviceState:
         self.last_seen: float = 0.0
         self.user_state: dict = {}   # biomech session state (T15)
         self.last_metrics = None     # latest Metrics, for the 1s diag publish
+        # Battery state of charge, per leg MCU: {source_id: 0..100}. The wire
+        # carries one `soc` byte per datagram (TRD §3) and each source_id is a
+        # separate MCU with its own battery, so they are tracked separately and
+        # the UI shows the LOWEST -- a dying leg unit must not hide behind a
+        # healthy one.
+        self.soc: dict[int, int] = {}
 
     def sensor(self, source_id: int, sensor_id: int) -> SensorState:
         key = (source_id, sensor_id)
@@ -185,6 +191,12 @@ class Registry:
             if device is None:
                 continue
             device.last_seen = recv_time
+            # Battery: the newest datagram in this slice wins. Cheap (one
+            # array index) and it is the only place the decoded `soc` is still
+            # in scope -- SampleChunk deliberately does not carry it, since it
+            # is per-device telemetry, not a per-sample signal.
+            if len(batch.soc):
+                device.soc[source_id] = int(batch.soc[idx[-1]])
             sensor = device.sensor(source_id, sensor_id)
             imu = batch.imu[idx]
             # Clipping is unrecoverable and a clipped impact still matters, so

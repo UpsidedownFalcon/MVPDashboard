@@ -110,6 +110,13 @@ class Publisher:
             mapping[f"dev:{device_id}:tick_rate"] = f"{device.tick_rate:.1f}"
             if device.quality_ema is not None:
                 mapping[f"dev:{device_id}:quality"] = f"{device.quality_ema:.3f}"
+            # Battery: publish the LOWEST of the device's leg MCUs, so a dying
+            # unit cannot hide behind a healthy one. Per-source values go out
+            # too, for diagnosis.
+            if device.soc:
+                mapping[f"dev:{device_id}:soc"] = str(min(device.soc.values()))
+                for src, soc in device.soc.items():
+                    mapping[f"dev:{device_id}:soc:{src}"] = str(soc)
             for (src, sen), sensor in device.sensors.items():
                 p = f"sensor:{device_id}:{src}:{sen}"
                 st = sensor.stats

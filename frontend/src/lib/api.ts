@@ -18,6 +18,10 @@ export interface Device {
   online: boolean
   last_seen: string | null
   quality: number | null
+  /** Battery state of charge 0–100, already the LOWEST across the device's two
+   *  leg MCUs (a dying unit must not hide behind a healthy one). `null` until a
+   *  datagram has been seen. */
+  soc: number | null
   sensors: Sensor[]
 }
 

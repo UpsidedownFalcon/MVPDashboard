@@ -11,6 +11,8 @@ import type { LiveDevice } from '../lib/devices'
 import { durationToSeconds, horizonLabel, metricValue, timeAgo } from '../lib/format'
 import { COMPOSITE, SEVERITY_RANK } from '../lib/metrics'
 import { useLive } from '../lib/ws'
+import Battery from './Battery'
+import CalibrationBadge, { useCalibrationState } from './CalibrationBadge'
 import { FlagChips, QualityMeter, RenameInline, SensorDots, SeverityChip, StatusBadge } from './bits'
 import LiveChart from './LiveChart'
 import RiskStat from './RiskStat'
@@ -27,6 +29,7 @@ export default function DeviceCard({ device }: { device: LiveDevice }) {
   const navigate = useNavigate()
   const { latest, getBuffer } = useLive()
   const live = latest[device.device_id]
+  const calibration = useCalibrationState(device.device_id, device.online, live?.flags)
 
   const forecasts = useQuery({
     queryKey: ['forecasts', device.device_id],
@@ -63,8 +66,13 @@ export default function DeviceCard({ device }: { device: LiveDevice }) {
       <header className="device-card-head">
         <RenameInline device={device} />
         <StatusBadge online={device.online} />
+        <CalibrationBadge state={calibration} />
         <QualityMeter quality={live?.q ?? device.quality} />
         <SensorDots sensors={device.sensors} />
+        {/* battery sits top-right, phone-style */}
+        <span className="device-card-battery">
+          <Battery soc={device.soc} />
+        </span>
       </header>
 
       {closest ? (
