@@ -135,17 +135,35 @@ critical with "no data". Active flag chips right-aligned.
   `degraded_sensors`/`partial` grey it with the §6 warning/alert chip instead
   ("no data from R-shin"). The two states must never look alike (§6).
 
-**Right column — three pill tabs** (old-mockup pattern: pill, inactive = muted text
-+ transparent border, active = accent text + accent hairline border + 4% wash;
-proper `tablist`/`tab`/`tabpanel` roles, arrow-key navigation):
+**Right column — exactly three pill tabs** (old-mockup pattern: pill, inactive =
+muted text + transparent border, active = accent text + accent hairline border +
+4% wash; proper `tablist`/`tab`/`tabpanel` roles, arrow-key navigation):
 
-1. **Insights** (`GET /api/insights?device`, poll 30 s) — newest first. Each card:
-   severity chip + icon (§6), then the **`action` as an imperative headline**
-   (semibold, primary ink — color lives in the chip, never the text), then
-   `rationale` in secondary ink (the why, from measured metrics), then an
-   "evidence" expander rendering the `context` values, then relative time.
-   Rows missing `action`/`rationale` (pre-refinement rules) render `message` as
-   the headline. Severity also paints a 3px left border on the card.
+1. **Insights** — the advice standing right now, as cards. Source:
+   `GET /api/insights/current?device` (poll 10 s, `POLL_ADVICE_MS`), which is
+   already grouped, deduped, severity-ranked and capped at 3 server-side —
+   **the client must not repeat any of that**. Because that route deliberately
+   drops `context` and the long `rationale`, the panel also fetches
+   `GET /api/insights?device&limit=50` and joins on `(rule_id, created_at)`
+   purely to recover evidence.
+
+   **Card anatomy, in order** — the first line is what to do, so the eye lands
+   on the action before anything else:
+   1. severity chip + icon (§6), `unvalidated metric` chip when the action's
+      every reason is m4/m5, and "updated Ns ago";
+   2. **the action as a large bold headline** (22px/700, primary ink — colour
+      lives in the chip and the 3px severity left border, never the text);
+   3. **blank vertical space — no separator rule** (an `<hr>` here reads as a
+      divide between two things rather than one card);
+   4. the rationale as ordinary sentences, one paragraph per supporting reason,
+      falling back to the short `reason` text when the join misses;
+   5. the **static coaching cue** (`tip`), under a mandatory
+      **"General cue — not measured"** label — it is catalogue text, identical
+      every firing, and must never read as a finding about this athlete;
+   6. the **Evidence expander** (`<details>`) over the joined `context`.
+
+   Empty `actions` is a calm empty state, never a warning — it is the normal
+   early-session condition. `aria-live="polite"` announces new advice.
 2. **History** (`GET /api/metrics/history?device&window`, poll 60 s) — a period
    selector row at the top: one segmented control listing the configured
    `PAST_WINDOWS` labels ("past 5m / 30m / 2h" — generated from config), one
@@ -158,7 +176,13 @@ proper `tablist`/`tab`/`tabpanel` roles, arrow-key navigation):
    5m)". A table-view toggle (one table for all metrics × buckets) sits at the
    row's right end — every charted value is reachable without hover.
 3. **Projections** (`GET /api/forecasts/latest?device`, poll 60 s) — composite
-   only (PRD; confirmed). Top: per-horizon stat row mirroring the §3 stack.
+   only (PRD; confirmed). **The horizon set is not fixed** — it starts 1m/2m and
+   becomes 10m/30m/1h — so horizons are always read from `points` and never
+   assumed to be three. When `provisional` is true (`trend-ols-boot-1`) an
+   "early projection" chip marks it so a bootstrapped forecast does not look as
+   settled as a mature one; the band label is unaffected, since both models
+   produce a genuine statistical prediction interval.
+   Top: per-horizon stat row mirroring the §3 stack.
    Below: one ECharts chart — recent actuals (solid 2px composite line, from the
    shortest configured history window) continuing into per-horizon forecast
    points (≥8px markers with 2px surface ring) with a CI band (composite hue at

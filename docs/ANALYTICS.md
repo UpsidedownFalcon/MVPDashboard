@@ -269,11 +269,43 @@ into it, and several share one on purpose:
 
 | `action_id` | Headline | Rules |
 |---|---|---|
-| `ease_off` | *Ease off* | `load_spike`, `composite_high` |
-| `cap_session` | *Cap this session* | `accumulated_load` |
-| `plan_recovery` | *Plan recovery* | `residual_load`, `rising_risk` |
-| `check_mechanics` | *Check mechanics* | `impact_deviation`, `movement_quality` |
-| `check_sensors` | *Check sensor fit* | `data_quality` |
+| `ease_off` | *Drop the next block down one level* | `load_spike`, `composite_high` |
+| `cap_session` | *No more hard sets — easy work only* | `accumulated_load` |
+| `plan_recovery` | *Leave a longer gap before the next hard block* | `residual_load`, `rising_risk` |
+| `lower_landings` | *Lower the landing height or cut the reps* | `impact_deviation` when **m1** moved |
+| `soften_landings` | *Soften the landings — check the surface* | `impact_deviation` when **m2** moved |
+| `flag_review` | *Worth a look at the next check-in* | `movement_quality` |
+| `check_sensors` | *Re-seat the straps and check the battery* | `data_quality` |
+
+**Headlines name a lever (revised 2026-08-04).** They were deliberately 2–3 words on the
+reasoning that a headline long enough to wrap stops reading as an instruction. Reversed by
+product-owner decision: at that length the headline was not actionable — a trainer reading
+*"Check mechanics"* learns nothing they can do. Headlines now name the lever the trainer
+controls (intensity, sets, landing height, surface, the gap, the straps) and stay one short
+clause. What they may **not** say is bounded by evidence, not taste: never a body part,
+tissue or outcome (`m1`/`m2` are surrogates for *external* impact loading — Matijevich 2019,
+r = −0.29 ± 0.37); never a foot-strike prescription (the sensors are shank+thigh and the
+model is movement-agnostic by mandate, SPEC §1.2, so foot contact is simply not observed);
+never a stretch or treatment (PRD §5, "no medical claims"). Timings must be model
+arithmetic — the only defensible one available is `m3`'s decay, which is **two pools**
+(`DOSE_HALFLIFE_S` 15 min for easy work, `DOSE_HALFLIFE_SLOW_S` 90 min for hard).
+
+**`check_mechanics` was split.** It carried `impact_deviation` (m1/m2) and
+`movement_quality` (m4/m5) under one imperative despite very different evidence licence:
+SPEC §11.1 forbids presenting m4/m5 to a trainer as a finding at all. Grouping them let
+unvalidated evidence sit behind concrete advice about landings. `flag_review` now keeps that
+advice soft and separate, and `test_unvalidated_advice_never_shares_a_headline_with_validated_advice`
+pins the property.
+
+**`Rule.action_id` may be a callable.** `impact_deviation` already knew whether `m1` or `m2`
+deviated and discarded it to emit one generic headline; peak shock (height/volume) and
+loading rate (technique/surface) call for different levers, so it now routes to
+`lower_landings` or `soften_landings`. Resolved once, at insert time, via
+`Rule.resolve_action_id()`.
+
+**`Action.tip`** is a static coaching cue per action — the same text every time it fires,
+**not** derived from the athlete's data. The UI renders it under an explicit
+"General cue — not measured" label so it can never read as a finding.
 
 `group_actions()` collapses the rows inside the hold window: group on `action_id`, keep **only the
 newest row per rule** (the hold/cooldown overlap guarantees duplicates), rank by severity then by

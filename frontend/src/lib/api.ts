@@ -62,6 +62,13 @@ export interface ForecastPoint {
 export interface Forecasts {
   made_at: string
   model_version: string
+  /** True while the forecast is still bootstrapping from raw buckets
+   *  (`trend-ols-boot-1`). Both models produce a genuine statistical prediction
+   *  interval, so the band label is unaffected — but an early projection must
+   *  not look as settled as a mature one. */
+  provisional?: boolean
+  /** Horizon set is NOT fixed: it starts 1m/2m and becomes 10m/30m/1h. Always
+   *  read horizons from these points; never assume a count. */
   points: ForecastPoint[]
 }
 
@@ -94,6 +101,11 @@ export interface AdviceReason {
 export interface AdviceAction {
   action_id: string
   action: string
+  /** Static coaching cue from the action catalogue — the SAME text every time
+   *  this action fires and NOT derived from this athlete's data. Must be
+   *  rendered under an explicit "General cue — not measured" label so it can
+   *  never read as a finding. */
+  tip: string | null
   severity: Severity
   updated_at: string
   unvalidated: boolean

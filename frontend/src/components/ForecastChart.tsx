@@ -6,7 +6,7 @@
 
 import { useQuery } from '@tanstack/react-query'
 import type { EChartsOption } from 'echarts'
-import { Table2 } from 'lucide-react'
+import { Hourglass, Table2 } from 'lucide-react'
 import { useState } from 'react'
 import { fetchForecasts, fetchHistory } from '../lib/api'
 import { HISTORY_MAX_BUCKETS, POLL_FORECASTS_MS } from '../lib/config'
@@ -53,7 +53,9 @@ export default function ForecastChart({
 
   if (forecasts.isLoading) return <p className="notice">Loading projections…</p>
   if (!forecasts.data) {
-    return <p className="notice">Waiting for the first projection run…</p>
+    // Bootstrapped forecasts arrive in ~2.5-3.5 min, not the old 15-20, so the
+    // wait is short enough to name.
+    return <p className="notice">First projection in a couple of minutes…</p>
   }
 
   const fc = forecasts.data
@@ -157,6 +159,14 @@ export default function ForecastChart({
 
   return (
     <div className="forecast">
+      {fc.provisional && (
+        <div className="forecast-provisional">
+          <span className="chip flag flag-muted" title="Built from a short bootstrap history — the horizons are close-in and the interval is wide. It settles as the session accumulates data.">
+            <Hourglass aria-hidden /> early projection
+          </span>
+          <span>Based on a short history so far — treat as provisional.</span>
+        </div>
+      )}
       <div className="forecast-stats">
         {points.map((p, i) => (
           <RiskStat

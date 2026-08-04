@@ -208,24 +208,88 @@ class Ctx:
 # instruction, and showing "Ease off" twice with two rationales is noise, while
 # showing it once with two reasons underneath is evidence.
 #
-# `text` is deliberately 2-3 words: it renders as the large headline, and a
-# headline long enough to wrap stops reading as an instruction.
+# 🚩 `text` was deliberately 2-3 words ("Ease off", "Check mechanics") on the
+# reasoning that a headline long enough to wrap stops reading as an instruction.
+# REVERSED 2026-08-04 by product-owner decision: at that length the headline was
+# not actionable -- a trainer reading "Check mechanics" learns nothing they can
+# do. Headlines now name the LEVER the trainer controls. Keep them one short
+# clause; do not let them grow into sentences.
+#
+# What a headline may and may not say is bounded by evidence, not taste:
+#   - Name a lever the trainer controls: intensity, sets, landing height, reps,
+#     surface, the gap before the next block, the straps.
+#   - NEVER name a body part, tissue, or outcome -- m1/m2 are surrogates for
+#     EXTERNAL impact loading and do not track internal tibial load
+#     (Matijevich 2019, r = -0.29 +- 0.37; SPEC Section 2).
+#   - NEVER prescribe a foot-strike pattern. The sensors are shank+thigh and the
+#     model is movement-agnostic by mandate (SPEC Section 1.2, "no activity
+#     classifier"), so foot contact is not observed. Advice about it would be
+#     fabricated from data that does not exist.
+#   - NEVER prescribe a stretch or any treatment: PRD Section 5 non-goal, "no
+#     medical claims -- a training-load guidance tool, not a diagnostic device".
+#   - Timings must be model arithmetic, not invented. The only defensible one
+#     available is m3's decay half-life (DOSE_HALFLIFE, biomech SPEC Section 5.3).
+#
+# `tip` is a STATIC coaching cue per action. It is the same text every time the
+# action fires and is NOT derived from this athlete's data -- the UI renders it
+# under an explicit "General cue - not measured" label so it can never read as a
+# finding. Keep tips to technique/setup generalities that hold regardless of what
+# the sensors saw.
 
 @dataclass(frozen=True)
 class Action:
     action_id: str
     text: str    # short imperative, rendered large
     rank: int    # tie-break within equal severity; lower = surfaced first
+    tip: str = ""   # static coaching cue; never data-derived (see above)
 
 
 ACTIONS: dict[str, Action] = {
     a.action_id: a for a in (
         # Ordered by how directly each changes what happens in the next minute.
-        Action("ease_off", "Ease off", 1),
-        Action("cap_session", "Cap this session", 2),
-        Action("plan_recovery", "Plan recovery", 3),
-        Action("check_mechanics", "Check mechanics", 4),
-        Action("check_sensors", "Check sensor fit", 5),
+        Action(
+            "ease_off", "Drop the next block down one level", 1,
+            "Keep the next effort conversational — if they cannot talk through"
+            " it, it is still too hard.",
+        ),
+        Action(
+            "cap_session", "No more hard sets — easy work only", 2,
+            "Finish with low-intensity movement rather than stopping dead; keep"
+            " the remaining work continuous and light.",
+        ),
+        Action(
+            "plan_recovery", "Leave a longer gap before the next hard block", 3,
+            # Model arithmetic, not an invented duration: dose is filed to two
+            # pools at the moment it is earned (biomech.py DOSE_HALFLIFE_S /
+            # DOSE_HALFLIFE_SLOW_S). Hard work is filed to the slow pool, so it
+            # is the 90-minute figure that governs recovery from a hard block.
+            "Load earned in hard work falls by about half every 90 minutes at"
+            " rest — easy work clears far faster, in around 15.",
+        ),
+        # check_mechanics was split 2026-08-04. It grouped impact_deviation
+        # (m1/m2) with movement_quality (m4/m5) under one headline despite very
+        # different evidence licence: SPEC Section 11.1 forbids presenting m4/m5
+        # to a trainer as a finding at all, while m1/m2 support concrete advice.
+        Action(
+            "lower_landings", "Lower the landing height or cut the reps", 4,
+            "Peak shock scales with drop height far more than with effort —"
+            " lowering the box or the jump does more than cueing harder.",
+        ),
+        Action(
+            "soften_landings", "Soften the landings — check the surface", 4,
+            "Cue quieter, more absorbed contacts, and check what they are"
+            " landing on: a harder surface raises loading rate on its own.",
+        ),
+        Action(
+            "flag_review", "Worth a look at the next check-in", 5,
+            "Movement Control and L/R Balance have no real-world validation yet"
+            " — treat this as something to watch, not to act on today.",
+        ),
+        Action(
+            "check_sensors", "Re-seat the straps and check the battery", 6,
+            "A strap that has worked loose mid-session is the most common cause;"
+            " re-seat it snugly over the muscle belly, not the joint.",
+        ),
     )
 }
 
@@ -246,8 +310,19 @@ class Rule:
     # current groups on — several rules share one on purpose. `reason` is ONE
     # short sentence carrying the numbers, sized to render as a bullet with no
     # expander; `rationale` stays as the long form for the audit feed.
-    action_id: str | None = None
+    #
+    # A CALLABLE `action_id` lets one rule pick its action from the evidence
+    # (2026-08-04). `impact_deviation` already knows whether m1 or m2 moved and
+    # was discarding it to emit one generic headline; peak shock and loading
+    # rate call for different levers, so it now routes to `lower_landings` or
+    # `soften_landings`. Resolved once, at insert time.
+    action_id: str | Callable[[Ctx, Evidence], str] | None = None
     reason: Callable[[Ctx, Evidence], str] | None = None
+
+    def resolve_action_id(self, ctx: Ctx, evidence: Evidence) -> str | None:
+        if callable(self.action_id):
+            return self.action_id(ctx, evidence)
+        return self.action_id
 
 
 # --- rule catalogue -----------------------------------------------------------
@@ -539,7 +614,7 @@ RULES: list[Rule] = [
             f"{ctx.display_name}: load over the last {ev['window']} is well above"
             f" their own recent norm ({ev['value']:.0f} vs {ev['baseline']:.0f})."
         ),
-        action=lambda ctx, ev: "Ease off for the rest of this session",
+        action=lambda ctx, ev: "Drop the next block down one level",
         rationale=lambda ctx, ev: (
             _deviation_rationale(ctx, ev)
             + " Doing too much in a single session relative to recent history is"
@@ -556,7 +631,7 @@ RULES: list[Rule] = [
             f"{ctx.display_name}: accumulated load is high and still climbing"
             f" ({ev['value']:.0f} over {ev['window']})."
         ),
-        action=lambda ctx, ev: "Cap this session and protect recovery",
+        action=lambda ctx, ev: "No more hard sets — easy work only",
         rationale=lambda ctx, ev: (
             _deviation_rationale(ctx, ev)
             + " Accumulated load is still trending up, so each additional bout is"
@@ -575,7 +650,7 @@ RULES: list[Rule] = [
             f"{ctx.display_name}: risk stays around {ev['settles_at']:.0f} over the"
             f" next {ev['horizon']} even if they stop now."
         ),
-        action=lambda ctx, ev: "Schedule recovery before the next session",
+        action=lambda ctx, ev: "Leave a longer gap before the next hard block",
         rationale=lambda ctx, ev: (
             f"Load already accumulated decays slowly: even with no further"
             f" training, projected risk only falls to about"
@@ -598,14 +673,22 @@ RULES: list[Rule] = [
             f"{ctx.display_name}: {ev['metric_name']} over the last {ev['window']}"
             f" is above their baseline ({ev['value']:.0f} vs {ev['baseline']:.0f})."
         ),
-        action=lambda ctx, ev: "Review landing mechanics",
+        action=lambda ctx, ev: (
+            "Lower the landing height or cut the reps"
+            if ev.get("metric") == "m1" else
+            "Soften the landings — check the surface"
+        ),
         rationale=lambda ctx, ev: (
             _deviation_rationale(ctx, ev)
             + " These measure external impact loading at the shank, not tissue"
               " stress — worth a look at technique and surface rather than a"
               " conclusion about the athlete."
         ),
-        action_id="check_mechanics",
+        # m1 = how HARD the peak is (height/volume); m2 = how FAST load arrives
+        # (technique/surface). Different levers, so different actions.
+        action_id=lambda ctx, ev: (
+            "lower_landings" if ev.get("metric") == "m1" else "soften_landings"
+        ),
         reason=lambda ctx, ev: (
             _deviation_reason(ctx, ev)
             + " This is external impact loading, not tissue stress."
@@ -619,14 +702,17 @@ RULES: list[Rule] = [
             f"{ctx.display_name}: {ev['metric_name']} has drifted from their"
             f" fresh baseline over the last {ev['window']}."
         ),
-        action=lambda ctx, ev: "Flag for review at the next check-in",
+        action=lambda ctx, ev: "Worth a look at the next check-in",
         rationale=lambda ctx, ev: (
             _deviation_rationale(ctx, ev)
             + " Reported as magnitude only — which side leads does not agree"
               " between sessions, and greater asymmetry has not been shown to"
               " predict injury."
         ),
-        action_id="check_mechanics",
+        # NOT check_mechanics: m4/m5 may not be presented as a finding at all
+        # (SPEC Section 11.1), so this advice stays soft and separate from the
+        # concrete m1/m2 landing advice it used to share a headline with.
+        action_id="flag_review",
         reason=lambda ctx, ev: (
             _deviation_reason(ctx, ev) + " Magnitude only, never a side."
         ),
@@ -639,7 +725,7 @@ RULES: list[Rule] = [
             f"{ctx.display_name}: sustained high load (composite {ev['composite_avg']:.0f}"
             f" over last {ev['window']}) — consider reducing intensity."
         ),
-        action=lambda ctx, ev: "Reduce training intensity",
+        action=lambda ctx, ev: "Drop the next block down one level",
         rationale=lambda ctx, ev: (
             f"Injury-risk load averaged {ev['composite_avg']:.0f} over the last"
             f" {ev['window']}, above the {ev['threshold']:.0f} threshold. Sustained"
@@ -659,7 +745,7 @@ RULES: list[Rule] = [
             f"{ctx.display_name}: risk rising and projected to reach {ev['pred']:.0f}"
             f" within {ev['horizon']} — schedule rest."
         ),
-        action=lambda ctx, ev: "Schedule rest before the next block",
+        action=lambda ctx, ev: "Leave a longer gap before the next hard block",
         rationale=lambda ctx, ev: (
             f"Risk has been trending up over the last {ev['window']} and is projected"
             f" to reach {ev['pred']:.0f} within {ev['horizon']}"
@@ -680,7 +766,7 @@ RULES: list[Rule] = [
             f" {ev['window']}, down from {ev['baseline_quality']:.0%} over"
             f" {ev['baseline_window']} — check sensor fit."
         ),
-        action=lambda ctx, ev: "Check sensor fit",
+        action=lambda ctx, ev: "Re-seat the straps and check the battery",
         rationale=lambda ctx, ev: (
             f"Data quality over the last {ev['window']} is {ev['quality']:.0%}, down"
             f" from {ev['baseline_quality']:.0%} over {ev['baseline_window']} — a"
@@ -756,6 +842,9 @@ def group_actions(rows: list[dict], max_actions: int) -> list[dict]:
         out.append({
             "action_id": key,
             "action": action.text if action else (top.get("action") or key),
+            # Static coaching cue, never data-derived; the UI must label it as
+            # such. None for pre-catalogue keys so the UI simply omits it.
+            "tip": (action.tip or None) if action else None,
             "severity": top["severity"],
             "updated_at": max(r["created_at"] for r in kept),
             "unvalidated": all(x["unvalidated"] for x in reasons),
@@ -868,7 +957,7 @@ class InsightJob:
                         json.dumps(evidence),
                         rule.action(ctx, evidence) if rule.action else None,
                         rule.rationale(ctx, evidence) if rule.rationale else None,
-                        rule.action_id,
+                        rule.resolve_action_id(ctx, evidence),
                         rule.reason(ctx, evidence) if rule.reason else None,
                     )
                     inserted += 1

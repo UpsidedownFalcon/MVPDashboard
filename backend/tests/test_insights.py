@@ -345,7 +345,9 @@ def test_group_actions_merges_rules_onto_one_imperative() -> None:
     actions = group_actions(rows, max_actions=3)
     assert len(actions) == 1
     a = actions[0]
-    assert a["action"] == "Ease off" and a["action_id"] == "ease_off"
+    assert a["action"] == ACTIONS["ease_off"].text and a["action_id"] == "ease_off"
+    # the static coaching cue rides the action, never the reasons
+    assert a["tip"] == ACTIONS["ease_off"].tip
     # the action inherits the STRONGEST severity among its reasons
     assert a["severity"] == "alert"
     assert [r["text"] for r in a["reasons"]] == ["high reason", "spike reason"]
@@ -365,38 +367,77 @@ def test_group_actions_dedupes_a_rule_that_refired_inside_the_hold() -> None:
 
 def test_group_actions_caps_and_ranks_by_severity() -> None:
     rows = [_row("data_quality", "check_sensors", "info", "q", 0),
-            _row("impact_deviation", "check_mechanics", "info", "i", 0),
+            _row("impact_deviation", "lower_landings", "info", "i", 0),
             _row("residual_load", "plan_recovery", "warning", "r", 0),
             _row("composite_high", "ease_off", "alert", "c", 0)]
     actions = group_actions(rows, max_actions=3)
     assert len(actions) == 3, "never more than INSIGHT_MAX_ACTIONS"
     assert [a["action_id"] for a in actions] == [
-        "ease_off", "plan_recovery", "check_mechanics",
+        "ease_off", "plan_recovery", "lower_landings",
     ], "alert first, then warning, then catalogue order within equal severity"
 
 
 def test_group_actions_flags_an_action_only_when_all_reasons_are_unvalidated() -> None:
     """m4/m5 have no real-data validation (SPEC §11.1). Marking an action that
     a validated metric also supports would understate it; marking none when they
-    are all unvalidated would overstate it."""
-    both = [_row("impact_deviation", "check_mechanics", "info", "m1 moved", 0),
-            _row("movement_quality", "check_mechanics", "info", "m4 moved", 0,
+    are all unvalidated would overstate it.
+
+    The catalogue no longer routes a validated and an unvalidated rule to the
+    same action (see the split test below), but `group_actions` is a pure
+    function and the guard must hold for any grouping it is handed.
+    """
+    both = [_row("impact_deviation", "lower_landings", "info", "m1 moved", 0),
+            _row("movement_quality", "lower_landings", "info", "m4 moved", 0,
                  unvalidated=True)]
     assert group_actions(both, 3)[0]["unvalidated"] is False
-    only = [_row("movement_quality", "check_mechanics", "info", "m4 moved", 0,
+    only = [_row("movement_quality", "flag_review", "info", "m4 moved", 0,
                  unvalidated=True)]
     assert group_actions(only, 3)[0]["unvalidated"] is True
+
+
+def test_unvalidated_advice_never_shares_a_headline_with_validated_advice() -> None:
+    """m4/m5 may not be presented to a trainer as a finding at all until they
+    have real-data validation (SPEC §11.1). `check_mechanics` used to carry
+    `impact_deviation` (m1/m2) and `movement_quality` (m4/m5) under ONE
+    imperative, which let unvalidated evidence sit behind concrete advice about
+    landings. The split is the guard, so pin it."""
+    ctx = ctx_from(make_windows())
+    ids = {r.rule_id: r.resolve_action_id(ctx, {"metric": "m1"}) for r in RULES}
+    assert ids["movement_quality"] == "flag_review"
+    assert ids["movement_quality"] not in {
+        ids[k] for k in ids if k != "movement_quality"
+    }, "unvalidated m4/m5 advice must not share an action with any other rule"
+
+
+def test_impact_deviation_routes_by_which_metric_moved() -> None:
+    """m1 (how hard the peak is) and m2 (how fast load arrives) call for
+    different levers — height/volume vs technique/surface — and the rule already
+    knows which one deviated."""
+    ctx = ctx_from(make_windows())
+    rule = RULE["impact_deviation"]
+    assert rule.resolve_action_id(ctx, {"metric": "m1"}) == "lower_landings"
+    assert rule.resolve_action_id(ctx, {"metric": "m2"}) == "soften_landings"
 
 
 def test_every_rule_maps_to_a_catalogue_action_and_a_short_reason() -> None:
     """The panel renders `reason` as a bullet with NO expander, so each one has
     to be complete and short at the same time."""
+    ctx = ctx_from(make_windows())
     for rule in RULES:
-        assert rule.action_id in ACTIONS, f"{rule.rule_id} has no catalogue action"
+        # a callable action_id must resolve into the catalogue for every metric
+        # it can route on, not just the default branch
+        for metric in ("m1", "m2", None):
+            resolved = rule.resolve_action_id(ctx, {"metric": metric})
+            assert resolved in ACTIONS, f"{rule.rule_id} -> {resolved} not in catalogue"
         assert rule.reason is not None, f"{rule.rule_id} has no short reason"
     for action in ACTIONS.values():
-        assert len(action.text) <= 20, f"{action.action_id} headline too long"
+        # Headlines name the lever, so they are longer than the original 2-3
+        # words (product-owner decision 2026-08-04) — but one short clause, not
+        # a sentence: a headline that wraps twice stops reading as an instruction.
+        assert len(action.text) <= 45, f"{action.action_id} headline too long"
         assert action.text[0].isupper()
+        assert not action.text.endswith("."), "a headline is not a sentence"
+        assert action.tip, f"{action.action_id} has no coaching cue"
 
 
 def test_every_rule_supplies_action_and_rationale_with_evidence() -> None:
@@ -585,7 +626,7 @@ async def test_current_endpoint_returns_grouped_actions(scratch_app) -> None:
     by_id = {a["action_id"]: a for a in actions}
     assert "ease_off" in by_id and "check_sensors" in by_id
     ease = by_id["ease_off"]
-    assert ease["action"] == "Ease off" and ease["severity"] == "alert"
+    assert ease["action"] == ACTIONS["ease_off"].text and ease["severity"] == "alert"
     assert ease["reasons"] and all(r["text"] for r in ease["reasons"])
     # every reason is a complete short sentence, renderable with no expander
     for a in actions:
