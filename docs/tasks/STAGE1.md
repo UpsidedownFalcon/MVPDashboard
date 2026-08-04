@@ -243,7 +243,7 @@ minute (log shows it); quality ≈ 0.95 with `--loss 5`.
 
 **Goal:** pipeline emits plausible full ticks end-to-end before the real model exists.
 **Depends:** ⛓ S1-T09.
-**Files:** `backend/ingest/biomech.py`, `backend/tests/test_biomech_stub.py`.
+**Files:** `backend/ingest/biomech.py`, `backend/tests/test_biomech.py`.
 
 Steps:
 1. Implement the **stable interface** ([../BACKEND_SCHEMA.md](../BACKEND_SCHEMA.md)

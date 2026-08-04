@@ -20,10 +20,20 @@ The trailing byte is the "SOC byte" that example/parse_imu.py notes is **not
 logged** to SD. It sat unaccounted for until a live capture from the real device
 showed 22-byte datagrams: decode() required exactly 21 and silently rejected
 every packet as bad_len, so the whole pipeline stayed dark with a healthy device
-streaming. It is decoded and reported but never validated, and nothing here
-depends on its meaning — observed live it varies sample to sample (20..30 over
-two captures), which rules out a device-id echo but does not confirm "state of
-charge" either. Treat the name as the SD-logger's intent, not a verified fact.
+streaming.
+
+CONFIRMED 2026-08-04 by the device owner: it is **battery state of charge,
+0..100**. (Before that it was carried as an unvalidated byte -- observed 20..30
+over two captures, which ruled out a device-id echo without confirming the
+meaning.) It is now surfaced as telemetry: ingest keeps the newest value per
+source_id and publishes the minimum across a device's leg MCUs (ingest/state.py,
+ingest/publish.py) -> GET /api/devices.
+
+It is still **never validated and never trusted for control**: the byte sits
+OUTSIDE the CRC range (wire[1..17]), so a corrupt datagram can carry a plausible
+value. Nothing in the decode path or the biomech pipeline depends on it.
+decode_log() synthesises 0 for 21-byte SD records, which is why consumers must
+treat "no datagram seen yet" as unknown rather than as a flat battery.
 
 decode() reads UDP datagrams; decode_log() reads SD-log records; encode() is the
 exact inverse of decode() — all kept in this file so they cannot drift.

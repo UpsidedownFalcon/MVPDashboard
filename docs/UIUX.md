@@ -14,7 +14,8 @@
 | `/device/:id` | Device detail | one trainee: live left column + Insights/History/Projections tabs |
 
 **Navigation is a left sidebar** (220px, `--surface` on `--bg`, hairline right border):
-1. HIPPOS logo (full-logo white SVG from `mockup/visual_guidelines/Logo/svg/`), links `/`.
+1. HIPPOS logo — the `<LogoFull />` inline SVG component (paths taken from
+   `mockup/visual_guidelines/Logo/svg/`; see §10 for why it must be inline), links `/`.
 2. "Overview" nav item.
 3. **Online devices** section: one row per online device — display name, live status
    dot, current composite as a small number tinted by risk band. Rows appear/disappear
@@ -75,7 +76,8 @@ the whole card is one click target → `/device/:id` (rename control excepted).
 Panel contents, top to bottom:
 1. Header row: editable name (✏ inline: click → input, Enter saves via
    `PATCH /api/devices/:id`, Esc cancels, optimistic + rollback), online badge,
-   quality meter (§6), four sensor micro-dots (§6) in sorted-limb order.
+   **calibration badge** (§6a) while settling, quality meter (§6), four sensor
+   micro-dots (§6) in sorted-limb order, and the **battery** (§6b) top-right.
 2. **Projected Injury Risk block — the panel's headline.** Closest configured
    horizon rendered as the stat-tile hero: label "Projected risk · +10m" (label
    text from `FUTURE_HORIZONS` config, never hardcoded), value ≥48px semibold
@@ -107,10 +109,11 @@ Panel contents, top to bottom:
 
 Two columns, `2fr 1fr` (stacks to one column ≤1024px, live first).
 
-**Header:** back link, name (inline rename as §3), online badge, quality meter + %,
-**per-limb sensor row**: for each mapped limb (sorted order) — limb label, live rate
-("641Hz"), liveness dot (§6). A limb that has never streamed shows its dot in
-critical with "no data". Active flag chips right-aligned.
+**Header:** back link, name (inline rename as §3), online badge, calibration badge (§6a)
+while settling, quality meter + %, **per-limb sensor row**: for each mapped limb (sorted
+order) — limb label, live rate ("641Hz"), liveness dot (§6). A limb that has never streamed
+shows its dot in critical with "no data". Active flag chips, then the **battery** (§6b)
+top-right.
 
 **Left column — LIVE:**
 - Top row: the humanoid figure (compact variant, §10) **driven by real data**:
@@ -238,6 +241,36 @@ is a separate, backend-owned calibration and is *not* implied by them.
 
 Chips always pair icon + label — color never carries meaning alone.
 
+### 6a. Calibration badge — SET
+
+A pulsing **"Calibrating · M:SS"** chip appears on the overview card and the detail header
+while a freshly-online device is still settling (any of `uncalibrated` / `warming_up` on the
+tick). It shows **elapsed time, counting up**.
+
+⚠️ **It is deliberately NOT a countdown or a progress bar.** Calibration has no knowable
+duration (biomech SPEC §3.8): it discards the first 3 s, then needs **10 s of *continuous*
+stillness**, resets to zero on any movement or dropout, and **never times out** — it just
+keeps seeking. The per-sensor accumulators exist in `_Sess` but are published nowhere, and
+even if they were, a bar that visibly resets every time the athlete shifts would mislead more
+than it informs. Counting up is the honest form.
+
+**Shown only at the start of a session** (user decision 2026-08-04): once a device settles,
+the badge latches off for the rest of that session, so `m4`'s later per-intensity-band
+re-warms do not re-trigger it. The latch resets only on a **real absence** — silent longer
+than `OFFLINE_HIDE_MS` (10 s), i.e. the device has dropped out of the UI entirely and its
+return counts as a new session. It deliberately does **not** key on the `online` flag, which
+flips after ~2 s: a brief packet dropout mid-session would otherwise re-arm the badge and
+restart the count, which is exactly what "only at the very start" exists to prevent.
+Frontend-only — no backend involvement.
+
+### 6b. Battery — SET
+
+Phone-style icon + percentage, **top-right** of the overview card and the detail header.
+Source: `soc` on `GET /api/devices`, which is already the **minimum across the device's two
+leg MCUs** — a flat unit must not hide behind a healthy one. Amber ≤20%, red + a slow pulse
+≤10%. **`null` renders nothing at all**, never 0%: the SD-log decode path synthesises 0, so a
+zero would be indistinguishable from "no reading yet".
+
 **Biomech flags — MUST be rendered** (tick `f` field, BACKEND_SCHEMA §2; the UI is
 the calibration story's only surface, SPEC §10):
 
@@ -350,19 +383,31 @@ checks PASS (lightness band, chroma, CVD ΔE worst adjacent 8.4, normal-vision
 
 ## 10. Brand & motion — SET
 
-- **Humanoid figure** (rebuilt, not copied): SVG, headless-mannequin silhouette,
-  limbs as rounded strokes in `--accent-grad` fading distally; four sensor nodes
-  at thigh/shin × L/R with breathing dots + expanding sonar rings, staggered
-  0/.4/.8/1.2 s; 2–3 data particles per leg flowing along the limb path.
-  Implemented with CSS `offset-path` / Web Animations — **no SMIL**. Two
-  variants: hero (~380px, with radial glow + slow scan line + dot-matrix
-  backdrop) and compact (~190px, detail page, data-driven per §4).
+- **Humanoid figure — genuinely 3D** (rebuilt on canvas 2026-08-04, replacing the
+  flat SVG). Real perspective projection: the figure **rotates slowly about Y**
+  (~15 s per turn), the torso is a **depth-sorted point cloud**, the four
+  instrumented bones (thigh/shin × L/R) carry a glow underlay plus a bright
+  core, data particles travel down each bone, and the four sensor nodes pulse
+  with expanding sonar rings. Depth sorting means the far side genuinely passes
+  behind the near side. Two variants: hero (200×380, with radial glow + scanning
+  ring) and compact (120×220, detail page, data-driven per §4).
+  **No 3D library** — the scene is ~200 points and a dozen bones, and three.js
+  would add ~600 KB for it. The component's props are unchanged from the SVG
+  version, so per-limb liveness colours, `active` and the `m5` side emphasis all
+  carry over. `prefers-reduced-motion` freezes rotation and pulses; the figure
+  still renders.
 - Motion principles: slow, ambient, sub-1Hz loops; 150 ms ease transitions on
   interactive elements; needle/value changes ease 600 ms. Nothing blinks.
   `prefers-reduced-motion`: all loops stop (static figure, dots lit), transitions
   remain.
 - Logo usage: white-on-black variants only; never recolor; icon-only mark for
   favicon (black background tile) and login.
+  ⚠️ **The marks are INLINE SVG React components** (`frontend/src/components/Logo.tsx`),
+  not `<img src="…​.svg">`. An SVG loaded through `<img>` is an isolated document, so its
+  `fill="currentColor"` resolves against the SVG's own default colour — black — and
+  `filter: brightness(10)` cannot rescue it, because brightness *multiplies* and 0 × 10 = 0.
+  That combination rendered the logo pure black on a black page. Inlining lets `currentColor`
+  inherit the real CSS `color`, so `color: var(--ink)` is all that is needed.
 
 ## 11. Copy rules — SET (binding, from biomech SPEC §2)
 
@@ -382,7 +427,8 @@ checks PASS (lightness band, chroma, CVD ΔE worst adjacent 8.4, normal-vision
   ring; tabs use `tablist`/`tab`/`tabpanel` + arrow keys; rename input:
   Enter/Esc; modals (if any) trap focus + Esc.
 - Charts: table-view twins (§9); tooltips duplicated on keyboard focus; figure
-  SVGs get `role="img"` + `aria-label`; live regions announce new alerts
+  is a `<canvas aria-hidden>` inside a `role="img"` wrapper carrying the `aria-label`;
+  live regions announce new alerts
   (`aria-live="polite"`).
 - Contrast: ink tokens ≥4.5:1 on their surfaces; `--ink-3` used ≥11px only;
   status-on-surface ≥3:1 (validated).
@@ -393,7 +439,8 @@ checks PASS (lightness band, chroma, CVD ΔE worst adjacent 8.4, normal-vision
 
 | Widget | Source | Cadence |
 |---|---|---|
-| sidebar devices, panels registry, sensor rows | `GET /api/devices` | 10 s poll + WS `status` events |
+| sidebar devices, panels registry, sensor rows, **battery** (`soc`) | `GET /api/devices` | 10 s poll + WS `status` events |
+| calibration badge (§6a) | the tick's `f` flags — no request of its own | 60Hz, displayed at 1 Hz |
 | live sparkline/charts, current values, flags | `WS /ws/live` (+ `GET /api/metrics/recent` backfill) | 60Hz |
 | projected-risk blocks, Projections tab | `GET /api/forecasts/latest` | 60 s poll |
 | History tab | `GET /api/metrics/history` (window ∈ `PAST_WINDOWS`) | 60 s poll |

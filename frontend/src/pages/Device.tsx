@@ -95,7 +95,9 @@ export default function Device() {
   }
 
   const getData = () => getBuffer(id)
-  const calibration = useCalibrationState(id, device.online, live?.flags)
+  const calibration = useCalibrationState(
+    id, device.online, live?.flags, device.lastSignalMs,
+  )
   // signed m5 -> which side is carrying more load right now ('even' and null
   // both mean "no emphasis")
   const side = m5Side(live?.m[4] ?? null)

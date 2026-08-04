@@ -169,7 +169,7 @@ simulator (loss/reorder on) AND real wearables; record pass/fail + evidence in
 (BACKEND_SCHEMA §1 migration 002, §3 `/api/metrics/history`).
 **Depends:** ⛓ stage 2. ∥ parallel to S3-T02+ frontend work.
 **Files:** `backend/migrations/002_insight_actions.sql`,
-`backend/api/routes/metrics.py` (history route), `backend/common/queries.py`
+`backend/api/routes/metrics.py` (history route), `backend/api/queries.py`
 (bucketed query helper), `backend/api/jobs/insights.py` (rules emit
 `action`/`rationale`), `backend/tests/test_history.py`, tests for insight fields.
 

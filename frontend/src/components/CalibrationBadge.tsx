@@ -15,6 +15,7 @@
 
 import { Loader } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
+import { OFFLINE_HIDE_MS } from '../lib/config'
 
 /** Flags that mean "this device is still settling after power-on". */
 const SETTLING_FLAGS = ['uncalibrated', 'warming_up']
@@ -26,31 +27,47 @@ export interface CalibrationState {
   elapsedS: number
 }
 
-/** Tracks first-seen time and the done-latch for one device. */
+/** Tracks first-seen time and the done-latch for one device.
+ *
+ *  `lastSignalMs` is when the device was last heard from at all. The latch
+ *  resets on a real ABSENCE (silent longer than OFFLINE_HIDE_MS, i.e. the
+ *  device has dropped out of the UI entirely and is treated as a new session)
+ *  — NOT on the `online` flag, which flips after only ~2 s. Keying on `online`
+ *  meant a 3-second packet dropout mid-session re-armed the badge and it
+ *  started counting from zero again, which is exactly what "only at the very
+ *  start" is supposed to prevent. */
 export function useCalibrationState(
   deviceId: string,
   online: boolean,
   flags: string[] | undefined,
+  lastSignalMs: number | null,
 ): CalibrationState {
   const firstSeen = useRef<number | null>(null)
   const done = useRef(false)
   const [, tick] = useState(0)
 
   const settling = !!flags?.some((f) => SETTLING_FLAGS.includes(f))
+  const goneLongEnough =
+    lastSignalMs == null || Date.now() - lastSignalMs > OFFLINE_HIDE_MS
 
-  // reset the whole latch when the device goes away and comes back
-  if (!online) {
+  if (goneLongEnough) {
     firstSeen.current = null
     done.current = false
   } else if (firstSeen.current == null) {
     firstSeen.current = Date.now()
   }
-  // latch off the first time it settles — later re-warms must not re-trigger
-  if (online && firstSeen.current != null && !settling && Date.now() - firstSeen.current > 1500) {
+  // latch off the first time it settles — later re-warms must not re-trigger.
+  // The 1.5 s grace stops the latch firing before the first tick's flags land.
+  if (
+    !goneLongEnough &&
+    firstSeen.current != null &&
+    !settling &&
+    Date.now() - firstSeen.current > 1500
+  ) {
     done.current = true
   }
 
-  const active = online && !done.current && settling
+  const active = online && !goneLongEnough && !done.current && settling
 
   // 1 Hz repaint only while the badge is up
   useEffect(() => {

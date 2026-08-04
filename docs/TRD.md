@@ -97,7 +97,7 @@ every datagram to be rejected as `bad_len` with the device streaming normally.
 | 4–7 | timestamp_us | u32 LE | device-local µs, **wraps every ~71.6 min**, monotonic per source only |
 | 8–19 | ax ay az gx gy gz | 6 × i16 LE | raw counts, unscaled |
 | 20 | crc8 | u8 | poly 0x07, init 0x00, MSB-first, over bytes 3..19 of the datagram (= wire[1..17]) |
-| 21 | soc | u8 | **UDP only, absent from the SD log.** Decoded and reported, never validated; meaning unconfirmed (varies sample to sample) |
+| 21 | soc | u8 | **UDP only, absent from the SD log.** Battery **state of charge, 0–100** (confirmed by the device owner 2026-08-04). Not covered by the CRC, so never trusted for control — surfaced as telemetry only. Ingest keeps the newest value **per `source_id`**, since each leg MCU is a separate unit with its own battery, and publishes the **minimum** as `dev:{id}:soc` (BACKEND_SCHEMA §4) → `GET /api/devices`. `decode_log()` synthesises 0 for the 21-byte SD records, which is why "no datagram yet" must render as unknown, not as 0% |
 
 Decode/CRC logic is ported from `example/parse_imu.py` (vectorized table CRC).
 Datagrams failing sync or CRC are dropped and counted. Sensor key = `(device_id,

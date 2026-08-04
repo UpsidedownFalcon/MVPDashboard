@@ -427,16 +427,24 @@ sprint ~20 g, drop landing ~27 g) **[L]**. The generator is calibrated by the fa
 reproduced the previously reported live behaviour almost exactly (slow walk 26, light jog 55)
 before the §5.3/§6.1 corrections.
 
-| Activity | `m1` | `m2` | `m3` | `m4` | demand | **composite** |
+🚩 **The `composite` column below is STALE — it is floor arithmetic** (`0.50·m3 + acute`), taken
+before §6.1a removed the dose floor. Every value in it is reproducible *only* under the old
+model: the sprint row computes to ≈**77** under the shipped composite, not 55.6, and brisk walk
+to ≈**0.1**, not 6.0. The `m1`/`m2`/`m3`/`demand` columns are current and still useful — the
+soft-max reproduces the demand column exactly. **The live ladder is the one in §6.1a**
+(squats 1.3, walk 2.6, jog 6.0, kick 8.4, single-leg landing 17, jump 21 fresh / ~33 fatigued),
+which is what the current constants were fitted against.
+
+| Activity | `m1` | `m2` | `m3` | `m4` | demand | ~~composite~~ *(pre-6.1a, floor model)* |
 |---|---|---|---|---|---|---|
-| Standing still | 0 | 0 | 0 | – | 0 | **0.0** |
-| Slow walk | 10 | 0 | 0 | 7 | 7 | **0.0** |
-| Brisk walk | 18 | 0 | 12 | – | 12 | **6.0** |
-| Light jog | 31 | 0 | 42 | 4 | 20 | **21.2** |
-| Steady run | 44 | 16 | 56 | 5 | 33 | **29.7** |
-| Hard run | 55 | 29 | 67 | 12 | 45 | **38.6** |
-| Sprint | 68 | 45 | 86 | 14 | 59 | **55.6** |
-| Landing work (sustained) | 74 | 54 | 68 | 29 | 59 | **51.9** |
+| Standing still | 0 | 0 | 0 | – | 0 | ~~0.0~~ |
+| Slow walk | 10 | 0 | 0 | 7 | 7 | ~~0.0~~ |
+| Brisk walk | 18 | 0 | 12 | – | 12 | ~~6.0~~ |
+| Light jog | 31 | 0 | 42 | 4 | 20 | ~~21.2~~ |
+| Steady run | 44 | 16 | 56 | 5 | 33 | ~~29.7~~ |
+| Hard run | 55 | 29 | 67 | 12 | 45 | ~~38.6~~ |
+| Sprint | 68 | 45 | 86 | 14 | 59 | ~~55.6~~ |
+| Landing work (sustained) | 74 | 54 | 68 | 29 | 59 | ~~51.9~~ |
 
 Against the reported worn session, where the composite read ~5 for a medium walk, 50–60 for a
 light jog and **100** for running, jumping, landing, deceleration, change of direction and
@@ -444,7 +452,9 @@ kicking. **[V]**
 
 ⚠️ **A single discrete event is not the same as sustained work at that intensity**, and the row
 above is the sustained case. Measured separately for one landing followed by rest: peak composite
-**4.0**, because `m3` never accumulates. Ten seconds of landings reads 16.5, sixty seconds 42.0.
+**4.0**, because `m3` never accumulates. *(The follow-on figures — "ten seconds of landings reads
+16.5, sixty seconds 42.0" — were floor arithmetic on an accumulating `m3` and no longer hold;
+under the capacity model a rested athlete's composite decays to 0 as soon as demand does.)*
 The reported expectation of ≤30 for "a single-leg landing from a two-leg jump" is the 4.0 case.
 
 What moved the ladder, in order of size: the `capacity` decoupling (§6.1), the `m1`/`m2`
@@ -561,7 +571,11 @@ minute of hard-training equivalent**, so `M3_HI = 60` is a full hard hour.
   (7.5, not the ~22 a linear dose gave). **This is the physically correct answer** — 16 seconds
   of moderate squatting genuinely is a negligible cumulative load — but it does mean the
   "decay-to-dose-floor" behaviour (§6.1) only becomes visually prominent over sessions of many
-  minutes. A linear or squared dose would make the floor more visible at the cost of the
+  minutes. *(🚩 This bullet's framing predates §6.1a: there is no dose **floor** any more.
+  Read it as "a brief session accumulates little dose, so `degradation` barely moves and
+  capacity is barely reduced" — the visible effect is small either way, but it now arrives
+  through capacity, not through an additive baseline.)* A linear or squared dose would make
+  the effect more visible at the cost of the
   magnitude-weighting the bone literature is unambiguous about. **User decision: trust the
   literature.** **[V] + [L]**
 - **`DOSE_HALFLIFE_S = 15 min` (fast pool) / `DOSE_HALFLIFE_SLOW_S = 90 min` (slow pool)** —
@@ -1268,7 +1282,7 @@ is O(1) scalars, so persisting it is cheap. **Confirmed required by the user.**
 | `dose` | float | `m3` accumulator |
 | `accL`, `accR` | float | `m5` decaying load accumulators |
 | `r_base[]`, `r_sum[]`, `r_time[]` | float x M4_BANDS | `m4` PER-BAND baselines and their lock progress (§5.4). Introduced at **schema v2** — a v1 snapshot carrying the old scalar `R_base` is rejected outright, since restoring a single-band baseline would reintroduce the activity-change confound the bands exist to remove |
-| `session_started_at`, `last_tick_at` | float (unix s) | drives the `SESSION_GAP_S` decision on restore |
+| `session_start_t`, `last_tick_t` | float (unix s) | the literal JSON keys; drive the `SESSION_GAP_S` decision on restore |
 | `cal[limb_name]` | 5 × float | per sensor: `k`, `gyro_bias[3]`, `sigma` (§3.8) |
 | `cal_src[limb_name]` | str | `default` / `carried` / `measured` — calibration provenance (§3.8) |
 | `dose_fast`, `dose_slow` | float | the TWO dose pools (§5.3). **These are what `restore()` actually rebuilds from**, each decayed at its own half-life; the `dose` field above is an informational total |
@@ -1288,8 +1302,9 @@ and must never appear in persisted state.
   pattern (BACKEND_SCHEMA §4). A Redis write failure is counted and ignored — it must never stall
   the 60 Hz path.
 - **Restore:** on startup, load each key and **apply the elapsed-time decay** for
-  `now − last_tick_at` before use (`dose` and `accL`/`accR` have half-lives, so a restart during a
-  long gap must not resurrect stale load). If `now − last_tick_at > SESSION_GAP_S`, discard and
+  `now − last_tick_t` before use (`dose` and `accL`/`accR` have half-lives, so a restart during a
+  long gap must not resurrect stale load — the two dose pools decay at their own half-lives).
+  If `now − last_tick_t > SESSION_GAP_S`, discard and
   start a fresh session — identical to the normal gap rule (§7).
 - **TTL:** `2 × SESSION_GAP_S`, so abandoned devices expire on their own. Redis persistence stays
   off (`appendonly no`) — this is a warm-restart convenience, not a durable store, and everything
@@ -1529,7 +1544,7 @@ presented to a trainer as a finding — only as a trend with the `unvalidated` f
     mixed into an existing slot.
 21. **State snapshot round-trip** — snapshot mid-session, restart, restore: `dose`/`accL`/`accR`
     resume with the correct elapsed decay applied, and `R_base` survives. A restore with
-    `now − last_tick_at > SESSION_GAP_S` must discard and start fresh (§7.4).
+    `now − last_tick_t > SESSION_GAP_S` must discard and start fresh (§7.4).
 22. **Calibration key stability** — snapshot with devices in one slot order, restore with the
     order permuted; each sensor must receive **its own** `k`/`gyro_bias`/`sigma` (§7.4).
 23. **Radians guard** — feed a known `ω` and `a`; assert `m2` matches the closed-form
