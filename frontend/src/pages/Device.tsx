@@ -14,6 +14,7 @@ import {
   SensorDots,
   StatusBadge,
 } from '../components/bits'
+import ActionPanel from '../components/ActionPanel'
 import ForecastChart from '../components/ForecastChart'
 import HistoryBars from '../components/HistoryBars'
 import HumanoidFigure, { type LimbState } from '../components/HumanoidFigure'
@@ -212,8 +213,9 @@ export default function Device() {
             tabs={[
               {
                 id: 'insights',
-                label: 'Insights',
-                content: <InsightFeed device={id} />,
+                label: 'Advice',
+                // STATE view: the advice standing right now (/insights/current)
+                content: <ActionPanel device={id} />,
               },
               {
                 id: 'history',
@@ -229,6 +231,13 @@ export default function Device() {
                 id: 'projections',
                 label: 'Projections',
                 content: <ForecastChart device={id} windows={windowLabels} />,
+              },
+              {
+                id: 'log',
+                label: 'Log',
+                // EVENT view: the append-only audit trail (/api/insights),
+                // unchanged — every firing, with its evidence.
+                content: <InsightFeed device={id} />,
               },
             ]}
           />

@@ -1,3 +1,5 @@
 node_modules
 dist
 *.local
+# tsc -b incremental cache: a build artifact, regenerated every build
+tsconfig.tsbuildinfo

@@ -19,6 +19,11 @@ export const POLL_DEVICES_MS = 10_000
 export const POLL_FORECASTS_MS = 60_000
 export const POLL_HISTORY_MS = 60_000
 export const POLL_INSIGHTS_MS = 30_000
+/** GET /api/insights/current — the live advice panel. Deliberately separate
+ *  from POLL_INSIGHTS_MS (which other panels share): the backend re-evaluates
+ *  rules every INSIGHT_INTERVAL_S = 15 s, so polling the state view at 30 s
+ *  would throw away most of that responsiveness (docs/ANALYTICS.md §4.6). */
+export const POLL_ADVICE_MS = 10_000
 
 /** WS reconnect backoff (UIUX §5). */
 export const WS_BACKOFF_MIN_MS = 1_000

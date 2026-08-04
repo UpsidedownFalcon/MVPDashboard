@@ -77,6 +77,41 @@ export interface Insight {
   rationale: string | null
 }
 
+/** One supporting reason behind an action. `text` is a complete short sentence
+ *  sized to render in full as a bullet — never truncate it, never hide it
+ *  behind an expander (BACKEND_SCHEMA §3). */
+export interface AdviceReason {
+  rule_id: string
+  severity: Severity
+  text: string
+  unvalidated: boolean
+  created_at: string
+}
+
+/** One imperative headline. `action` is rendered verbatim — never re-worded
+ *  or appended to. `unvalidated` is true only when EVERY reason behind it
+ *  comes from m4/m5 (biomech SPEC §11.1). */
+export interface AdviceAction {
+  action_id: string
+  action: string
+  severity: Severity
+  updated_at: string
+  unvalidated: boolean
+  reasons: AdviceReason[]
+}
+
+/** GET /api/insights/current — the STATE view: the advice standing right now.
+ *  `actions` is 0..max_actions, ordered strongest severity first; the backend
+ *  has already deduped, ranked and capped, so the client must not repeat any
+ *  of that. An empty `actions` array is a normal, calm state. */
+export interface CurrentAdvice {
+  device_id: string
+  generated_at: string
+  hold_s: number
+  max_actions: number
+  actions: AdviceAction[]
+}
+
 export interface Recent {
   device_id: string
   t0: string | null
@@ -143,6 +178,9 @@ export const fetchInsights = (dev?: string, limit = 20) =>
   request<Insight[]>(
     dev ? `/api/insights?device=${dev}&limit=${limit}` : `/api/insights?limit=${limit}`,
   )
+/** device is REQUIRED — advice is per athlete. */
+export const fetchCurrentAdvice = (dev: string) =>
+  request<CurrentAdvice>(`/api/insights/current?device=${dev}`)
 export const fetchRecent = (dev: string, seconds: number) =>
   request<Recent>(`/api/metrics/recent?device=${dev}&seconds=${seconds}`)
 
