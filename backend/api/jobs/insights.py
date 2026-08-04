@@ -93,7 +93,16 @@ class MetricView:
         return self.key in UNVALIDATED_METRICS
 
 
-def _metric_view(windows: list[dict], key: str, idx: int | None) -> MetricView:
+def _metric_view(windows: list[dict], key: str, idx: int | None,
+                 now_window: dict | None = None) -> MetricView:
+    """`now_window` overrides which window supplies `now` (the live window).
+
+    Only the "now" side moves: `baseline`, `sd` and `trend` still come from the
+    configured PAST_WINDOWS, because a 30-second window is far too short to
+    define what is normal for an athlete or which way they are heading. Reading
+    a short "now" against a long baseline is the whole point — it is what lets
+    an insight appear within a window instead of within a 5-minute mean.
+    """
     def pick(w: dict | None, field: str):
         if w is None:
             return None
@@ -101,7 +110,8 @@ def _metric_view(windows: list[dict], key: str, idx: int | None) -> MetricView:
             return w["composite"][field]
         return w[field][idx] if w.get(field) else None
 
-    short, long_ = windows[0], windows[-1]
+    short = now_window if now_window is not None else windows[0]
+    long_ = windows[-1]
     mid = windows[1] if len(windows) > 1 else windows[0]
     now = pick(short, "avg" if idx is None else "m")
     base = pick(long_, "avg" if idx is None else "m")
@@ -127,10 +137,20 @@ class Ctx:
     windows: list[dict]            # queries.windows() entries, PAST_WINDOWS order
     forecasts: list[dict] | None   # latest run's points [{horizon,pred,ci_low,…}]
     settings: Settings
+    # queries.live_window() — INSIGHT_LIVE_WINDOW (default 30s) off the raw
+    # hypertable. None only when a caller builds a Ctx by hand; then everything
+    # falls back to the shortest configured window, i.e. the pre-2026-08-04
+    # behaviour.
+    live: dict | None = None
 
     @property
     def shortest(self) -> dict | None:
         return self.windows[0] if self.windows else None
+
+    @property
+    def now_window(self) -> dict | None:
+        """The window every rule means by "now"."""
+        return self.live if self.live is not None else self.shortest
 
     @property
     def mid(self) -> dict | None:
@@ -145,9 +165,9 @@ class Ctx:
         """m1..m5 + composite, each across every configured window."""
         if not self.windows:
             return {}
-        out = {k: _metric_view(self.windows, k, i)
+        out = {k: _metric_view(self.windows, k, i, self.live)
                for i, k in enumerate(METRIC_KEYS)}
-        out["composite"] = _metric_view(self.windows, "composite", None)
+        out["composite"] = _metric_view(self.windows, "composite", None, self.live)
         return out
 
     @property
@@ -167,7 +187,7 @@ class Ctx:
         data): enough of the window actually has data, and the two windows being
         compared were measured at comparable link quality.
         """
-        short, long_ = self.shortest, self.longest
+        short, long_ = self.now_window, self.longest
         if short is None or long_ is None:
             return False
         cov = short.get("coverage")
@@ -177,6 +197,37 @@ class Ctx:
         if qs is None or ql is None or ql <= 0.0:
             return True          # nothing to compare against; do not block
         return min(qs, ql) / max(qs, ql) >= QUALITY_MATCH_RATIO
+
+
+# --- action catalogue ---------------------------------------------------------
+#
+# The panel shows AT MOST `INSIGHT_MAX_ACTIONS` imperatives, each justified by
+# every rule that currently supports it. That inversion is the reason this
+# catalogue exists: rules are diagnostic (one per mechanism) but advice is not.
+# `load_spike` and `composite_high` are different findings that lead to the SAME
+# instruction, and showing "Ease off" twice with two rationales is noise, while
+# showing it once with two reasons underneath is evidence.
+#
+# `text` is deliberately 2-3 words: it renders as the large headline, and a
+# headline long enough to wrap stops reading as an instruction.
+
+@dataclass(frozen=True)
+class Action:
+    action_id: str
+    text: str    # short imperative, rendered large
+    rank: int    # tie-break within equal severity; lower = surfaced first
+
+
+ACTIONS: dict[str, Action] = {
+    a.action_id: a for a in (
+        # Ordered by how directly each changes what happens in the next minute.
+        Action("ease_off", "Ease off", 1),
+        Action("cap_session", "Cap this session", 2),
+        Action("plan_recovery", "Plan recovery", 3),
+        Action("check_mechanics", "Check mechanics", 4),
+        Action("check_sensors", "Check sensor fit", 5),
+    )
+}
 
 
 @dataclass
@@ -191,6 +242,12 @@ class Rule:
     # falls back to `message` when they are null.
     action: Callable[[Ctx, Evidence], str] | None = None
     rationale: Callable[[Ctx, Evidence], str] | None = None
+    # Migration 003. `action_id` keys into ACTIONS and is what /api/insights/
+    # current groups on — several rules share one on purpose. `reason` is ONE
+    # short sentence carrying the numbers, sized to render as a bullet with no
+    # expander; `rationale` stays as the long form for the audit feed.
+    action_id: str | None = None
+    reason: Callable[[Ctx, Evidence], str] | None = None
 
 
 # --- rule catalogue -----------------------------------------------------------
@@ -218,7 +275,7 @@ class Rule:
 
 def _base_evidence(ctx: Ctx, m: MetricView) -> Evidence:
     """Evidence common to every within-athlete deviation rule."""
-    short, long_ = ctx.shortest or {}, ctx.longest or {}
+    short, long_ = ctx.now_window or {}, ctx.longest or {}
     ev: Evidence = {
         "metric": m.key,
         "metric_name": m.name,
@@ -262,8 +319,27 @@ def _deviation_rationale(ctx: Ctx, ev: Evidence) -> str:
     return " ".join(bits)
 
 
+def _deviation_reason(ctx: Ctx, ev: Evidence) -> str:
+    """One-sentence bullet: what moved, versus what, by how much.
+
+    Same facts as `_deviation_rationale` minus the citations and caveats. The
+    panel renders these as bullets with NO expander, so every reason has to be
+    complete and short at the same time — one clause of measurement, one of
+    comparison. The unvalidated marker is the only qualifier kept inline,
+    because SPEC §11.1 forbids presenting m4/m5 as a finding anywhere.
+    """
+    text = (
+        f"{ev['metric_name'].capitalize()} is {ev['value']:.0f} over the last"
+        f" {ev['window']} against a {ev['baseline_window']} baseline of"
+        f" {ev['baseline']:.0f} ({ev['z']:.1f}× their usual spread)."
+    )
+    if ev.get("unvalidated"):
+        text += " Unvalidated metric — a prompt to look, not a finding."
+    return text
+
+
 def _composite_high(ctx: Ctx) -> Evidence | None:
-    w = ctx.shortest
+    w = ctx.now_window
     avg = w and w["composite"]["avg"]
     if avg is None:
         return None
@@ -356,7 +432,7 @@ def _residual_load(ctx: Ctx) -> Evidence | None:
         return None
     return {"severity": "warning", "horizon": far["horizon"],
             "settles_at": round(floor, 1), "threshold": warn,
-            "window": (ctx.shortest or {}).get("window")}
+            "window": (ctx.now_window or {}).get("window")}
 
 
 def _impact_deviation(ctx: Ctx) -> Evidence | None:
@@ -441,7 +517,7 @@ QUALITY_DROP_RATIO = 0.8
 
 
 def _data_quality(ctx: Ctx) -> Evidence | None:
-    w, base = ctx.shortest, ctx.longest
+    w, base = ctx.now_window, ctx.longest
     if w is None or base is None or w is base:
         return None
     quality, baseline = w["quality"], base["quality"]
@@ -469,6 +545,8 @@ RULES: list[Rule] = [
             + " Doing too much in a single session relative to recent history is"
               " the load pattern most consistently linked to injury."
         ),
+        action_id="ease_off",
+        reason=lambda ctx, ev: _deviation_reason(ctx, ev),
     ),
     Rule(
         rule_id="accumulated_load",
@@ -483,6 +561,10 @@ RULES: list[Rule] = [
             _deviation_rationale(ctx, ev)
             + " Accumulated load is still trending up, so each additional bout is"
               " landing on tissue that has less capacity than it started with."
+        ),
+        action_id="cap_session",
+        reason=lambda ctx, ev: (
+            _deviation_reason(ctx, ev) + " It is still trending up."
         ),
     ),
     Rule(
@@ -501,6 +583,12 @@ RULES: list[Rule] = [
             f" the {ev['threshold']:.0f} review threshold. This is decay of load"
             f" already taken, not a prediction of what they will do next."
         ),
+        action_id="plan_recovery",
+        reason=lambda ctx, ev: (
+            f"Even if they stop now, risk only falls to about"
+            f" {ev['settles_at']:.0f} over the next {ev['horizon']} — still above"
+            f" the {ev['threshold']:.0f} review threshold."
+        ),
     ),
     Rule(
         rule_id="impact_deviation",
@@ -516,6 +604,11 @@ RULES: list[Rule] = [
             + " These measure external impact loading at the shank, not tissue"
               " stress — worth a look at technique and surface rather than a"
               " conclusion about the athlete."
+        ),
+        action_id="check_mechanics",
+        reason=lambda ctx, ev: (
+            _deviation_reason(ctx, ev)
+            + " This is external impact loading, not tissue stress."
         ),
     ),
     Rule(
@@ -533,6 +626,10 @@ RULES: list[Rule] = [
               " between sessions, and greater asymmetry has not been shown to"
               " predict injury."
         ),
+        action_id="check_mechanics",
+        reason=lambda ctx, ev: (
+            _deviation_reason(ctx, ev) + " Magnitude only, never a side."
+        ),
     ),
     Rule(
         rule_id="composite_high",
@@ -548,6 +645,11 @@ RULES: list[Rule] = [
             f" {ev['window']}, above the {ev['threshold']:.0f} threshold. Sustained"
             f" levels this high reflect accumulated dose, not just a momentary effort."
         ),
+        action_id="ease_off",
+        reason=lambda ctx, ev: (
+            f"Injury-risk load averaged {ev['composite_avg']:.0f} over the last"
+            f" {ev['window']}, above the {ev['threshold']:.0f} threshold."
+        ),
     ),
     Rule(
         rule_id="rising_risk",
@@ -562,6 +664,11 @@ RULES: list[Rule] = [
             f"Risk has been trending up over the last {ev['window']} and is projected"
             f" to reach {ev['pred']:.0f} within {ev['horizon']}"
             f" (alert threshold {ev['threshold']:.0f})."
+        ),
+        action_id="plan_recovery",
+        reason=lambda ctx, ev: (
+            f"Risk is trending up and projected to reach {ev['pred']:.0f} within"
+            f" {ev['horizon']} (alert threshold {ev['threshold']:.0f})."
         ),
     ),
     Rule(
@@ -579,8 +686,87 @@ RULES: list[Rule] = [
             f" from {ev['baseline_quality']:.0%} over {ev['baseline_window']} — a"
             f" strap may have moved or a sensor may be failing."
         ),
+        action_id="check_sensors",
+        reason=lambda ctx, ev: (
+            f"Data quality is {ev['quality']:.0%} over the last {ev['window']},"
+            f" down from {ev['baseline_quality']:.0%} over"
+            f" {ev['baseline_window']}."
+        ),
     ),
 ]
+
+
+# --- current actions ----------------------------------------------------------
+
+def group_actions(rows: list[dict], max_actions: int) -> list[dict]:
+    """Collapse recent insight rows into the CURRENT advice: <= max_actions
+    imperatives, each with every reason that currently supports it.
+
+    `rows` are insight records (newest first) already filtered to the hold
+    window by the caller. Three things happen here, each load-bearing:
+
+    1. GROUP on `action_id`, so rules that mean the same instruction merge.
+    2. KEEP ONE ROW PER RULE — the newest. INSIGHT_HOLD_S deliberately exceeds
+       INSIGHT_COOLDOWN_S so an action never blinks out between re-firings, and
+       the direct consequence is that a still-true rule has TWO rows inside the
+       window. Without this the same sentence would appear twice under one
+       heading, which reads as two separate findings.
+    3. RANK by severity, then by the catalogue's own ordering, and cut to
+       `max_actions`.
+
+    An action is marked `unvalidated` only when EVERY reason behind it comes
+    from m4/m5. If even one validated metric supports it the advice does not
+    rest on unvalidated ground, and flagging it would understate the finding —
+    while flagging nothing when all of them are unvalidated would overstate it
+    (SPEC §11.1).
+    """
+    groups: dict[str, list[dict]] = {}
+    for row in rows:
+        # Rows written before migration 003 have no action_id; fall back to the
+        # action text so they still group with themselves rather than vanishing.
+        key = row.get("action_id") or row.get("action") or row.get("rule_id")
+        if key is None:
+            continue
+        groups.setdefault(key, []).append(row)
+
+    out = []
+    for key, members in groups.items():
+        newest_per_rule: dict[str, dict] = {}
+        for row in members:                       # rows arrive newest-first
+            newest_per_rule.setdefault(row["rule_id"], row)
+        kept = sorted(
+            newest_per_rule.values(),
+            key=lambda r: (-SEVERITY_RANK.get(r["severity"], 0), r["rule_id"]),
+        )
+        action = ACTIONS.get(key)
+        top = kept[0]
+        reasons = [
+            {
+                "rule_id": r["rule_id"],
+                "severity": r["severity"],
+                # `reason` is null for pre-003 rows; the long rationale is the
+                # only other complete sentence available, and `message` after
+                # that.
+                "text": r.get("reason") or r.get("rationale") or r["message"],
+                "unvalidated": bool((r.get("context") or {}).get("unvalidated")),
+                "created_at": r["created_at"],
+            }
+            for r in kept
+        ]
+        out.append({
+            "action_id": key,
+            "action": action.text if action else (top.get("action") or key),
+            "severity": top["severity"],
+            "updated_at": max(r["created_at"] for r in kept),
+            "unvalidated": all(x["unvalidated"] for x in reasons),
+            "reasons": reasons,
+            "_rank": action.rank if action else 99,
+        })
+
+    out.sort(key=lambda a: (-SEVERITY_RANK.get(a["severity"], 0), a["_rank"]))
+    for a in out:
+        del a["_rank"]
+    return out[:max_actions]
 
 
 # --- engine -------------------------------------------------------------------
@@ -660,6 +846,8 @@ class InsightJob:
                     windows=windows,
                     forecasts=await self._latest_forecast_points(device_id),
                     settings=self._settings,
+                    live=await queries.live_window(
+                        self._pool, self._settings, device_id),
                 )
                 for rule in self._rules:
                     evidence = rule.evaluate(ctx)
@@ -670,8 +858,9 @@ class InsightJob:
                         continue
                     await self._pool.execute(
                         """INSERT INTO insights (device_id, severity, rule_id,
-                                                 message, context, action, rationale)
-                           VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)""",
+                                                 message, context, action,
+                                                 rationale, action_id, reason)
+                           VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9)""",
                         device_id,
                         severity,
                         rule.rule_id,
@@ -679,6 +868,8 @@ class InsightJob:
                         json.dumps(evidence),
                         rule.action(ctx, evidence) if rule.action else None,
                         rule.rationale(ctx, evidence) if rule.rationale else None,
+                        rule.action_id,
+                        rule.reason(ctx, evidence) if rule.reason else None,
                     )
                     inserted += 1
             except Exception as exc:  # noqa: BLE001 — isolate per device

@@ -84,7 +84,9 @@ CREATE TABLE insights (
     message     TEXT NOT NULL,                    -- plain language for the trainer
     context     JSONB,                            -- evidence: values that fired it
     action      TEXT,                             -- migration 002: short imperative
-    rationale   TEXT                              -- migration 002: the why, from metrics
+    rationale   TEXT,                             -- migration 002: the why, from metrics
+    action_id   TEXT,                             -- migration 003: ACTIONS catalogue key
+    reason      TEXT                              -- migration 003: one-sentence bullet
 );
 CREATE INDEX ON insights (device_id, created_at DESC);
 ```
@@ -95,6 +97,15 @@ nullable `action` (short imperative, e.g. "Reduce landing volume") and `rational
 `action` as the card headline and `rationale` beneath it, falling back to `message`
 when null (rows from pre-refinement rules). Rules SHOULD populate both; `message`
 remains required as the self-contained plain-language summary.
+
+**Migration `003_insight_action_grouping.sql`** (2026-08-04): adds nullable `action_id`
+and `reason`. `action_id` keys into the `ACTIONS` catalogue in
+`backend/api/jobs/insights.py`; **several rules deliberately share one** (`load_spike`
+and `composite_high` both mean *Ease off*), and grouping on it is what turns N insights
+into ≤ 3 actions with N reasons. `reason` is ONE short sentence carrying the numbers,
+sized to render as a bullet with **no expander**; `rationale` stays as the long form
+(citations, caveats) for the audit feed. Both nullable — pre-003 rows group by their
+`action` text instead. See docs/ANALYTICS.md §4.6–4.7.
 
 Notes: window aggregates and forecasts are **not** columns on `metrics` (different
 cadence/keys/retention — TRD §6). If sub-minute test windows ever need finer
@@ -177,7 +188,8 @@ All routes require the auth cookie except `POST /api/auth/login` and liveness
 | GET `/api/metrics/windows` | `?device=30` | `{"windows":[{"window":"5m","from":ts,"m":[…5 avgs],"sd":[…5 std devs],"composite":{"avg","min","max","sd"},"quality":num,"coverage":num\|null,"trend":"up\|down\|flat"},…]}` — one entry per `PAST_WINDOWS`, `trend` vs the preceding equal-length window. **`sd`** is the within-window standard deviation of each metric; **`coverage`** is observed rows ÷ expected rows for the window (0–1). Both added 2026-08-03: `sd` is what lets an insight express a deviation in units of the athlete's own spread — the property that makes the rule catalogue survive a biomech retune (docs/ANALYTICS.md §4.1) — and `coverage` is what distinguishes a full window from a sliver of one. Both nullable when the window is empty. |
 | GET `/api/metrics/history` | `?device=30&window=30m&buckets=24` | `{"device_id","window","from":ts,"bucket_s":int,"buckets":[{"t":ts,"m":[…5 avgs\|null],"composite":{"avg","min","max"},"quality":num}\|null,…]}` — stage-3 (S3-T01): time-bucketed series for the History tab. `window` MUST be one of `PAST_WINDOWS` (400 otherwise); `buckets` 1–96, default 24; bucket span = window/buckets, clamped to ≥1m when reading `metrics_1m` (bucket count shrinks accordingly — the response's `bucket_s` is authoritative). Buckets are aligned to `from`. Reads `metrics_1m` (or `metrics` for windows ≤5m, same source rule as `/windows`); a bucket with no rows is `null` (chart gap, never 0) |
 | GET `/api/forecasts/latest` | `?device=30` | `{"made_at":ts,"model_version","points":[{"horizon":"10m","target_time":ts,"pred","ci_low","ci_high"},…]}` (404-shaped empty if no run yet) |
-| GET `/api/insights` | `?device=30&limit=20` (device optional) | `[{"insight_id","created_at","device_id","severity","rule_id","message","context","action":str\|null,"rationale":str\|null},…]` newest first (`action`/`rationale`: migration 002, §1) |
+| GET `/api/insights` | `?device=30&limit=20` (device optional) | `[{"insight_id","created_at","device_id","severity","rule_id","message","context","action":str\|null,"rationale":str\|null,"action_id":str\|null,"reason":str\|null},…]` newest first — the append-only **event log** (`action`/`rationale`: migration 002; `action_id`/`reason`: migration 003, §1) |
+| GET `/api/insights/current` | `?device=30` (**required**) | `{"device_id","generated_at":ts,"hold_s":int,"max_actions":int,"actions":[{"action_id","action","severity","updated_at":ts,"unvalidated":bool,"reasons":[{"rule_id","severity","text","unvalidated":bool,"created_at":ts},…]},…]}` — the **state** view: the advice standing right now, ≤ `INSIGHT_MAX_ACTIONS` (3) actions ordered strongest-severity first, each carrying every reason currently supporting it. `reasons[].text` is one complete short sentence intended to render as a bullet with **no expander**. An action is included while any rule behind it fired within `INSIGHT_HOLD_S`; `unvalidated` is true only when *every* reason comes from `m4`/`m5`. Empty `actions` is a normal state, not an error (docs/ANALYTICS.md §4.6–4.7) |
 | GET `/api/health` | — | `{"status","db":bool,"redis":bool,"ingest":{per-device/sensor rates, last_seen, drop counters},"api":{"ws_clients","ws_dropped","db_buffer","db_dropped"}}` |
 | GET `/api/health/live` | — | `{"status":"ok"}` (unauthenticated liveness) |
 | **WS** `/ws/live` | `?devices=30,31` (omit = all) — cookie-authed handshake | server→client stream of `tick` and `status` messages; closes 4401 on auth expiry |

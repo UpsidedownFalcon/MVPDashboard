@@ -78,6 +78,9 @@ guessed at.
 Every insight carries an **`action`** (short imperative, rendered as the card headline) and a
 **`rationale`** (the why, with the measured numbers), plus `context` holding the evidence that
 fired it. `message` remains as a standalone summary for anything that cannot render the pair.
+Migration 003 adds **`action_id`** (catalogue key several rules deliberately share) and
+**`reason`** (one short sentence with the numbers, sized to render as a bullet with no
+expander) — see §4.6 and §4.7.
 
 ### 4.1 Why these rules survive a future metric retune
 
@@ -115,9 +118,12 @@ and `accumulated_load` combines the dose's past trend with the future residual.
 | `residual_load` | warning | forecast `ci_low` at the furthest horizon ≥ warn threshold | future | *Schedule recovery before the next session* |
 | `impact_deviation` | info | `m1` or `m2` ≥ 2 sd above own baseline | past + present | *Review landing mechanics* |
 | `movement_quality` | info, `unvalidated` | `m4` or `m5` ≥ 2 sd above own baseline | past + present | *Flag for review at the next check-in* |
-| `composite_high` | warning → alert | shortest-window mean ≥ configured threshold | present | *Reduce training intensity* |
+| `composite_high` | warning → alert | live-window mean ≥ configured threshold | present | *Reduce training intensity* |
 | `rising_risk` | warning | mid-window trend up **and** a projection crossing alert | past + future | *Schedule rest before the next block* |
-| `data_quality` | info | shortest-window quality < 0.8 × own baseline | data health | *Check sensor fit* |
+| `data_quality` | info | live-window quality < 0.8 × own baseline | data health | *Check sensor fit* |
+
+"Own baseline" is always the **longest** configured window; "live window" is `INSIGHT_LIVE_WINDOW`
+(§4.6). Before 2026-08-04 the *now* side was the shortest `PAST_WINDOWS` entry (5 m).
 
 **Evidence base.**
 - `load_spike` is the best-evidenced of these: current running research finds injuries are driven
@@ -162,6 +168,80 @@ mathematically coupled (Lolli 2019) and has no evidence supporting its use in lo
 (Impellizzeri 2020) — SPEC §6.3. `test_firing_depends_on_dispersion_not_on_a_bare_ratio` pins the
 behavioural difference: the identical 2× short/long ratio fires for a metronomic athlete and
 stays silent for a variable one, which a ratio cannot express.
+
+### 4.6 Insight cadence — how fast an action appears, and why it does not flicker
+
+Four settings decide this and are tuned **as a set**. Changing one alone reintroduces either
+latency or flicker.
+
+| Setting | Default | What it controls |
+|---|---|---|
+| `INSIGHT_LIVE_WINDOW` | `30s` | the window rules read as **now** |
+| `INSIGHT_INTERVAL_S` | `15` | how often rules are evaluated |
+| `INSIGHT_COOLDOWN_S` | `120` | how often one rule may re-fire |
+| `INSIGHT_HOLD_S` | `150` | how long an action stays on `/api/insights/current` |
+
+**The latency problem.** Detection used to run off the shortest `PAST_WINDOWS` entry, 5 minutes.
+A 5-minute *mean* cannot move quickly by construction: a step change needs ~1.5–2 min of new data
+before the average crosses a threshold, and the job then ran only once a minute. Measured on the
+VPS 2026-08-03, the first insight of a simulated session appeared **5–9 minutes** in.
+
+**The fix.** `INSIGHT_LIVE_WINDOW` is a separate short window, always read from the raw 60 Hz
+`metrics` table — never `metrics_1m`, which is materialized-only and so is missing its newest
+1–2 minutes, i.e. most of a sub-minute window. It supplies **only** the `now` side of every
+comparison. Baseline, spread and trend still come from `PAST_WINDOWS`, because 30 s cannot define
+what is normal for an athlete or which way they are heading. Time to first action is now
+**~30–45 s**. `test_live_window_fires_on_a_step_the_5m_mean_would_still_be_averaging` measures
+exactly this: two jobs differing only in `INSIGHT_LIVE_WINDOW`, 40 s into a step change, where
+the 30 s window fires and the 5 m one is still averaging.
+
+30 s is chosen because it holds ~30 independent `m1`/`m2` samples (both are 1-second peak holds)
+and ~1800 composite samples — enough for a stable mean, short enough to respond within one window.
+
+**Why it does not flicker.** Stability is provided by `INSIGHT_HOLD_S`, not by slowing detection
+down. An action stays on the panel until the rule behind it has been silent that long, so a
+condition hovering around its threshold does not blink. `INSIGHT_HOLD_S` **must exceed**
+`INSIGHT_COOLDOWN_S`: at equality a still-true condition drops off for one tick before it
+re-fires. The 30 s excess is that overlap, and `test_defaults_load_without_env_file` pins the
+inequality.
+
+Net behaviour: appears in ~30–45 s, re-affirms every ≤2 min, clears within ≤2.5 min of the
+condition ending.
+
+**Honest limit.** A rule that compares the athlete to *themselves* cannot fire until there is
+enough history to define "themselves" — in the first minute of a fresh device, live ≈ baseline by
+construction and `z` ≈ 0. Only the absolute-threshold rules (`composite_high`) and data-health
+rules can speak that early. This is a property of within-athlete comparison, not a defect, and it
+is why the panel can be legitimately empty at the start of a session.
+
+### 4.7 From rules to actions — the `/api/insights/current` view
+
+Rules are **diagnostic** (one per mechanism); advice is not. `load_spike` and `composite_high` are
+different findings that lead to the same instruction, and rendering "Ease off" twice with two
+rationales is noise, while rendering it once with two reasons underneath is evidence.
+
+`ACTIONS` (in `backend/api/jobs/insights.py`) is the catalogue; every rule carries an `action_id`
+into it, and several share one on purpose:
+
+| `action_id` | Headline | Rules |
+|---|---|---|
+| `ease_off` | *Ease off* | `load_spike`, `composite_high` |
+| `cap_session` | *Cap this session* | `accumulated_load` |
+| `plan_recovery` | *Plan recovery* | `residual_load`, `rising_risk` |
+| `check_mechanics` | *Check mechanics* | `impact_deviation`, `movement_quality` |
+| `check_sensors` | *Check sensor fit* | `data_quality` |
+
+`group_actions()` collapses the rows inside the hold window: group on `action_id`, keep **only the
+newest row per rule** (the hold/cooldown overlap guarantees duplicates), rank by severity then by
+catalogue order, and cut to `INSIGHT_MAX_ACTIONS` (3). An action takes the strongest severity among
+its reasons.
+
+An action is flagged `unvalidated` only when **every** reason behind it comes from `m4`/`m5`.
+Flagging one that a validated metric also supports would understate the finding; flagging none when
+all of them are unvalidated would overstate it (SPEC §11.1).
+
+`/api/insights/current` is a **state** view — the advice standing right now. `/api/insights`
+remains the append-only event log, and both are served from the same table.
 
 ## 4bis. Earlier insight fixes
 

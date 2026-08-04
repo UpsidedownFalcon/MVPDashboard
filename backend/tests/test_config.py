@@ -121,8 +121,19 @@ def test_defaults_load_without_env_file(clean_env: pytest.MonkeyPatch) -> None:
     assert s.predict_train_window == timedelta(hours=2)
     assert s.metrics_retention == timedelta(days=30)
     assert s.predict_interval_s == 300
-    assert s.insight_interval_s == 60
-    assert s.insight_cooldown_s == 600
+    # Insight cadence, retuned 2026-08-04 (docs/ANALYTICS.md "Insight cadence").
+    # Was 60/600 with detection on the 5m window, which made the first insight of
+    # a session take 5-9 min to appear: a 5-minute MEAN needs ~1.5-2 min of new
+    # data to cross a threshold, plus up to 60 s of job interval. Detection now
+    # runs on a 30s live window and the four numbers are tuned as a set.
+    assert s.insight_live_window == timedelta(seconds=30)
+    assert s.insight_interval_s == 15
+    assert s.insight_cooldown_s == 120
+    # hold MUST exceed cooldown or a still-true condition drops off the panel
+    # for one tick before re-firing, which reads as flicker
+    assert s.insight_hold_s == 150
+    assert s.insight_hold_s > s.insight_cooldown_s
+    assert s.insight_max_actions == 3
     assert s.jwt_expire_hours == 24
     assert s.seed_users == "trainer:changeme"
 

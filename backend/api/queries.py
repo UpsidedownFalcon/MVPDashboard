@@ -168,6 +168,54 @@ def _trend(cur_avg: float | None, prev_avg: float | None,
     return "flat"
 
 
+def _window_entry(label: str, t_from: datetime, cur: asyncpg.Record,
+                  prev: asyncpg.Record, expected_rows: float) -> dict:
+    """One BACKEND_SCHEMA §3 window entry from a cur/prev aggregate pair.
+
+    `sd` and `coverage` are what make the insight layer retune-proof and honest
+    respectively (docs/ANALYTICS.md). `sd` lets a rule express a deviation in
+    units of the athlete's OWN spread, which is invariant to any change in a
+    metric's 0-100 normalisation bounds. `coverage` is the share of the window
+    that actually has data — without it a window average cannot be told apart
+    from a sliver of one.
+    """
+    return {
+        "window": label,
+        "from": _iso(t_from),
+        "m": [_f(cur["m1"]), _f(cur["m2"]), _f(cur["m3"]), _f(cur["m4"]), _f(cur["m5"])],
+        "sd": [_f(cur["m1_sd"]), _f(cur["m2_sd"]), _f(cur["m3_sd"]),
+               _f(cur["m4_sd"]), _f(cur["m5_sd"])],
+        "composite": {
+            "avg": _f(cur["c_avg"]), "min": _f(cur["c_min"]), "max": _f(cur["c_max"]),
+            "sd": _f(cur["c_sd"]),
+        },
+        "quality": _f(cur["quality"]),
+        # sum() over the aggregate returns Decimal; float() before dividing
+        "coverage": (min(1.0, float(cur["n"] or 0) / expected_rows)
+                     if expected_rows else None),
+        "trend": _trend(_f(cur["c_avg"]), _f(prev["c_avg"]),
+                        _f(cur["c_sd"]), _f(prev["c_sd"])),
+    }
+
+
+async def live_window(pool: asyncpg.Pool, settings: Settings,
+                      device_id: str) -> dict:
+    """The INSIGHT_LIVE_WINDOW aggregate — the rule engine's "now".
+
+    Always served from the raw 60Hz hypertable. That is not an optimisation but
+    a correctness requirement: `metrics_1m` is materialized-only, so its newest
+    1-2 minutes do not exist yet, which is most or all of a sub-minute window.
+    Shape matches a `windows()` entry exactly, so MetricView consumes it
+    unchanged.
+    """
+    td = settings.insight_live_window
+    now = datetime.now(tz=timezone.utc)
+    cur = await _window_agg(pool, device_id, now - td, now, use_raw=True)
+    prev = await _window_agg(pool, device_id, now - 2 * td, now - td, use_raw=True)
+    return _window_entry(settings.insight_live_window_raw, now - td, cur, prev,
+                         settings.output_hz * td.total_seconds())
+
+
 async def windows(pool: asyncpg.Pool, settings: Settings, device_id: str) -> dict:
     """One entry per PAST_WINDOWS duration; trend vs the preceding
     equal-length window (dead-band: see TREND_DEADBAND_FLOOR/_SDS)."""
@@ -178,30 +226,8 @@ async def windows(pool: asyncpg.Pool, settings: Settings, device_id: str) -> dic
         use_raw = td <= WINDOW_RAW_MAX
         cur = await _window_agg(pool, device_id, now - td, now, use_raw)
         prev = await _window_agg(pool, device_id, now - 2 * td, now - td, use_raw)
-        # `sd` and `coverage` are what make the insight layer retune-proof and
-        # honest respectively (docs/ANALYTICS.md). `sd` lets a rule express a
-        # deviation in units of the athlete's OWN spread, which is invariant to
-        # any change in a metric's 0-100 normalisation bounds. `coverage` is the
-        # share of the window that actually has data -- without it a window
-        # average cannot be told apart from a sliver of one.
-        expected_rows = settings.output_hz * td.total_seconds()
-        out.append({
-            "window": label,
-            "from": _iso(now - td),
-            "m": [_f(cur["m1"]), _f(cur["m2"]), _f(cur["m3"]), _f(cur["m4"]), _f(cur["m5"])],
-            "sd": [_f(cur["m1_sd"]), _f(cur["m2_sd"]), _f(cur["m3_sd"]),
-                   _f(cur["m4_sd"]), _f(cur["m5_sd"])],
-            "composite": {
-                "avg": _f(cur["c_avg"]), "min": _f(cur["c_min"]), "max": _f(cur["c_max"]),
-                "sd": _f(cur["c_sd"]),
-            },
-            "quality": _f(cur["quality"]),
-            # sum() over the aggregate returns Decimal; float() before dividing
-            "coverage": (min(1.0, float(cur["n"] or 0) / expected_rows)
-                         if expected_rows else None),
-            "trend": _trend(_f(cur["c_avg"]), _f(prev["c_avg"]),
-                            _f(cur["c_sd"]), _f(prev["c_sd"])),
-        })
+        out.append(_window_entry(label, now - td, cur, prev,
+                                 settings.output_hz * td.total_seconds()))
     return {"windows": out}
 
 

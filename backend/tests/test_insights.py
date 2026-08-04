@@ -9,7 +9,7 @@ import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from api.jobs.insights import Ctx, InsightJob, RULES
+from api.jobs.insights import ACTIONS, Ctx, InsightJob, RULES, group_actions
 from api.routes.insights import router as insights_router
 from common.config import Settings
 from db_utils import connect_admin, create_scratch_db, drop_scratch_db
@@ -263,6 +263,142 @@ def test_low_coverage_suppresses_athlete_rules() -> None:
         ctx_from(make_windows(**spike, coverage=0.01))) is None
 
 
+# --- live window + action grouping -------------------------------------------
+
+def test_live_window_supplies_now_while_baseline_stays_long() -> None:
+    """The latency fix, stated as a property.
+
+    Detection used to read the shortest PAST_WINDOWS entry (5m), so a step change
+    had to drag a 5-minute mean across a threshold before anything fired. `live`
+    overrides ONLY the "now" side; baseline, spread and trend must still come
+    from the long windows, because 30 s cannot define what is normal.
+    """
+    windows = make_windows(short_m=[10.0] * 5, long_m=[30.0] * 5, sd=[10.0] * 5,
+                           short_c=10.0, long_c=30.0)
+    live = {"window": "30s", "from": "2026-08-04T12:00:00.000Z",
+            "m": [90.0] * 5, "sd": [1.0] * 5,
+            "composite": {"avg": 90.0, "min": 90.0, "max": 90.0, "sd": 1.0},
+            "quality": 1.0, "coverage": 1.0, "trend": "up"}
+
+    without = ctx_from(windows)
+    assert without.metrics["m1"].now == 10.0          # falls back to the 5m window
+    assert without.metrics["m1"].z == pytest.approx(-2.0)
+
+    with_live = ctx_from(windows)
+    with_live.live = live
+    m = with_live.metrics["m1"]
+    assert m.now == 90.0, "the live window must supply `now`"
+    assert m.baseline == 30.0, "baseline must stay on the LONGEST window"
+    assert m.sd == 10.0, "spread must stay on the LONGEST window"
+    assert m.z == pytest.approx(6.0)
+    # the same override drives the composite, and so the rules
+    assert with_live.metrics["composite"].now == 90.0
+    assert RULE["load_spike"].evaluate(with_live) is not None
+    assert RULE["load_spike"].evaluate(without) is None
+
+
+def test_live_window_is_what_guards_and_absolute_rules_read() -> None:
+    """`trustworthy` and the absolute-threshold rules must judge the LIVE data.
+
+    If they kept reading the 5m window the guards would describe a different
+    stretch of time from the evidence, so a device that just went quiet (or just
+    recovered) would be assessed on stale coverage and quality.
+    """
+    windows = make_windows(short_c=10.0, long_c=10.0, quality=1.0, coverage=1.0)
+
+    def with_live(**live_kw):
+        ctx = ctx_from(windows)
+        ctx.live = {"window": "30s", "from": "2026-08-04T12:00:00.000Z",
+                    "m": [None] * 5, "sd": [None] * 5,
+                    "composite": {"avg": 95.0, "min": 95.0, "max": 95.0, "sd": 1.0},
+                    "quality": 1.0, "coverage": 1.0, "trend": "flat", **live_kw}
+        return ctx
+
+    # composite_high reads the live average, not the 5m one
+    ev = RULE["composite_high"].evaluate(with_live())
+    assert ev is not None and ev["severity"] == "alert" and ev["window"] == "30s"
+    # live coverage below MIN_COVERAGE suppresses athlete rules
+    assert with_live(coverage=0.01).trustworthy is False
+    assert with_live(coverage=1.0).trustworthy is True
+    # data_quality compares the LIVE window against the long baseline
+    ev = RULE["data_quality"].evaluate(with_live(quality=0.4))
+    assert ev is not None and ev["window"] == "30s"
+    assert ev["quality"] == pytest.approx(0.4)
+
+
+def _row(rule_id, action_id, severity, reason, minutes_ago, unvalidated=False):
+    from datetime import datetime, timezone
+    return {
+        "rule_id": rule_id, "action_id": action_id, "severity": severity,
+        "reason": reason, "rationale": f"long {rule_id}", "message": f"msg {rule_id}",
+        "action": f"legacy {rule_id}", "context": {"unvalidated": unvalidated},
+        "created_at": datetime(2026, 8, 4, 12, 0, tzinfo=timezone.utc)
+                      - timedelta(minutes=minutes_ago),
+    }
+
+
+def test_group_actions_merges_rules_onto_one_imperative() -> None:
+    """Two findings that mean the same instruction become ONE action with TWO
+    reasons — not two cards competing for the same decision."""
+    rows = [_row("load_spike", "ease_off", "warning", "spike reason", 0),
+            _row("composite_high", "ease_off", "alert", "high reason", 1)]
+    actions = group_actions(rows, max_actions=3)
+    assert len(actions) == 1
+    a = actions[0]
+    assert a["action"] == "Ease off" and a["action_id"] == "ease_off"
+    # the action inherits the STRONGEST severity among its reasons
+    assert a["severity"] == "alert"
+    assert [r["text"] for r in a["reasons"]] == ["high reason", "spike reason"]
+    assert a["updated_at"] == max(r["created_at"] for r in rows)
+
+
+def test_group_actions_dedupes_a_rule_that_refired_inside_the_hold() -> None:
+    """INSIGHT_HOLD_S exceeds INSIGHT_COOLDOWN_S on purpose, so a still-true rule
+    has two rows in the window. Only the newest may be shown, or the same
+    sentence appears twice under one heading."""
+    rows = [_row("data_quality", "check_sensors", "info", "newest", 0),
+            _row("data_quality", "check_sensors", "info", "older", 2)]
+    actions = group_actions(rows, max_actions=3)
+    assert len(actions) == 1
+    assert [r["text"] for r in actions[0]["reasons"]] == ["newest"]
+
+
+def test_group_actions_caps_and_ranks_by_severity() -> None:
+    rows = [_row("data_quality", "check_sensors", "info", "q", 0),
+            _row("impact_deviation", "check_mechanics", "info", "i", 0),
+            _row("residual_load", "plan_recovery", "warning", "r", 0),
+            _row("composite_high", "ease_off", "alert", "c", 0)]
+    actions = group_actions(rows, max_actions=3)
+    assert len(actions) == 3, "never more than INSIGHT_MAX_ACTIONS"
+    assert [a["action_id"] for a in actions] == [
+        "ease_off", "plan_recovery", "check_mechanics",
+    ], "alert first, then warning, then catalogue order within equal severity"
+
+
+def test_group_actions_flags_an_action_only_when_all_reasons_are_unvalidated() -> None:
+    """m4/m5 have no real-data validation (SPEC §11.1). Marking an action that
+    a validated metric also supports would understate it; marking none when they
+    are all unvalidated would overstate it."""
+    both = [_row("impact_deviation", "check_mechanics", "info", "m1 moved", 0),
+            _row("movement_quality", "check_mechanics", "info", "m4 moved", 0,
+                 unvalidated=True)]
+    assert group_actions(both, 3)[0]["unvalidated"] is False
+    only = [_row("movement_quality", "check_mechanics", "info", "m4 moved", 0,
+                 unvalidated=True)]
+    assert group_actions(only, 3)[0]["unvalidated"] is True
+
+
+def test_every_rule_maps_to_a_catalogue_action_and_a_short_reason() -> None:
+    """The panel renders `reason` as a bullet with NO expander, so each one has
+    to be complete and short at the same time."""
+    for rule in RULES:
+        assert rule.action_id in ACTIONS, f"{rule.rule_id} has no catalogue action"
+        assert rule.reason is not None, f"{rule.rule_id} has no short reason"
+    for action in ACTIONS.values():
+        assert len(action.text) <= 20, f"{action.action_id} headline too long"
+        assert action.text[0].isupper()
+
+
 def test_every_rule_supplies_action_and_rationale_with_evidence() -> None:
     """UIUX §4 renders `action` as the headline and `rationale` beneath it, and
     SPEC §2 forbids an individual flag without the evidence that fired it."""
@@ -306,6 +442,7 @@ async def scratch_app():
     app = FastAPI()
     app.include_router(insights_router)
     app.state.pool = pool
+    app.state.settings = settings          # /api/insights/current reads hold_s
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         try:
@@ -322,20 +459,24 @@ async def test_job_fires_once_per_cooldown_and_endpoint(scratch_app) -> None:
     await conn.execute(
         "INSERT INTO devices (device_id, display_name) VALUES ('30','Renamed Athlete')"
     )
-    # Recent 2 minutes: composite 95 (above alert threshold 92) at quality 0.5.
-    # Preceded by 23 minutes of quiet, GOOD-quality data, which is what the
-    # data_quality rule now measures the drop against — a uniformly poor link no
-    # longer fires it (see test_data_quality_reports_a_drop_not_an_absolute_level).
-    m_now = (await conn.fetchrow("SELECT date_trunc('minute', now()) AS m"))["m"]
+    # Recent 2 minutes THROUGH NOW: composite 95 (above alert threshold 92) at
+    # quality 0.5. Preceded by 23 minutes of quiet, GOOD-quality data, which is
+    # what the data_quality rule measures the drop against — a uniformly poor
+    # link no longer fires it (see
+    # test_data_quality_reports_a_drop_not_an_absolute_level).
+    #
+    # Anchored on now() and carried right up to it, because rules now read the
+    # INSIGHT_LIVE_WINDOW (30s) as "now". Data that stops a minute short leaves
+    # that window EMPTY and nothing fires — which is correct behaviour for a
+    # device that went quiet, and was what this fixture accidentally described.
+    t_now = (await conn.fetchrow("SELECT now() AS n"))["n"]
     rows = []
-    for minute in range(25, 2, -1):
-        for i in range(10):
-            t = m_now - timedelta(minutes=minute) + timedelta(seconds=6 * i)
-            rows.append((t, "30", None, None, None, None, None, 30.0, 0.95))
-    for minute in (2, 1):
-        for i in range(10):
-            t = m_now - timedelta(minutes=minute) + timedelta(seconds=6 * i)
-            rows.append((t, "30", None, None, None, None, None, 95.0, 0.5))
+    for s in range(25 * 60, 2 * 60, -1):          # 25→2 min ago, 1 Hz
+        rows.append((t_now - timedelta(seconds=s), "30",
+                     None, None, None, None, None, 30.0, 0.95))
+    for i in range(2 * 60 * 12):                  # last 2 min → now, 12 Hz
+        rows.append((t_now - timedelta(seconds=i / 12.0), "30",
+                     None, None, None, None, None, 95.0, 0.5))
     await conn.copy_records_to_table(
         "metrics", records=rows,
         columns=("time", "device_id", "m1", "m2", "m3", "m4", "m5",
@@ -366,6 +507,97 @@ async def test_job_fires_once_per_cooldown_and_endpoint(scratch_app) -> None:
     assert (await client.get("/api/insights", params={"device": "99"})).json() == []
 
 
+async def test_live_window_fires_on_a_step_the_5m_mean_would_still_be_averaging(
+    scratch_app,
+) -> None:
+    """The latency fix, measured end-to-end against the database.
+
+    A device is quiet for 30 minutes, then goes hard 40 SECONDS ago. The two
+    jobs below differ ONLY in INSIGHT_LIVE_WINDOW, so this isolates the change:
+
+      live = 30s  -> sees 95, fires immediately
+      live = 5m   -> sees the pre-change behaviour, a 5-minute mean of roughly
+                     (4.33*30 + 0.67*95)/5 ~= 39, far below the 85 threshold,
+                     and stays silent until the mean drags across it minutes later
+
+    That gap is exactly the 5-9 minutes the first insight of a session used to
+    take.
+    """
+    settings, conn, pool, client = scratch_app
+    await conn.execute("INSERT INTO devices (device_id, display_name) VALUES ('30','A')")
+    t_now = (await conn.fetchrow("SELECT now() AS n"))["n"]
+    rows = [
+        (t_now - timedelta(seconds=s), "30", None, None, None, None, None, 30.0, 1.0)
+        for s in range(30 * 60, 40, -1)                    # 30 min quiet, 1 Hz
+    ]
+    rows += [
+        (t_now - timedelta(seconds=i / 12.0), "30",
+         None, None, None, None, None, 95.0, 1.0)
+        for i in range(40 * 12)                            # last 40 s hard, 12 Hz
+    ]
+    await conn.copy_records_to_table(
+        "metrics", records=rows,
+        columns=("time", "device_id", "m1", "m2", "m3", "m4", "m5",
+                 "composite", "quality"),
+    )
+    await conn.execute("CALL refresh_continuous_aggregate('metrics_1m', NULL, NULL)")
+
+    slow = settings.model_copy(update={"insight_live_window_raw": "5m"})
+    assert await InsightJob(slow, pool).run_once() == 0, (
+        "a 5-minute mean cannot have crossed the threshold 40 s into a step"
+    )
+    fired = await InsightJob(settings, pool).run_once()
+    assert fired >= 1, "the 30s live window must catch the step immediately"
+
+    body = (await client.get("/api/insights/current", params={"device": "30"})).json()
+    assert [a["action_id"] for a in body["actions"]] == ["ease_off"]
+
+
+async def test_current_endpoint_returns_grouped_actions(scratch_app) -> None:
+    """/api/insights/current is a STATE view: the advice standing right now,
+    capped, each action carrying every reason behind it."""
+    settings, conn, pool, client = scratch_app
+    await conn.execute("INSERT INTO devices (device_id, display_name) VALUES ('30','A')")
+    t_now = (await conn.fetchrow("SELECT now() AS n"))["n"]
+    rows = [
+        (t_now - timedelta(seconds=i / 12.0), "30",
+         None, None, None, None, None, 95.0, 0.4)
+        for i in range(2 * 60 * 12)
+    ]
+    for s in range(25 * 60, 2 * 60, -1):
+        rows.append((t_now - timedelta(seconds=s), "30",
+                     None, None, None, None, None, 30.0, 0.98))
+    await conn.copy_records_to_table(
+        "metrics", records=rows,
+        columns=("time", "device_id", "m1", "m2", "m3", "m4", "m5",
+                 "composite", "quality"),
+    )
+    await conn.execute("CALL refresh_continuous_aggregate('metrics_1m', NULL, NULL)")
+
+    assert await InsightJob(settings, pool).run_once() >= 2
+
+    body = (await client.get("/api/insights/current", params={"device": "30"})).json()
+    assert body["device_id"] == "30"
+    assert body["max_actions"] == settings.insight_max_actions
+    assert body["hold_s"] == settings.insight_hold_s
+    actions = body["actions"]
+    assert 1 <= len(actions) <= settings.insight_max_actions
+    by_id = {a["action_id"]: a for a in actions}
+    assert "ease_off" in by_id and "check_sensors" in by_id
+    ease = by_id["ease_off"]
+    assert ease["action"] == "Ease off" and ease["severity"] == "alert"
+    assert ease["reasons"] and all(r["text"] for r in ease["reasons"])
+    # every reason is a complete short sentence, renderable with no expander
+    for a in actions:
+        for r in a["reasons"]:
+            assert r["text"].endswith(".") and len(r["text"]) <= 200
+    # severity ordering: alert before info
+    assert actions[0]["severity"] == "alert"
+    # an unknown device is simply empty, never an error
+    empty = (await client.get("/api/insights/current", params={"device": "99"})).json()
+    assert empty["actions"] == []
+
+
 async def test_cooldown_lets_severity_escalate_but_not_regress(scratch_app) -> None:
     """A warning must NOT swallow a genuine alert.
 
@@ -377,14 +609,16 @@ async def test_cooldown_lets_severity_escalate_but_not_regress(scratch_app) -> N
     """
     settings, conn, pool, client = scratch_app
     await conn.execute("INSERT INTO devices (device_id, display_name) VALUES ('30','A')")
-    m_now = (await conn.fetchrow("SELECT date_trunc('minute', now()) AS m"))["m"]
 
     async def set_composite(value: float) -> None:
+        # Written up to now() so the 30s live window sees it — see the anchoring
+        # note in test_job_fires_once_per_cooldown_and_endpoint.
         await conn.execute("DELETE FROM metrics WHERE device_id='30'")
+        t_now = (await conn.fetchrow("SELECT now() AS n"))["n"]
         rows = [
-            (m_now - timedelta(minutes=minute) + timedelta(seconds=6 * i),
+            (t_now - timedelta(seconds=i / 12.0),
              "30", None, None, None, None, None, value, 1.0)
-            for minute in (2, 1) for i in range(10)
+            for i in range(2 * 60 * 12)
         ]
         await conn.copy_records_to_table(
             "metrics", records=rows,

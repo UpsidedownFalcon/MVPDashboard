@@ -68,8 +68,36 @@ class Settings(BaseSettings):
     future_horizons_raw: str = Field("10m,30m,1h", validation_alias="FUTURE_HORIZONS")
     predict_interval_s: int = 300
     predict_train_window_raw: str = Field("2h", validation_alias="PREDICT_TRAIN_WINDOW")
-    insight_interval_s: int = 60
-    insight_cooldown_s: int = 600
+    # --- insight cadence ------------------------------------------------------
+    # These four numbers together decide how fast an action appears, how often it
+    # is re-affirmed, and how long it lingers once the condition clears. They are
+    # tuned as a SET (docs/ANALYTICS.md "Insight cadence"); changing one alone
+    # reintroduces either latency or flicker.
+    #
+    # Detection used to run off the shortest PAST_WINDOWS entry (5m). A 5-minute
+    # MEAN cannot move quickly by construction: a step change needs ~1.5-2 min of
+    # new data before it shifts the average past a threshold, which is why the
+    # first insight of a session took 5-9 minutes to appear. INSIGHT_LIVE_WINDOW
+    # is a separate, much shorter window read from the raw 60Hz `metrics` table
+    # (never the continuous aggregate, which lags 1-2 min), used ONLY by the rule
+    # engine as the "now" side of every comparison. The 5m/30m/2h windows still
+    # supply the baseline, the spread and the trend.
+    #
+    # 30s holds ~30 independent m1/m2 peak-holds (both are 1 s maxima) and ~1800
+    # composite samples, so the mean is stable enough to threshold while still
+    # responding within one window.
+    insight_live_window_raw: str = Field("30s", validation_alias="INSIGHT_LIVE_WINDOW")
+    insight_interval_s: int = 15
+    insight_cooldown_s: int = 120
+    # How long an action stays on /api/insights/current after the rule behind it
+    # last fired. MUST exceed INSIGHT_COOLDOWN_S: at hold == cooldown a still-true
+    # condition drops off the panel for one job tick before it re-fires, which
+    # reads as flicker. The excess (30 s = 2 ticks) is the overlap that prevents
+    # it, and it also bounds how long a cleared condition keeps advising.
+    insight_hold_s: int = 150
+    # Hard cap on simultaneous actions. The panel is a decision aid, not a list;
+    # beyond ~3 imperatives at once nobody acts on any of them.
+    insight_max_actions: int = 3
     # Insight rule thresholds on the composite's 0-100 scale (S2-T05; the task
     # sheet's 0.7/0.85 predate the SPEC's 0-100 rescale — TRD §7). Raised from
     # 70/85 after the composite rescale (biomech SPEC §6.1): a measured hard
@@ -122,6 +150,10 @@ class Settings(BaseSettings):
     @property
     def past_windows(self) -> list[timedelta]:
         return parse_duration_list(self.past_windows_raw)
+
+    @property
+    def insight_live_window(self) -> timedelta:
+        return parse_duration(self.insight_live_window_raw)
 
     @property
     def future_horizons(self) -> list[timedelta]:

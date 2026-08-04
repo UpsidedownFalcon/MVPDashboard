@@ -58,9 +58,11 @@ async def test_migrate_idempotent_and_cagg(scratch_db) -> None:
     conn, settings = scratch_db
 
     applied = await apply_migrations(conn, settings)
-    assert applied == ["001_init.sql", "002_insight_actions.sql"]
+    assert applied == ["001_init.sql", "002_insight_actions.sql",
+                       "003_insight_action_grouping.sql"]
 
     # 002: action-first insight columns exist (nullable TEXT)
+    # 003: action_id groups rules onto one imperative; reason is the short bullet
     insight_cols = {
         r["column_name"]
         for r in await conn.fetch(
@@ -68,7 +70,7 @@ async def test_migrate_idempotent_and_cagg(scratch_db) -> None:
                WHERE table_name = 'insights'"""
         )
     }
-    assert {"action", "rationale"} <= insight_cols
+    assert {"action", "rationale", "action_id", "reason"} <= insight_cols
 
     # all tables exist
     tables = {
