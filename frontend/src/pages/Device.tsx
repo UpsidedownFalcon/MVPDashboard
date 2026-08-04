@@ -82,6 +82,13 @@ export default function Device() {
     return out
   }, [device])
 
+  // Hooks must run unconditionally — this sat below the early returns once,
+  // which changed the hook order the moment loading resolved or a device
+  // appeared (React rules-of-hooks violation).
+  const calibration = useCalibrationState(
+    id, device?.online ?? false, live?.flags, device?.lastSignalMs ?? null, live?.cal,
+  )
+
   if (isLoading) return <p className="notice">Loading…</p>
   if (!device) {
     return (
@@ -95,9 +102,6 @@ export default function Device() {
   }
 
   const getData = () => getBuffer(id)
-  const calibration = useCalibrationState(
-    id, device.online, live?.flags, device.lastSignalMs, live?.cal,
-  )
   // signed m5 -> which side is carrying more load right now ('even' and null
   // both mean "no emphasis")
   const side = m5Side(live?.m[4] ?? null)

@@ -248,10 +248,14 @@ while a device is calibrating, then a brief verdict — **"Calibrated ✓"** or
 **"Calibration failed"** — for ~8 s. Its whole job is to tell the athlete *how much longer to
 stand still*, and whether it worked.
 
-It is driven **only** by the tick's `cal` field (BACKEND_SCHEMA §2) and `cal_failed`. The
-countdown comes from the real per-sensor stillness accumulators, so it **goes back up if the
-athlete moves** — the 10 s window has to be continuous, and pretending otherwise would have
-the number hit zero while calibration silently restarted.
+It is driven **only** by the tick's `cal` field (BACKEND_SCHEMA §2) and `cal_failed` — but
+**bounded** (user decision 2026-08-04): when the device appears and `cal` first arrives, the
+UI latches a wall-clock deadline of `min(cal, 20 s)` and counts down **monotonically** — the
+displayed number never rises, and when it reaches zero the badge **disappears regardless of
+backend state**, with no verdict. The backend's `cal` still honestly rises when the athlete
+moves; the UI simply refuses to show an unbounded ask, because a badge that can blink forever
+teaches people to ignore it. If the backend resolves within the cap, the verdict shows as
+before; after a timeout, the `uncalibrated` / `carried_over` chips carry the state.
 
 🚩 **It must NEVER be driven by `warming_up`.** That flag is `m4`/`m5`'s warm-up, which needs
 **60 s / 30 s of MOVEMENT** to clear, while calibration needs **stillness** — the two are
@@ -266,13 +270,14 @@ dropped out of the UI entirely and its return counts as a new session. It delibe
 **not** key on the `online` flag, which flips after ~2 s: a brief packet dropout mid-session
 would otherwise re-arm the badge and restart the count.
 
-**Also worth knowing** (from the backend investigation, 2026-08-04): calibration itself is
-sound — a carried-over device *does* keep seeking a still window and upgrades to `measured`,
-and the gravity guard runs on the **calibrated** magnitude, so there is no chicken-and-egg
-trap for a device with history. But `carried_over` is an **any-limb** flag and a single 0.25 s
-gap or one over-threshold tick wipes that limb's accumulated stillness, so on a lossy link
-(or with one unworn sensor) it can persist far longer than the nominal 13 s. The countdown
-makes that visible rather than mysterious: it stalls or climbs instead of finishing.
+**Also worth knowing** (backend investigation 2026-08-04, revised later the same day): the
+first investigation declared calibration sound; the second found the real fault. The stillness
+guard rejected any tick whose `|a|` was >2% off gravity while the k guard called up to 5%
+correctable — so a motionless sensor 2–5% off *never* accumulated a window, was branded
+`cal_failed` at 20 s, and (because `cal_failed` sensors still counted into `cal`) pinned the
+countdown forever. Both are fixed: the guard is now 6% (SPEC §3.8) and `cal_failed` sensors
+leave the countdown, which therefore reaches null once every healthy sensor is measured. The
+UI's 20 s hard cap above is the belt-and-braces on top of that.
 
 ### 6b. Battery — SET
 

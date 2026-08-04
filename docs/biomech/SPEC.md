@@ -301,7 +301,7 @@ still at some point in almost every session, so the model simply watches for it.
 | Stage | Rule |
 |---|---|
 | First **3 s** of a sensor's streaming | **Discarded** — power-on transients |
-| Acceptance, per tick | `mean\|ω\| < 5 °/s` **and** `\|mean\|a\| − 9.81\| < 2%` — the rejection guards below, used as the acceptance test |
+| Acceptance, per tick | `mean\|ω\| < 5 °/s` **and** `\|mean\|a\| − 9.81\| < 6%` — the rejection guards below, used as the acceptance test |
 | Window | **10 s of *continuous* stillness**; any failing tick resets the accumulation to zero |
 | Scope | **Per sensor, independent** — sensors settle at different moments and calibrate at different moments |
 
@@ -341,7 +341,12 @@ since the measurement is free, take it. Gyro bias is the more clearly worthwhile
 against a still-standing `|ω|` of 3–5 °/s is 5–10% of the low-end signal.
 
 **Validity guards — reject rather than bake in a bad correction:**
-- `|mean(|a|) − 9.81| > 2%` ⇒ athlete was not still, or sensor faulty ⇒ **reject, keep defaults**.
+- `|mean(|a|) − 9.81| > 6%` ⇒ sensor faulty (the gyro is the movement authority) ⇒ **reject,
+  keep defaults**. Was 2% until 2026-08-04, which contradicted the k range below: a motionless
+  sensor 2–5% off gravity is *exactly* what calibration corrects, yet it failed acceptance every
+  tick, never accumulated a window, and was branded `cal_failed` at 20 s — observed on real
+  hardware as "held still 30–40 s, never calibrated, ran on carried values". The guard must be
+  wider than the correctable k range; the k guard stays the decisive validator.
 - `mean(|ω|) > 5 °/s` ⇒ athlete moved ⇒ **reject**.
 - `k` outside `[0.95, 1.05]` ⇒ **reject**. Under automatic detection the first two are the
   per-tick acceptance test, so this one bites on the *composed* result — a carried-over `k` that

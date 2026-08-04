@@ -82,6 +82,16 @@ DEFAULT_CALIBRATION = Calibration()
 # --- validity guards for calibrate() (SPEC Section 3.8) ---------------------
 # Reject rather than bake in a bad correction: a rejected calibration keeps the
 # defaults, which are known-safe.
-CAL_MAX_G_ERROR = 0.02        # |mean|a| - 9.81| / 9.81 above this => not still
+#
+# CAL_MAX_G_ERROR must be WIDER than the correctable gain range [CAL_K_MIN,
+# CAL_K_MAX]: the whole point of the still window is to measure a gain error,
+# so the window has to ACCEPT the very sensors calibration exists to fix. At
+# the original 0.02 a motionless sensor 2-5% off gravity failed the acceptance
+# test every tick, never accumulated a window, and was branded cal_failed at
+# 20 s -- while k up to 5% off was declared correctable. 0.06 covers the k
+# range plus noise margin; the k guard in finish_calibration stays the
+# decisive validator, and beyond 6% the motionless-but-wrong-|a| fault path
+# still applies.
+CAL_MAX_G_ERROR = 0.06        # |mean|a| - 9.81| / 9.81 above this => faulty
 CAL_MAX_ROTATION_DPS = 5.0    # mean |w| above this => athlete moved
 CAL_K_MIN, CAL_K_MAX = 0.95, 1.05

@@ -177,7 +177,7 @@ def test_rotation_inside_the_window_rejects_it():
 def test_sensor_reading_a_bad_magnitude_never_calibrates():
     """A sensor sitting at |a| = 8.0 is faulty, not still (SPEC §3.8).
 
-    18% off gravity is far outside the 2% guard, so the window is refused for
+    18% off gravity is far outside the 6% guard, so the window is refused for
     as long as the fault lasts — defaults stay in place rather than a 1.23x
     gain being baked in.
     """
@@ -186,6 +186,65 @@ def test_sensor_reading_a_bad_magnitude_never_calibrates():
     assert all(src == "default" for src in sess.cal_src)
     assert sess.cal[LIMBS[0]].k == 1.0, "a bad magnitude was baked in as gain"
     assert "uncalibrated" in res[-1].flags
+
+
+def test_gain_error_within_correctable_range_calibrates():
+    """A motionless sensor 4% off gravity MUST calibrate (2026-08-04 fix).
+
+    The k guard declares gains up to 5% correctable, so the stillness guard
+    has to accept the very sensors calibration exists to fix. At the original
+    2% guard this sensor failed the acceptance test every tick, never
+    accumulated a window, was branded cal_failed at 20 s — and pinned the
+    badge countdown forever. This is the failure observed on real hardware:
+    held still for 30-40 s, never calibrated, ran on carried values.
+    """
+    res, state = _drive(lambda k: _still(k, gain=1.04), 60 * 20)
+    sess = _sess(state)
+    assert all(src == "measured" for src in sess.cal_src), (
+        f"a correctable gain error was refused: {sess.cal_src}"
+    )
+    assert sess.cal[LIMBS[0]].k == pytest.approx(1.0 / 1.04, rel=1e-3), (
+        "the measured k must correct the 4% gain error"
+    )
+    assert "uncalibrated" not in res[-1].flags
+    assert "cal_failed" not in res[-1].flags
+    assert _cal_left(res[-1]) is None
+
+
+def test_faulted_sensor_does_not_pin_the_countdown():
+    """One faulty sensor must not keep the countdown alive forever.
+
+    Same argument as a never-streaming limb: more stillness cannot fix a
+    faulty sensor, so once it is flagged cal_failed it leaves the countdown —
+    which goes to None the moment every healthy sensor is measured. The
+    cal_failed chip is what reports the fault from there.
+    """
+    healthy = ("left_shin", "left_thigh", "right_thigh")
+
+    def gen_pair(k):
+        t0 = k * NS / FS
+        fh, th = make_tick(*_still(k), limbs=healthy, t0=t0)
+        fb, tb = make_tick(*_still(k, gain=1.10), limbs=("right_shin",), t0=t0)
+        return {**fh, **fb}, {**th, **tb}
+
+    state: dict = {}
+    res = []
+    for k in range(60 * 30):
+        f, t = gen_pair(k)
+        res.append(compute(f, state, t))
+
+    sess = _sess(state)
+    for limb in healthy:
+        assert sess.cal_src[sess.idx[limb]] == "measured", (
+            f"{limb} should have calibrated normally: {sess.cal_src}"
+        )
+    i_bad = sess.idx["right_shin"]
+    assert sess.cal_src[i_bad] == "default", "the bad correction must not land"
+    assert sess.cal_failed[i_bad], "10% off gravity while motionless is a fault"
+    assert "cal_failed" in res[-1].flags
+    assert _cal_left(res[-1]) is None, (
+        "a faulted sensor pinned the countdown — the badge would flash forever"
+    )
 
 
 def test_stillness_must_be_continuous():
@@ -355,10 +414,9 @@ def test_gain_mismatch_bias_disappears_after_calibration():
 
     m5 is an inter-sensor ratio, so a gain mismatch lands on it directly as a
     bias nothing downstream can remove. The mismatch is applied as +-1.5% per
-    side rather than 3% on one: each sensor then still reads inside SPEC
-    §3.8's 2% stillness guard, which is what makes the window acceptable at
-    all — a sensor reading 3% off gravity is indistinguishable from a faulty
-    one and is correctly refused (see the bad-magnitude test above).
+    side; the stillness guard now covers the whole correctable k range (6%,
+    see test_gain_error_within_correctable_range_calibrates), so either split
+    would calibrate — the symmetric one keeps the fixture's m5 math simple.
     """
     half = 1.015                       # +-1.5% => 3% between the sides
 

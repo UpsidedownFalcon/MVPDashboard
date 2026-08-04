@@ -885,7 +885,9 @@ def calibration_seconds_left(sess, limbs: tuple[str, ...]) -> float | None:
     sensor that is not worn or has a flat battery cannot be calibrated by
     standing still, and letting it pin the countdown forever would tell the
     athlete to keep waiting for something that is never going to happen; the
-    sensor dots and `degraded_sensors` are what report that case.
+    sensor dots and `degraded_sensors` are what report that case. Sensors in
+    `cal_failed` are excluded for the same reason: more stillness cannot fix a
+    faulty sensor, and the flag chip is what reports it.
     """
     worst: float | None = None
     for i in range(len(limbs)):
@@ -893,6 +895,12 @@ def calibration_seconds_left(sess, limbs: tuple[str, ...]) -> float | None:
             continue
         if sess.cal_age[i] <= 0.0:
             continue                      # never streamed: not a waiting game
+        if sess.cal_failed[i]:
+            # Same argument as never-streamed: a faulted sensor cannot be fixed
+            # by standing still longer, so it must not pin the countdown. The
+            # `cal_failed` flag chip is what reports it; if a later window does
+            # land, finish_calibration clears the fault and this resumes.
+            continue
         discard_left = max(0.0, CAL_DISCARD_S - float(sess.cal_age[i]))
         window_left = max(0.0, CAL_WINDOW_S - float(sess.cal_dur[i]))
         left = discard_left + window_left

@@ -7,13 +7,20 @@
 // MOVEMENT to clear, while calibration needs STILLNESS. The two are mutually
 // exclusive, so a badge driven by both could never stop while standing still.
 //
+// The countdown is BOUNDED (user decision 2026-08-04): when a device appears
+// and starts calibrating, the UI latches a wall-clock deadline of
+// min(backend cal, CAL_UI_MAX_S) and counts down monotonically — it never
+// rises, and at zero the badge disappears REGARDLESS of backend state. The
+// backend's `cal` remains the honest accumulator (it rises when the athlete
+// moves), but a badge that can blink forever teaches people to ignore it, so
+// the UI clamps it to one bounded, finishable ask. If the backend resolves
+// within the cap, the usual verdict shows; if the cap expires first, the badge
+// just goes away — `uncalibrated`/`carried_over` chips carry the state from
+// there.
+//
 // `carried_over` is deliberately not here either. It means "running last
 // session's values, not measured today", which is a state, not a wait — it has
 // its own info chip.
-//
-// The countdown is computed by the backend from the real per-sensor stillness
-// accumulators, so it RISES again if the athlete moves. That is honest:
-// movement genuinely costs them the accumulated window.
 
 import { CheckCircle2, TriangleAlert } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
@@ -21,10 +28,12 @@ import { OFFLINE_HIDE_MS } from '../lib/config'
 
 /** How long the verdict stays up once calibration resolves. */
 const VERDICT_MS = 8_000
+/** Hard cap on how long the countdown may stay on screen, whatever the backend says. */
+const CAL_UI_MAX_S = 20
 
 export interface CalibrationState {
   mode: 'counting' | 'done' | 'failed' | 'off'
-  /** seconds of stillness still required (mode === 'counting') */
+  /** seconds shown on the countdown (mode === 'counting') */
   secondsLeft: number
 }
 
@@ -36,32 +45,51 @@ export function useCalibrationState(
   /** the tick's `cal` field: seconds left, or null when nothing is calibrating */
   calLeft: number | null | undefined,
 ): CalibrationState {
-  const wasCounting = useRef(false)
+  /** wall-clock end of the visible countdown; null when not counting */
+  const deadline = useRef<number | null>(null)
+  /** how this session's badge ended; blocks re-arming until the device is gone */
+  const outcome = useRef<'done' | 'failed' | 'timeout' | null>(null)
   const resolvedAt = useRef<number | null>(null)
   const [, tick] = useState(0)
+
+  const now = Date.now()
 
   // A real absence (silent past OFFLINE_HIDE_MS) means the device left the UI
   // entirely; its return is a new session and the badge re-arms. Keying on the
   // `online` flag instead would re-arm on a 2 s packet dropout.
-  const gone = lastSignalMs == null || Date.now() - lastSignalMs > OFFLINE_HIDE_MS
+  const gone = lastSignalMs == null || now - lastSignalMs > OFFLINE_HIDE_MS
   if (gone) {
-    wasCounting.current = false
+    deadline.current = null
+    outcome.current = null
     resolvedAt.current = null
   }
 
-  const counting = !gone && online && calLeft != null
   const failed = !!flags?.includes('cal_failed')
 
-  // Latch the moment counting stops, so the verdict is shown once and briefly.
-  if (counting) {
-    wasCounting.current = true
-    resolvedAt.current = null
-  } else if (wasCounting.current && resolvedAt.current == null) {
-    resolvedAt.current = Date.now()
+  if (!gone && outcome.current == null) {
+    if (deadline.current == null) {
+      // Arm once per session appearance, from the backend's own estimate but
+      // never beyond the UI cap.
+      if (online && calLeft != null) {
+        deadline.current = now + Math.min(calLeft, CAL_UI_MAX_S) * 1000
+      }
+    } else if (calLeft == null) {
+      // Backend resolved within the cap: show the verdict once, briefly.
+      outcome.current = failed ? 'failed' : 'done'
+      resolvedAt.current = now
+      deadline.current = null
+    } else if (now >= deadline.current) {
+      // Cap expired with the backend still counting: disappear, no verdict.
+      outcome.current = 'timeout'
+      deadline.current = null
+    }
   }
 
+  const counting = deadline.current != null && !gone
   const showingVerdict =
-    resolvedAt.current != null && Date.now() - resolvedAt.current < VERDICT_MS
+    resolvedAt.current != null &&
+    now - resolvedAt.current < VERDICT_MS &&
+    (outcome.current === 'done' || outcome.current === 'failed')
 
   // repaint at 1 Hz only while something is on screen
   useEffect(() => {
@@ -71,10 +99,13 @@ export function useCalibrationState(
   }, [counting, showingVerdict, deviceId])
 
   if (counting) {
-    return { mode: 'counting', secondsLeft: Math.max(0, Math.ceil(calLeft as number)) }
+    return {
+      mode: 'counting',
+      secondsLeft: Math.max(0, Math.ceil(((deadline.current as number) - now) / 1000)),
+    }
   }
   if (showingVerdict) {
-    return { mode: failed ? 'failed' : 'done', secondsLeft: 0 }
+    return { mode: outcome.current === 'failed' ? 'failed' : 'done', secondsLeft: 0 }
   }
   return { mode: 'off', secondsLeft: 0 }
 }
@@ -86,7 +117,7 @@ export default function CalibrationBadge({ state }: { state: CalibrationState })
     return (
       <span
         className="chip calibrating"
-        title="Calibrating — keep the athlete standing still. The countdown is the stillness still required; it goes back up if they move, because the window has to be continuous."
+        title="Calibrating — keep the athlete standing still for the countdown."
         aria-live="polite"
       >
         <span className="calibrating-dot" aria-hidden />

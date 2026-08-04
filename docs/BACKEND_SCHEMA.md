@@ -143,7 +143,11 @@ it **goes back up when the athlete moves**: the 10 s window must be continuous, 
 genuinely costs them the progress. Limbs that have never produced a sample are excluded — an
 unworn sensor cannot be calibrated by standing still, and letting it pin the countdown would
 tell the athlete to wait for something that is never going to happen (`degraded_sensors` and
-the sensor dots report that case instead).
+the sensor dots report that case instead). Sensors flagged `cal_failed` are excluded for the
+same reason (2026-08-04): more stillness cannot fix a faulty sensor, so `cal` reaches `null`
+once every healthy sensor is measured and the flag chip reports the fault. Note the UI clamps
+this countdown to a monotonic, 20 s-max display (UIUX §6a) — `cal` is the honest accumulator,
+not what is literally rendered.
 
 **`f` (flags)** carries the sorted `Metrics.flags` set from the biomech model, or `null`
 when no flag is active. The vocabulary is fixed by [biomech/SPEC.md](biomech/SPEC.md) §10:
