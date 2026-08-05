@@ -164,10 +164,17 @@ must not drift apart again; the previous copy here still carried the pre-2026-08
 | `accumulated_load` | warning → alert | `m3` ≥ 2 sd above own baseline **and** trending up | past + present + future | *No more hard sets — easy work only* (`cap_session`) |
 | `residual_load` | warning | forecast `ci_low` at the furthest horizon ≥ warn threshold | future | *Leave a longer gap before the next hard block* (`plan_recovery`) |
 | `impact_deviation` | info | `m1` or `m2` ≥ 2 sd above own baseline | past + present | **routes by metric**: m1 → *Lower the landing height or cut the reps* (`lower_landings`); m2 → *Soften the landings — check the surface* (`soften_landings`) |
-| `movement_quality` | info, `unvalidated` | `m4` or `m5` ≥ 2 sd above own baseline | past + present | *Worth a look at the next check-in* (`flag_review`) |
+| `movement_quality` | info, `unvalidated` (evidence marker only) | `m4` or `m5` ≥ 2 sd above own baseline | past + present | *Coach technique on the next block* (`flag_review`) |
 | `composite_high` | warning → alert | live-window mean ≥ configured threshold | present | *Drop the next block down one level* (`ease_off`) |
 | `rising_risk` | warning | mid-window trend up **and** a projection crossing alert | past + future | *Leave a longer gap before the next hard block* (`plan_recovery`) |
-| `data_quality` | info | live-window quality < 0.8 × own baseline | data health | *Re-seat the straps and check the battery* (`check_sensors`) |
+| `data_quality` | info | live-window quality < 0.8 × own baseline | data health | **event-log only** — no action card (demo posture 2026-08-05); `group_actions` skips its rows by `rule_id` |
+
+> **Demo posture (2026-08-05).** The dashboard is a concept demo until sports-scientist-designed
+> models land, so all *rendered* hedging was removed: the unvalidated caveat sentences no longer
+> appear in rationale/reason text (the `ev["unvalidated"]` evidence marker and the SPEC §11.1
+> doctrine below remain, for when validation exists), and sensor/hardware maintenance
+> (`check_sensors`) was dropped from the action catalogue — actionable insights are
+> performance-only. The `data_quality` rule still fires into `/api/insights` for the audit trail.
 
 "Own baseline" is always the **longest** configured window; "live window" is `INSIGHT_LIVE_WINDOW`
 (§4.6). Before 2026-08-04 the *now* side was the shortest `PAST_WINDOWS` entry (5 m).
@@ -282,8 +289,11 @@ into it, and several share one on purpose:
 | `plan_recovery` | *Leave a longer gap before the next hard block* | `residual_load`, `rising_risk` |
 | `lower_landings` | *Lower the landing height or cut the reps* | `impact_deviation` when **m1** moved |
 | `soften_landings` | *Soften the landings — check the surface* | `impact_deviation` when **m2** moved |
-| `flag_review` | *Worth a look at the next check-in* | `movement_quality` |
-| `check_sensors` | *Re-seat the straps and check the battery* | `data_quality` |
+| `flag_review` | *Coach technique on the next block* | `movement_quality` |
+
+(`check_sensors` — *Re-seat the straps and check the battery* — was removed from the catalogue
+2026-08-05, demo posture: hardware maintenance is not a performance action. `data_quality` is
+event-log only.)
 
 **Headlines name a lever (revised 2026-08-04).** They were deliberately 2–3 words on the
 reasoning that a headline long enough to wrap stops reading as an instruction. Reversed by
@@ -312,8 +322,8 @@ loading rate (technique/surface) call for different levers, so it now routes to
 `Rule.resolve_action_id()`.
 
 **`Action.tip`** is a static coaching cue per action — the same text every time it fires,
-**not** derived from the athlete's data. The UI renders it under an explicit
-"General cue — not measured" label so it can never read as a finding.
+**not** derived from the athlete's data. The UI renders it under a "Coaching cue" label
+(demo posture 2026-08-05; it was "General cue — not measured" while hedged framing applied).
 
 `group_actions()` collapses the rows inside the hold window: group on `action_id`, keep **only the
 newest row per rule** (the hold/cooldown overlap guarantees duplicates), rank by severity then by

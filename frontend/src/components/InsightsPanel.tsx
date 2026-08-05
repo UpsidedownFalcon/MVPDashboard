@@ -13,7 +13,6 @@
 // only recovers evidence; it never re-orders, re-filters or re-groups anything.
 
 import { useQuery } from '@tanstack/react-query'
-import { FlaskConical } from 'lucide-react'
 import { fetchCurrentAdvice, fetchInsights, type AdviceAction, type Insight } from '../lib/api'
 import { POLL_ADVICE_MS } from '../lib/config'
 import { evidenceEntries, evidenceLabel, formatEvidence } from '../lib/evidence'
@@ -52,16 +51,11 @@ function AdviceCard({
   return (
     <article className="insight" style={{ borderLeftColor: SEVERITY_BORDER[action.severity] }}>
       <header className="insight-head">
+        {/* Demo posture (2026-08-05): the unvalidated-metric chip is not
+            rendered — `action.unvalidated` still arrives from the API for
+            when real validation lands and the marker returns. */}
         <span className="insight-chips">
           <SeverityChip severity={action.severity} />
-          {action.unvalidated && (
-            <span
-              className="chip flag flag-muted"
-              title="Every reason behind this comes from Movement Control / L-R Balance, which have no real-world validation — synthetic fixtures only (biomech SPEC §11.1). Treat as a prompt to look, not a finding."
-            >
-              <FlaskConical aria-hidden /> unvalidated metric
-            </span>
-          )}
         </span>
         <time className="insight-time" dateTime={action.updated_at} title={action.updated_at}>
           updated {timeAgo(action.updated_at)}
@@ -80,7 +74,7 @@ function AdviceCard({
 
       {action.tip && (
         <div className="insight-tip">
-          <span className="insight-tip-label">General cue — not measured</span>
+          <span className="insight-tip-label">Coaching cue</span>
           <p>{action.tip}</p>
         </div>
       )}

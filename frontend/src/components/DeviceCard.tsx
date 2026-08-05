@@ -18,9 +18,13 @@ import LiveChart from './LiveChart'
 import RiskStat from './RiskStat'
 
 function topInsight(insights: Insight[] | undefined): Insight | null {
-  if (!insights?.length) return null
+  // Demo posture (2026-08-05): sensor/hardware findings never surface as the
+  // card's one-line insight — performance advice only. The quality meter and
+  // sensor dots above already carry the hardware state.
+  const candidates = insights?.filter((i) => i.rule_id !== 'data_quality')
+  if (!candidates?.length) return null
   // most-severe recent first; feed is already newest-first
-  return [...insights].sort(
+  return [...candidates].sort(
     (a, b) => SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity],
   )[0]
 }

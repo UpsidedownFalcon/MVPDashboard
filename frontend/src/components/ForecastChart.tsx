@@ -6,7 +6,7 @@
 
 import { useQuery } from '@tanstack/react-query'
 import type { EChartsOption } from 'echarts'
-import { Hourglass, Table2 } from 'lucide-react'
+import { Table2 } from 'lucide-react'
 import { useState } from 'react'
 import { fetchForecasts, fetchHistory } from '../lib/api'
 import { HISTORY_MAX_BUCKETS, POLL_FORECASTS_MS } from '../lib/config'
@@ -159,14 +159,9 @@ export default function ForecastChart({
 
   return (
     <div className="forecast">
-      {fc.provisional && (
-        <div className="forecast-provisional">
-          <span className="chip flag flag-muted" title="Built from a short bootstrap history — the horizons are close-in and the interval is wide. It settles as the session accumulates data.">
-            <Hourglass aria-hidden /> early projection
-          </span>
-          <span>Based on a short history so far — treat as provisional.</span>
-        </div>
-      )}
+      {/* Demo posture (2026-08-05): the "early projection · treat as
+          provisional" banner is not rendered — `fc.provisional` still arrives
+          from the API for when the hedged framing returns. */}
       <div className="forecast-stats">
         {points.map((p, i) => (
           <RiskStat

@@ -125,7 +125,9 @@ top-right.
   finding, or any cross-session comparison — not the factual side).
   Beside it, **current Injury Risk as the view's single hero figure**: ≥48px
   semibold sans, risk-band tint, band word, trend arrow vs 5 min ago.
-  Below the pair: the SPEC §2 one-liner: "A monitoring aid, not a prediction."
+  Below the pair: a one-liner. Demo posture (2026-08-05): "Computed live from every
+  impact and stride." (was the SPEC §2 hedge "A monitoring aid, not a prediction" —
+  restore when the demo posture ends).
 - Large composite live chart: uPlot, last 60 s, 2px `--composite` line, 10% area
   wash, hairline grid, y fixed 0–100, risk-band thresholds as faint hairlines.
 - Five compact stacked primitive charts (~64px tall each): label + current value
@@ -153,17 +155,18 @@ muted text + transparent border, active = accent text + accent hairline border +
 
    **Card anatomy, in order** — the first line is what to do, so the eye lands
    on the action before anything else:
-   1. severity chip + icon (§6), `unvalidated metric` chip when the action's
-      every reason is m4/m5, and "updated Ns ago";
+   1. severity chip + icon (§6) and "updated Ns ago" (demo posture 2026-08-05:
+      the `unvalidated metric` chip is not rendered; `action.unvalidated` still
+      arrives from the API for when validation exists);
    2. **the action as a large bold headline** (22px/700, primary ink — colour
       lives in the chip and the 3px severity left border, never the text);
    3. **blank vertical space — no separator rule** (an `<hr>` here reads as a
       divide between two things rather than one card);
    4. the rationale as ordinary sentences, one paragraph per supporting reason,
       falling back to the short `reason` text when the join misses;
-   5. the **static coaching cue** (`tip`), under a mandatory
-      **"General cue — not measured"** label — it is catalogue text, identical
-      every firing, and must never read as a finding about this athlete;
+   5. the **static coaching cue** (`tip`), under a **"Coaching cue"** label
+      (demo posture; was "General cue — not measured") — it is catalogue text,
+      identical every firing;
    6. the **Evidence expander** (`<details>`) over the joined `context`.
 
    Empty `actions` is a calm empty state, never a warning — it is the normal
@@ -184,10 +187,11 @@ muted text + transparent border, active = accent text + accent hairline border +
 3. **Projections** (`GET /api/forecasts/latest?device`, poll 60 s) — composite
    only (PRD; confirmed). **The horizon set is not fixed** — it starts 1m/2m and
    becomes 10m/30m/1h — so horizons are always read from `points` and never
-   assumed to be three. When `provisional` is true (`trend-ols-boot-1`) an
-   "early projection" chip marks it so a bootstrapped forecast does not look as
-   settled as a mature one; the band label is unaffected, since both models
-   produce a genuine statistical prediction interval.
+   assumed to be three. Demo posture (2026-08-05): the "early projection ·
+   treat as provisional" banner is not rendered (`provisional` still arrives
+   from the API); both models produce a genuine statistical prediction
+   interval, and the band note reads "Shaded band shows the projection
+   interval."
    Top: per-horizon stat row mirroring the §3 stack.
    Below: one ECharts chart — recent actuals (solid 2px composite line, from the
    shortest configured history window) continuing into per-horizon forecast
@@ -298,9 +302,9 @@ the calibration story's only surface, SPEC §10):
 | `uncalibrated` | running on defaults; `m4`/`m5` carry gain bias | warning |
 | `partial` | a required sensor went inactive mid-session | warning |
 | `no_shank` | impact falls back to all limbs | warning |
-| `carried_over` | calibrated from a previous session, not measured today | info |
+| `carried_over` | calibrated from a previous session | info |
 | `warming_up` | `m4`/`m5` inside 60 s / 30 s warm-up — a value **is** coming | muted |
-| `unvalidated` | `m4`/`m5` have no real-data validation yet (SPEC §11.1) | muted |
+| `unvalidated` | **not rendered** (demo posture 2026-08-05, `HIDDEN_FLAGS` in `metrics.ts`); still on the wire per SPEC §11.1 | — |
 
 `warming_up` and `degraded_sensors` must never look alike: muted grey chip + greyed
 panel vs alert chip + explicit "no data from <limb>". The uncalibrated→calibrated

@@ -154,7 +154,7 @@ export default function Device() {
                 trend={shortestTrend}
                 title={COMPOSITE.tooltip}
               />
-              <p className="claims-note">A monitoring aid, not a prediction.</p>
+              <p className="claims-note">Computed live from every impact and stride.</p>
             </div>
           </div>
 

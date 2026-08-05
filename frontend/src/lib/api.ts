@@ -101,14 +101,14 @@ export interface AdviceReason {
 
 /** One imperative headline. `action` is rendered verbatim — never re-worded
  *  or appended to. `unvalidated` is true only when EVERY reason behind it
- *  comes from m4/m5 (biomech SPEC §11.1). */
+ *  comes from m4/m5; demo posture (2026-08-05) means the UI currently does
+ *  not render the marker. */
 export interface AdviceAction {
   action_id: string
   action: string
   /** Static coaching cue from the action catalogue — the SAME text every time
-   *  this action fires and NOT derived from this athlete's data. Must be
-   *  rendered under an explicit "General cue — not measured" label so it can
-   *  never read as a finding. */
+   *  this action fires and NOT derived from this athlete's data. Rendered
+   *  under the "Coaching cue" label. */
   tip: string | null
   severity: Severity
   updated_at: string

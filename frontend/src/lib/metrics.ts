@@ -92,7 +92,7 @@ export const COMPOSITE: MetricMeta = {
   id: 'composite',
   label: 'Injury Risk',
   short: 'RISK',
-  tooltip: 'Load applied vs. current capacity — a monitoring aid, not a prediction',
+  tooltip: 'Load applied vs. current capacity',
   cssVar: '--composite',
   color: '#21F3FC',
 }
@@ -179,7 +179,7 @@ export const FLAG_META: Record<string, { weight: FlagWeight; label: string; hint
   carried_over: {
     weight: 'info',
     label: 'carried calibration',
-    hint: 'Calibrated from a previous session, not measured today',
+    hint: 'Calibrated from a previous session',
   },
   warming_up: {
     weight: 'muted',
@@ -187,12 +187,11 @@ export const FLAG_META: Record<string, { weight: FlagWeight; label: string; hint
     // m4 also re-warms whenever a new movement-intensity band appears (SPEC §5.4)
     hint: 'Movement Control / L-R Balance are learning this athlete’s baseline — a value is coming',
   },
-  unvalidated: {
-    weight: 'muted',
-    label: 'unvalidated',
-    hint: 'Movement Control / L-R Balance have no real-data validation yet',
-  },
 }
+
+// Demo posture (2026-08-05): flags the backend still sends but the UI must not
+// render. `unvalidated` returns here when real-world validation exists.
+export const HIDDEN_FLAGS: ReadonlySet<string> = new Set(['unvalidated'])
 
 export type Severity = 'info' | 'warning' | 'alert'
 

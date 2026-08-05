@@ -12,7 +12,7 @@ import {
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
 import { renameDevice, type Device, type Sensor } from '../lib/api'
 import { pct } from '../lib/format'
-import { FLAG_META, qualityBand, type Severity } from '../lib/metrics'
+import { FLAG_META, HIDDEN_FLAGS, qualityBand, type Severity } from '../lib/metrics'
 
 export function StatusBadge({ online }: { online: boolean }) {
   return (
@@ -120,10 +120,11 @@ export function SeverityChip({ severity }: { severity: Severity }) {
 /** Biomech flag chips. warming_up must never look like degraded_sensors
  *  (UIUX §6): weights style alert/warning strongly, muted stays quiet. */
 export function FlagChips({ flags }: { flags: string[] }) {
-  if (!flags.length) return null
+  const shown = flags.filter((f) => !HIDDEN_FLAGS.has(f))
+  if (!shown.length) return null
   return (
     <span className="flags">
-      {flags.map((f) => {
+      {shown.map((f) => {
         const meta = FLAG_META[f] ?? { weight: 'muted' as const, label: f, hint: f }
         return (
           <span key={f} className={`chip flag flag-${meta.weight}`} title={meta.hint}>

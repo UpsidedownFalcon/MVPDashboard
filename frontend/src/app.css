@@ -1152,15 +1152,6 @@
   flex-wrap: wrap;
 }
 
-/* unvalidated-metric insights (m4/m5, SPEC §11.1): visibly experimental —
-   dashed hairline instead of the solid card border (the severity left border
-   stays solid so severity still reads normally) */
-.insight-unvalidated {
-  border-top-style: dashed;
-  border-right-style: dashed;
-  border-bottom-style: dashed;
-}
-
 .insight-time {
   font-size: 11.5px;
   color: var(--ink-3);

@@ -82,8 +82,8 @@ function Hero({ deviceIds, names }: { deviceIds: string[]; names: Record<string,
           is applied, how much has accumulated, how steady the movement stays and
           how evenly left and right share the work — combined into one{' '}
           <b>Injury Risk</b> trend that rises when the same work starts costing
-          more than it should. A monitoring aid that flags who is worth a look,
-          now and in the coming session — not a prediction.
+          more than it should — flagging who needs attention now, and where
+          they&rsquo;re heading in the coming session.
         </p>
         <ul className="hero-legend" aria-label="Metric legend">
           {[COMPOSITE, ...METRICS].map((m) => (

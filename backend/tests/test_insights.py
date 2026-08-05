@@ -250,7 +250,10 @@ def test_impact_and_movement_rules_stay_info_and_marked() -> None:
     assert ev["severity"] == "info" and ev["metric"] in ("m4", "m5")
     assert ev["unvalidated"] is True, "m4/m5 have no real-data validation"
     text = RULE["movement_quality"].rationale(ctx, ev)
-    assert "no real-world validation" in text
+    # Demo posture (2026-08-05): the evidence marker stays, but the rendered
+    # text must carry NO validation caveat.
+    for hedge in ("no real-world validation", "unvalidated", "not a finding"):
+        assert hedge not in text.lower(), "demo posture: no hedging in rendered text"
     for banned in ("left leg", "right leg", "weaker"):
         assert banned not in text.lower(), "no directional L/R claim (SPEC §5.5)"
 
@@ -370,15 +373,15 @@ def test_group_actions_dedupes_a_rule_that_refired_inside_the_hold() -> None:
     """INSIGHT_HOLD_S exceeds INSIGHT_COOLDOWN_S on purpose, so a still-true rule
     has two rows in the window. Only the newest may be shown, or the same
     sentence appears twice under one heading."""
-    rows = [_row("data_quality", "check_sensors", "info", "newest", 0),
-            _row("data_quality", "check_sensors", "info", "older", 2)]
+    rows = [_row("composite_high", "ease_off", "warning", "newest", 0),
+            _row("composite_high", "ease_off", "warning", "older", 2)]
     actions = group_actions(rows, max_actions=3)
     assert len(actions) == 1
     assert [r["text"] for r in actions[0]["reasons"]] == ["newest"]
 
 
 def test_group_actions_caps_and_ranks_by_severity() -> None:
-    rows = [_row("data_quality", "check_sensors", "info", "q", 0),
+    rows = [_row("movement_quality", "flag_review", "info", "q", 0),
             _row("impact_deviation", "lower_landings", "info", "i", 0),
             _row("residual_load", "plan_recovery", "warning", "r", 0),
             _row("composite_high", "ease_off", "alert", "c", 0)]
@@ -387,6 +390,17 @@ def test_group_actions_caps_and_ranks_by_severity() -> None:
     assert [a["action_id"] for a in actions] == [
         "ease_off", "plan_recovery", "lower_landings",
     ], "alert first, then warning, then catalogue order within equal severity"
+
+
+def test_data_quality_rows_never_become_actions() -> None:
+    """Demo posture (2026-08-05): sensor/hardware findings are event-log only.
+    Matched on rule_id, so even legacy rows carrying an action text cannot
+    resurface through the pre-migration-003 fallback."""
+    rows = [_row("data_quality", None, "info", "quality dropped", 0),
+            # a legacy-shaped row WITH an action text must be skipped too
+            {**_row("data_quality", None, "info", "legacy", 1),
+             "action": "Re-seat the straps and check the battery"}]
+    assert group_actions(rows, max_actions=3) == []
 
 
 def test_group_actions_flags_an_action_only_when_all_reasons_are_unvalidated() -> None:
@@ -436,6 +450,10 @@ def test_every_rule_maps_to_a_catalogue_action_and_a_short_reason() -> None:
     to be complete and short at the same time."""
     ctx = ctx_from(make_windows())
     for rule in RULES:
+        if rule.action_id is None:
+            # Event-log-only rule (demo posture 2026-08-05: data_quality) — it
+            # never becomes an action, so it needs no catalogue entry or reason.
+            continue
         # a callable action_id must resolve into the catalogue for every metric
         # it can route on, not just the default branch
         for metric in ("m1", "m2", None):
@@ -636,7 +654,12 @@ async def test_current_endpoint_returns_grouped_actions(scratch_app) -> None:
     actions = body["actions"]
     assert 1 <= len(actions) <= settings.insight_max_actions
     by_id = {a["action_id"]: a for a in actions}
-    assert "ease_off" in by_id and "check_sensors" in by_id
+    assert "ease_off" in by_id
+    # Demo posture (2026-08-05): data_quality fired (run_once counted it) but
+    # sensor/hardware findings must never surface as an action card.
+    assert "check_sensors" not in by_id
+    assert not any(r["rule_id"] == "data_quality"
+                   for a in actions for r in a["reasons"])
     ease = by_id["ease_off"]
     assert ease["action"] == ACTIONS["ease_off"].text and ease["severity"] == "alert"
     assert ease["reasons"] and all(r["text"] for r in ease["reasons"])

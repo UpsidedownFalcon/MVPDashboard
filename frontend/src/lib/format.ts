@@ -81,12 +81,13 @@ export function forecastBandLabel(modelVersion: string): string {
   return isScenarioBand(modelVersion) ? 'range' : 'CI'
 }
 
-/** One-line explanation of what the band means. Must be shown with the band. */
+/** One-line explanation of what the band means. Must be shown with the band.
+ *  Demo posture (2026-08-05): the "not a probability" hedging tail was removed
+ *  from both branches; the band-meaning distinction itself stays. */
 export function forecastBandNote(modelVersion: string): string {
   return isScenarioBand(modelVersion)
-    ? 'Range spans “if they stop now” to “if load returns to this session’s hardest”. ' +
-      'Not a probability.'
-    : 'Statistical prediction interval — not a probability of injury.'
+    ? 'Range spans “if they stop now” to “if load returns to this session’s hardest”.'
+    : 'Shaded band shows the projection interval.'
 }
 
 /** Parse a duration label like "10m" / "2h" to seconds (mirror of the backend

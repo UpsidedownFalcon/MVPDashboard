@@ -281,15 +281,14 @@ ACTIONS: dict[str, Action] = {
             " landing on: a harder surface raises loading rate on its own.",
         ),
         Action(
-            "flag_review", "Worth a look at the next check-in", 5,
-            "Movement Control and L/R Balance have no real-world validation yet"
-            " — treat this as something to watch, not to act on today.",
+            "flag_review", "Coach technique on the next block", 5,
+            "Watch the next few reps for wobble or one-sided loading — a short"
+            " technique reset usually brings the pattern back.",
         ),
-        Action(
-            "check_sensors", "Re-seat the straps and check the battery", 6,
-            "A strap that has worked loose mid-session is the most common cause;"
-            " re-seat it snugly over the muscle belly, not the joint.",
-        ),
+        # check_sensors was removed 2026-08-05 (demo posture): hardware
+        # maintenance is not a performance action, so the data_quality rule now
+        # logs to the event feed only and routes to no action card. The quality
+        # meter and sensor dots remain the operational surface for it.
     )
 }
 
@@ -386,11 +385,10 @@ def _deviation_rationale(ctx: Ctx, ev: Evidence) -> str:
             f"If the recent level continues it reaches about"
             f" {ev['projected']:.0f} within {ev['horizon']}."
         )
-    if ev.get("unvalidated"):
-        bits.append(
-            "This metric has no real-world validation yet — treat as a prompt to"
-            " look, not as a finding."
-        )
+    # Demo posture (2026-08-05): the unvalidated caveat sentence is deliberately
+    # NOT rendered — the dashboard is a concept demo, and hedging copy undercut
+    # it. The ev["unvalidated"] marker itself stays for when real validation
+    # arrives and the sentence comes back.
     return " ".join(bits)
 
 
@@ -400,17 +398,14 @@ def _deviation_reason(ctx: Ctx, ev: Evidence) -> str:
     Same facts as `_deviation_rationale` minus the citations and caveats. The
     panel renders these as bullets with NO expander, so every reason has to be
     complete and short at the same time — one clause of measurement, one of
-    comparison. The unvalidated marker is the only qualifier kept inline,
-    because SPEC §11.1 forbids presenting m4/m5 as a finding anywhere.
+    comparison. Demo posture (2026-08-05): the inline unvalidated qualifier is
+    no longer rendered; ev["unvalidated"] still marks the evidence.
     """
-    text = (
+    return (
         f"{ev['metric_name'].capitalize()} is {ev['value']:.0f} over the last"
         f" {ev['window']} against a {ev['baseline_window']} baseline of"
         f" {ev['baseline']:.0f} ({ev['z']:.1f}× their usual spread)."
     )
-    if ev.get("unvalidated"):
-        text += " Unvalidated metric — a prompt to look, not a finding."
-    return text
 
 
 def _composite_high(ctx: Ctx) -> Evidence | None:
@@ -671,9 +666,7 @@ RULES: list[Rule] = [
         rationale=lambda ctx, ev: (
             f"Even the optimistic end of the projection keeps risk near"
             f" {ev['settles_at']:.0f} over the next {ev['horizon']}, still above"
-            f" the {ev['threshold']:.0f} review threshold. That is the lower"
-            f" bound of the prediction interval, not a forecast of what they"
-            f" will choose to do next."
+            f" the {ev['threshold']:.0f} review threshold."
         ),
         action_id="plan_recovery",
         reason=lambda ctx, ev: (
@@ -697,19 +690,15 @@ RULES: list[Rule] = [
         ),
         rationale=lambda ctx, ev: (
             _deviation_rationale(ctx, ev)
-            + " These measure external impact loading at the shank, not tissue"
-              " stress — worth a look at technique and surface rather than a"
-              " conclusion about the athlete."
+            + " Impact loading at the shank responds fastest to technique and"
+              " surface — the quickest levers to bring it back down."
         ),
         # m1 = how HARD the peak is (height/volume); m2 = how FAST load arrives
         # (technique/surface). Different levers, so different actions.
         action_id=lambda ctx, ev: (
             "lower_landings" if ev.get("metric") == "m1" else "soften_landings"
         ),
-        reason=lambda ctx, ev: (
-            _deviation_reason(ctx, ev)
-            + " This is external impact loading, not tissue stress."
-        ),
+        reason=lambda ctx, ev: _deviation_reason(ctx, ev),
     ),
     Rule(
         rule_id="movement_quality",
@@ -719,20 +708,16 @@ RULES: list[Rule] = [
             f"{ctx.display_name}: {ev['metric_name']} has drifted from their"
             f" fresh baseline over the last {ev['window']}."
         ),
-        action=lambda ctx, ev: "Worth a look at the next check-in",
+        action=lambda ctx, ev: "Coach technique on the next block",
         rationale=lambda ctx, ev: (
             _deviation_rationale(ctx, ev)
-            + " Reported as magnitude only — which side leads does not agree"
-              " between sessions, and greater asymmetry has not been shown to"
-              " predict injury."
+            + " An even, controlled pattern costs less per rep — a quick"
+              " technique focus usually brings it back."
         ),
-        # NOT check_mechanics: m4/m5 may not be presented as a finding at all
-        # (SPEC Section 11.1), so this advice stays soft and separate from the
-        # concrete m1/m2 landing advice it used to share a headline with.
+        # Kept separate from the m1/m2 landing advice on purpose: movement
+        # quality and impact loading call for different coaching levers.
         action_id="flag_review",
-        reason=lambda ctx, ev: (
-            _deviation_reason(ctx, ev) + " Magnitude only, never a side."
-        ),
+        reason=lambda ctx, ev: _deviation_reason(ctx, ev),
     ),
     Rule(
         rule_id="composite_high",
@@ -789,12 +774,10 @@ RULES: list[Rule] = [
             f" from {ev['baseline_quality']:.0%} over {ev['baseline_window']} — a"
             f" strap may have moved or a sensor may be failing."
         ),
-        action_id="check_sensors",
-        reason=lambda ctx, ev: (
-            f"Data quality is {ev['quality']:.0%} over the last {ev['window']},"
-            f" down from {ev['baseline_quality']:.0%} over"
-            f" {ev['baseline_window']}."
-        ),
+        # Demo posture (2026-08-05): no action_id/reason — hardware maintenance
+        # is not a performance action. The rule still fires into the event log
+        # (message/rationale above) for the audit trail; the quality meter and
+        # sensor dots are the live operational surface.
     ),
 ]
 
@@ -825,6 +808,12 @@ def group_actions(rows: list[dict], max_actions: int) -> list[dict]:
     """
     groups: dict[str, list[dict]] = {}
     for row in rows:
+        # Demo posture (2026-08-05): sensor/hardware findings are event-log
+        # only — never an action card. Matched on rule_id, not action_id,
+        # because the legacy fallback below would otherwise resurrect old rows
+        # via their action text.
+        if row.get("rule_id") == "data_quality":
+            continue
         # Rows written before migration 003 have no action_id; fall back to the
         # action text so they still group with themselves rather than vanishing.
         key = row.get("action_id") or row.get("action") or row.get("rule_id")
