@@ -112,7 +112,9 @@ M1_HI = 400.0                # ~41 g: vertical jumping reaches 42 g
 # 2,500-7,800), so a walk read 40/100; and 30,000 was exceeded by a small jump.
 M2_LO, M2_HI = 2_500.0, 80_000.0
 # dose-minutes, where 1 dose-minute == 1 minute of hard-training equivalent
-# (see A_DOSE_REF/W_DOSE_REF). Floor = 30 s of that, ceiling = a full hard hour.
+# (see A_DOSE_REF/W_DOSE_REF). Floor = 0.03 dose-minutes, i.e. ~2 s of that
+# (0.03 * 60 s); ceiling = 60 dose-minutes, a full hard hour. (The "30 s"
+# this line used to claim was the arithmetic for the OLD 0.5 floor, cut below.)
 # Re-anchored 2026-08-03 with the dose law: the old 0.01 floor was 0.6 s of
 # hard-training equivalent, so ANY movement cleared it within a second and the
 # bottom of the scale was unreachable. Measured on the ladder at these bounds:
@@ -135,6 +137,11 @@ DOSE_EXPONENT = 3.0          # load accumulates as a POWER LAW, not linearly.
                              # Bone daily-stress-stimulus uses m=4 (Whalen 1988);
                              # fatigue damage ~2.1 sub-threshold (Pattin 1996);
                              # 3 is a deliberate conservative middle.
+# 🚩 SUPERSEDED by the TWO POOLS block immediately below -- the paragraph that
+# follows describes an intensity-dependent half-life that is NOT what this file
+# does any more. Kept only for the measurement it records. Read the two-pool
+# block for the shipped behaviour.
+#
 # Dose decay is INTENSITY-DEPENDENT (2026-08-03). A fixed 45-minute half-life
 # meant m3 barely moved: measured over an 85 s rest after squats to failure it
 # went 36.9 -> 36.9, i.e. no visible recovery at all. Recovery from hard work
@@ -142,6 +149,7 @@ DOSE_EXPONENT = 3.0          # load accumulates as a POWER LAW, not linearly.
 # how hard the recent work was: easy movement decays fast, hard work decays
 # slowly. `DOSE_HALFLIFE_S` is retained as the name the forecast mirrors and is
 # the REST value, which is the one the "if they stop now" branch needs.
+# (End of the superseded paragraph.)
 # TWO POOLS (2026-08-03). The decay rate must depend on how the dose was
 # EARNED, not on what the athlete happens to be doing now. A single half-life
 # scaled by recent activity got that backwards: two minutes after a sprint the
@@ -270,7 +278,15 @@ CAL_CARRY_TTL_S = 30 * 24 * 3600
 
 # --- composite (SPEC Section 6.1) ---
 DEMAND_MAX_W, DEMAND_MIN_W = 0.60, 0.40
-DEGRADE_W_M4, DEGRADE_W_M5 = 0.45, 0.30    # m3 is NOT here: it drives `floor`
+# 🚩 DEAD CONSTANTS, KEPT FOR REFERENCE ONLY. DEGRADE_W_M4, DEGRADE_W_M5 and
+# CAPACITY_FACTOR below are NOT read by the live path any more -- the capacity
+# rebuild further down replaced them with CAP_W_DOSE/CAP_W_CTRL/CAP_W_ASYM and
+# CAPACITY_SPAN. They survive because the reasoning recorded in the comments
+# (why an unvalidated metric must not set the headline) is still the reason
+# CAPACITY_SPAN is bounded, and because the forecast still mirrors FLOOR_FACTOR.
+# Changing their values changes nothing; delete them only together with the
+# narrative below.
+DEGRADE_W_M4, DEGRADE_W_M5 = 0.45, 0.30    # m3 is NOT here: it drove `floor`
 # Capacity reduction per point of degradation. CUT 0.70 -> 0.15 on 2026-08-03,
 # so capacity floors at 85 rather than 30.
 #
@@ -1347,7 +1363,17 @@ def compute(
             # streaming, not when one leg of a pair drops out.
             flags.add("partial")
     if sess.r_base[band] is None:
-        # R needs a shank AND a thigh. If either is unmapped OR mapped but never
+        # 🚩 STALE GATE, behaviour intentionally unchanged. `pair_live` still
+        # demands a shank AND a thigh, which was right for the old shank/thigh
+        # TRANSMISSION RATIO. The tremor index that replaced it on 2026-08-03
+        # needs only ONE streaming limb, so this OVER-REPORTS `degraded_sensors`:
+        # a both-shanks or both-thighs rig gets "this value is never coming"
+        # while m4 is in fact simply warming and will emit once its band locks.
+        # The two states are conflated for exactly those configs. The 4-sensor
+        # rig the product ships against is unaffected, which is why this is
+        # documented rather than changed (SPEC Section 10).
+        #
+        # If either limb is unmapped OR mapped but never
         # actually streamed (flat battery, bad strap), no baseline can ever lock
         # -- a permanently degraded sensor set, not a warm-up. Flagging it
         # `warming_up` tells the UI to keep waiting for a value that is never
@@ -1548,7 +1574,9 @@ def compute(
             # only ~0.2% of it -- measured on a worn session, a single-leg
             # landing barely moved it. This short-window estimate is exposed for
             # study before any decision to promote it; the reported metric is
-            # unchanged. Magnitude only, never a direction (SPEC Section 5.5).
+            # unchanged. SIGNED, same convention as usi_pct (+ = left): the
+            # "magnitude only" display rule governs what a TRAINER is shown, not
+            # this diagnostic channel (SPEC Section 5.5/11.1).
             "usi_fast_pct": usi_fast_pct if usi_fast_pct is not None else float("nan"),
             # per-tick wUSI noise weight (SPEC Section 10 item 3): near 1 during
             # movement, well below it at the noise floor. A constant 1.0 here

@@ -59,7 +59,7 @@ time — who is at risk and what to do about it.
 | F5 | Data quality | Per-device quality indicator (share of expected sensor samples arriving); visibly degrades when packet loss is simulated. |
 | F6 | History windows | 3 past windows, durations from config only; each shows avg (and min/max for composite) of all 6 metrics; values match SQL spot-checks. |
 | F7 | Forecasts | Composite-only forecast for each configured horizon, with confidence band, refreshed on the configured interval; chart shows recent actuals + forecast continuation. |
-| F8 | Insights | Rules produce severity-tagged (info/warning/alert) plain-language messages with the evidence that fired them; feed shows newest first; no duplicate spam (cooldown). |
+| F8 | Insights | Rules produce severity-tagged (info/warning/alert) plain-language messages with the evidence that fired them; the advice panel shows the ≤3 grouped actions currently standing, strongest first, while the event log at `/api/insights` stays newest-first; no duplicate spam (cooldown). |
 | F9 | Hosting | Dashboard live at `https://<subdomain>.<domain>` with a valid certificate; a simulator run from a remote network appears live on the hosted dashboard. |
 | F10 | Config | Windows, horizons, limb map, ports, thresholds, retention all changeable in one `.env` file + restart; no code edits. |
 
@@ -72,12 +72,15 @@ time — who is at risk and what to do about it.
 - 60Hz live rendering; devices auto-register; rename in UI.
 - Packet format and sensor topology (see [TRD.md](TRD.md) §3).
 
-**To be decided later:**
-- The biomechanical definitions of the 5 primitives + composite (dedicated session;
-  stub metrics until then) — and consequently real metric names/units on the UI.
-- Prediction model beyond the linear-regression stub; exact production window/horizon
-  durations; insight rule catalogue and thresholds.
-- Final visual design (user's mockup to be integrated — see [UIUX.md](UIUX.md)).
+**To be decided later** — status 2026-08-05: the first three are **delivered**;
+what remains open on them is refinement with sports-scientist input:
+- The biomechanical definitions of the 5 primitives + composite — **delivered**
+  ([biomech/SPEC.md](biomech/SPEC.md)); real metric names/units are on the UI.
+- Prediction model beyond the linear-regression stub — **delivered** (`trend-ols-1`
+  + its bootstrap variant), and the 8-rule insight catalogue shipped; exact
+  production window/horizon durations remain a config decision.
+- Final visual design — **delivered** ([UIUX.md](UIUX.md) has been the binding
+  spec since the S3-T01 design session, 2026-08-03).
 - Preset user list; whether trainers ever get scoped device visibility.
 
 ## 7. Staged delivery & success measures

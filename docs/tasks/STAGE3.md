@@ -39,7 +39,7 @@ Steps:
 **Goal:** clean app skeleton the screens plug into (replaces crude UI codebase —
 fresh `frontend/`, keep the old one until S3-T07 cutover, e.g. `frontend-crude/`).
 **Depends:** ⛓ S3-T01.
-**Files:** `frontend/` new Vite+React+TS app: `src/lib/api.ts`, `src/lib/ws.ts`,
+**Files:** `frontend/` new Vite+React+TS app: `src/lib/api.ts`, `src/lib/ws.tsx`,
 `src/lib/auth.tsx` (stub until T05), `src/lib/metrics.ts`, `src/lib/config.ts`,
 `src/theme.css`, router shell.
 
@@ -48,7 +48,7 @@ Steps:
 2. `lib/api.ts`: typed fetch wrapper for every route in BACKEND_SCHEMA §3
    (shared TS types file mirroring the JSON shapes); on 401 → redirect `/login`
    (inert until auth exists).
-3. `lib/ws.ts`: reconnecting WS hook (backoff 1s→10s), tick/status demux,
+3. `lib/ws.tsx`: reconnecting WS hook (backoff 1s→10s), tick/status demux,
    per-device subscriber API, connection-state signal for the header dot.
 4. `lib/metrics.ts`: metric id → {label, unit, range, color} from the design tokens
    + biomech SPEC names.
@@ -70,6 +70,10 @@ Steps: device grid per UIUX §3 — online-first sort, live composite sparkline
 (60Hz, uPlot, 30s buffer), 5 primitive live numbers, quality meter, highest-severity
 insight chip, inline rename (Enter/Esc semantics, optimistic update + rollback),
 click-through to detail. Empty state per UIUX §7.
+*(As built: the overview card ships a projected-risk hero + horizon stack +
+now/sparkline + one insight line — no per-primitive numbers; primitives live on
+the detail page — and the insight line excludes `data_quality`, demo posture
+2026-08-05.)*
 **Done check:** matches UIUX §3 behaviors point-by-point with 5 live devices;
 rename persists; badges flip ≤2s.
 
@@ -150,7 +154,8 @@ Steps:
 > tabs, login); auth enforced on every route/WS (bcrypt direct + pyjwt, cookie
 > `session`, WS 4401, JWT_SECRET required at startup, seed_users in compose
 > entrypoint); migration 002 + `/api/metrics/history`; crude UI deleted and the
-> caddy image now bakes the product build. `pytest`: 221 passed. Deployed to the
+> caddy image now bakes the product build. `pytest`: 221 passed (at that commit;
+> the suite has since grown). Deployed to the
 > VPS the same day. Remaining for stage-3 exit: S3-T08 acceptance run.
 
 ## S3-T08 — Full acceptance run  ⚑ stage-3 / MVP exit
@@ -188,6 +193,9 @@ Steps:
 
 **Done check:** `pytest` green; `curl /api/metrics/history?device=X&window=<PAST_WINDOWS[0]>`
 returns the documented shape with correct bucket count against live data.
+
+> Note: a later migration 003 (`003_insight_action_grouping.sql`) added the
+> `action_id`/`reason` columns that back the grouped `/api/insights/current` view.
 
 ## S3-T09 — Hardening backlog (scheduled, not gating MVP)
 

@@ -22,8 +22,9 @@ from REST or a WS close with code 4401 → redirect `/login`.
 
 ### 1.2 Watch live → drill down → rename
 ```
-/ overview ─▶ GET /api/devices (cards) ─▶ open WS /ws/live
-   │  cards update at 60Hz; status events flip online/offline badges
+/ overview ─▶ GET /api/devices (cards) ─▶ open the app-wide WS /ws/live
+   │  charts render at 60Hz from the rAF buffer; numeric readouts refresh from a
+   │  250 ms snapshot; status events flip online/offline badges
    ├─▶ click ✏ on card ─▶ inline edit ─▶ PATCH /api/devices/:id ─▶ name everywhere
    └─▶ click card ─▶ /device/:id
          ├─ GET /api/metrics/recent?device=:id&seconds=30  (chart backfill)
@@ -31,19 +32,25 @@ from REST or a WS close with code 4401 → redirect `/login`.
          ├─ GET /api/metrics/windows?device=:id            (window meta, poll 60s)
          ├─ GET /api/metrics/history?device=:id&window=&buckets=  (History tab, poll 60s)
          ├─ GET /api/forecasts/latest?device=:id           (Projections tab, poll 60s;
-         │                                                  `provisional` while bootstrapping)
+         │                                                  `provisional` arrives on the wire
+         │                                                  while bootstrapping but is not
+         │                                                  surfaced — demo posture 2026-08-05,
+         │                                                  UIUX §4)
          ├─ GET /api/insights/current?device=:id           (Insights tab — the STATE view:
          │                                                  ≤3 grouped actions, poll 10s)
          └─ GET /api/insights?device=:id&limit=50          (evidence join for those cards,
                                                             same 10s. The Overview chip uses
                                                             the same route at limit=5 / 30s)
 ```
+The WS is **one app-wide connection** opened by `LiveProvider` on entering the
+authed shell — it carries all devices (the server's `?devices=` filter is unused).
 
 ### 1.3 Device lifecycle (trainer's view)
 ```
 wearable powers on ─▶ first packet ─▶ auto-registered (name = device ID)
   ─▶ card appears "online" ─▶ trainer renames to wearer
-wearable silent > OFFLINE_AFTER_S ─▶ status event ─▶ card shows offline + last-seen
+wearable silent > OFFLINE_AFTER_S ─▶ status event ─▶ the card badge flips to offline
+  (last-seen shows on the detail overlay only)
   ─▶ silent > 10 s (OFFLINE_HIDE_MS) ─▶ card and sidebar entry disappear entirely,
      replaced by an "N offline hidden" footer note (user decision 2026-08-02)
 wearable returns ─▶ online again (same identity, same name)
@@ -64,7 +71,7 @@ sensor sample ─UDP─▶ ingest: raw deque (bounded)
         └─▶ api: write buffer → asyncpg COPY every 1s → metrics hypertable
 ```
 
-### 2.2 History: tick → window card
+### 2.2 History: tick → the History-tab period stats
 ```
 metrics (60Hz rows, 30d retention)
   ─continuous aggregate policy (in-DB, ~1min)─▶ metrics_1m (forever)
@@ -72,7 +79,8 @@ metrics (60Hz rows, 30d retention)
       windows <= 5m read the RAW `metrics` table; larger ones read `metrics_1m`.
       (`metrics_1m` is materialized-only, so its newest 1-2 min do not exist yet —
        up to 40% of a 5m window. The raw table has no such lag.)
-  ─▶ window cards (frontend polls every 60s)
+  ─▶ the History-tab period selector, trend arrow and coverage chip
+     (frontend polls every 60s)
 ```
 
 ### 2.3 Prediction: history → forecast chart
@@ -126,4 +134,4 @@ api:    watches last_seen keys → WS event {type:"status", dev, online, last_se
 JWT (HS256) in httpOnly Secure SameSite=Lax cookie, set by login, `JWT_EXPIRE_HOURS`
 lifetime. Browser sends it automatically on same-origin REST **and the WS upgrade**
 (no token in JS/localStorage). api validates on every request; WS validates at
-handshake and closes 4401 on expiry.
+handshake and re-checks expiry every 60 s mid-connection, closing 4401.

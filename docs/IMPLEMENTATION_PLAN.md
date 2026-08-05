@@ -10,7 +10,7 @@
 
 | Stage | Goal | Deployed? | Frontend | Auth |
 |---|---|---|---|---|
-| **1** | Real biomech model on live real-time data, tested locally | No — local only | Minimal `/debug` viewer | None |
+| **1** | Real biomech model on live real-time data, tested locally | No — local only | Minimal `/debug` viewer (still served today, behind auth — S3-T05) | None |
 | **2** | VPS deploy + history windows + predictions + insights | Yes — public VPS | Crude, disposable | **None — fully public (accepted interim risk)** |
 | **3** | Designed product frontend, login, polish | Yes | Product UI from mockup + design session | Preset-account login |
 
@@ -85,6 +85,7 @@ signups) — don't hand those to unattended agents.
 | S3-T06 | Login UI + route guards + session handling | T05, T02 | — |
 | S3-T07 | Cutover to product UI + polish sweep | T03, T04, T06 | — |
 | S3-T08 ⚑ | Full PRD F1–F10 acceptance run → `docs/ACCEPTANCE.md` (**MVP exit**) | T07 | — |
+| S3-T10 | Stage-3 backend additions: migration 002 + `GET /api/metrics/history` (done 2026-08-03) | stage 2 | T02–T04 |
 | S3-T09 | Hardening backlog (backups, HMAC, monitoring, prod durations, real models) | post-MVP | — |
 
 ## Repo layout (target end state)
@@ -109,7 +110,8 @@ MVPDashboard/
     api/        main.py  ws.py  writer.py  queries.py  auth.py  deps.py  debug.html
                 routes/(auth devices metrics forecasts insights health)
                 jobs/(predict.py insights.py)  seed_users.py
-    migrations/ 001_init.sql  migrate.py
+    migrations/ 001_init.sql  002_insight_actions.sql
+                003_insight_action_grouping.sql  migrate.py
     tests/
   frontend/     (stage 2: crude → stage 3: product UI)
 ```

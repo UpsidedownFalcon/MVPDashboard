@@ -63,7 +63,7 @@ Five runtime containers via Docker Compose, identical locally and on the VPS (pl
 Wearables ──UDP :5005──▶ ┌─ ingest (Python #1) ───────────────────────────┐
                          │ asyncio UDP → CRC check → decode → per-       │
                          │ (device,source) jitter buffer (reorder) →     │
-                         │ leg alignment → biomech STUB (numpy) →        │
+                         │ leg alignment → biomech (SPEC.md, numpy) →    │
                          │ 60Hz wall-clock ticker → publish tick         │
                          └───────────────┬────────────────────────────────┘
                                          ▼ Redis pub/sub (+ last_seen keys)
@@ -72,7 +72,7 @@ Wearables ──UDP :5005──▶ ┌─ ingest (Python #1) ──────�
                          │ sub → batched writer → TimescaleDB (1s COPY)  │
                          │ REST: auth, devices(+rename), windows,        │
                          │ forecasts, insights, health                   │
-                         │ asyncio jobs: predict STUB + insight rules    │
+                         │ asyncio jobs: predict + insight rules         │
                          └───────┬───────────────────────▲───────────────┘
                                  ▼                       │
                          [ TimescaleDB ]          [ Caddy :443 ] ─▶ browsers
@@ -117,8 +117,8 @@ each with dependencies, files, step-by-step instructions, and a done-check:
 reading order, no-assumption rule, and always run the task's done-check.
 
 Stable interfaces so real algorithms drop in later with no rework:
-`biomech.compute(aligned_frames) -> 6 floats @60Hz` and
-`predict.fit(history_df) -> {horizon: (pred, ci)}`.
+`biomech.compute(frames, state, times) -> Metrics(m1..m5 nullable, composite, flags, raw) @60Hz` and
+`predict.fit(history, horizons) -> dict[horizon, Forecast]`.
 
 ## To be decided later (separate planning sessions)
 
@@ -126,8 +126,11 @@ Stable interfaces so real algorithms drop in later with no rework:
    context length) — drop notes into `docs/biomech/`, dedicated session **early in
    stage 1** (it is the point of stage 1).
 2. **Prediction/regression spec** — linear-regression stub in stage 2.
+   **Shipped** — the real spec is [ANALYTICS.md](ANALYTICS.md) §2 (`trend-ols-1` + bootstrap).
 3. **Insight rules** — starter rules in stage 2 (threshold / trend slope); refine later.
+   **Shipped** — the catalogue is [ANALYTICS.md](ANALYTICS.md) §4.
 4. **Frontend design** — user has rough React mockup; drop into `mockup/`, dedicated
    session at **stage 3** against [UIUX.md](UIUX.md).
+   **Done 2026-08-03** — the S3-T01 session made UIUX.md the binding spec.
 5. Preset user list (stage 3); production window durations; subdomain choice; VPS
    provider signup (stage 2).

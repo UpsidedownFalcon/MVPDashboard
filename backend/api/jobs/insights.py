@@ -232,7 +232,7 @@ class Ctx:
 #
 # `tip` is a STATIC coaching cue per action. It is the same text every time the
 # action fires and is NOT derived from this athlete's data -- the UI renders it
-# under an explicit "General cue - not measured" label so it can never read as a
+# under an explicit "Coaching cue" label so it can never read as a
 # finding. Keep tips to technique/setup generalities that hold regardless of what
 # the sensors saw.
 
@@ -454,7 +454,8 @@ def _load_spike(ctx: Ctx) -> Evidence | None:
 def _accumulated_load(ctx: Ctx) -> Evidence | None:
     """Accumulated mechanical dose is high AND still climbing.
 
-    m3 is the dose term: a power-law-weighted, 45-minute-half-life accumulation.
+    m3 is the dose term: a power-law-weighted accumulation shed through two
+    pools (15 min easy / 90 min hard half-lives, SPEC Section 5.3).
     Kalkhoven's first-principles model is the grounding -- repetitive loading
     accumulates damage, damage lowers the tissue's critical threshold, and
     injury occurs when load exceeds that declining threshold. So a dose that is

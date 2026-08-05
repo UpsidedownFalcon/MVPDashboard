@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | **Draft for user approval** (S1-T14). Implemented by S1-T15 in `backend/ingest/biomech.py`. |
+| Status | **Implemented and shipped** (S1-T15) in `backend/ingest/biomech.py`; revised in place as the model changed. |
 | Supersedes | `biometrics_model.py` + `biometrics_model_rationale.md` in this folder — **reference only, stale**. §12 lists what changed and why. |
 | Evidence | Every non-obvious choice is either **[V]** verified against `example/squats.bin` this session, **[L]** literature-sourced (§13 refs), or **[E]** an engineering decision with no literature backing — tagged inline. |
 | Related | [../TRD.md](../TRD.md) §4 · [../BACKEND_SCHEMA.md](../BACKEND_SCHEMA.md) §§2,4,5 · [../tasks/STAGE1.md](../tasks/STAGE1.md) S1-T14/T15 |
@@ -193,7 +193,12 @@ of the previous tick (carried in `state`), so there is no per-tick discontinuity
 **Per-tick reduction (this IS the metric definition, not an optimisation — §5.1/§5.2):** each
 tick reduces its ~10 samples to `p90(adyn)`, `p90(jerk)`, `mean(adyn)`, `mean(wmag)`. The
 **p90 within the tick** rejects single-sample spikes; a real impact spans 10–30 samples at
-600 Hz and passes through untouched.
+the measured **~640 Hz** input rate and passes through untouched.
+
+*(Note 2026-08-02: the measured input rate is **640 Hz**, not the 600 Hz earlier revisions
+assumed — `EXPECTED_INPUT_HZ` was corrected the same day. **600 Hz survives only as
+`NOMINAL_INPUT_HZ`**, the fallback `dt` used when a tick arrives with no timestamps at all; the
+live path always differences real timestamps.)*
 
 ### 3.6 Filter: 75 Hz, not 50 Hz — and why the cutoff matters more for jerk
 
@@ -210,8 +215,8 @@ The stale model used 50 Hz. The literature spread for tibial acceleration is 40�
 
 Differentiation weights the band edge by `2πf`, so jerk is far more cutoff-sensitive than peak
 acceleration. **75 Hz** is chosen: it retains essentially all peak acceleration, recovers most
-peak jerk, and sits at `fs/8` (600 Hz input) — comfortably below Nyquist and below documented
-accelerometer/mount resonances (250–1000 Hz).
+peak jerk, and sits at **~`fs/8.5`** (the measured **640 Hz** input, note 2026-08-02) —
+comfortably below Nyquist and below documented accelerometer/mount resonances (250–1000 Hz).
 
 **Filter type — one-pole cascade, not Butterworth.** A fixed-coefficient IIR assumes a fixed
 sample rate; TRD §4 requires rate-flexible input. A cascaded one-pole with
@@ -320,7 +325,8 @@ would add nothing and could not be standardised across running vs lifting users.
 
 **Start calibrated, then refine (`biomech:cal:{device_id}`, BACKEND_SCHEMA §4).** On session
 start the device's **last-known-good** calibration is loaded from a dedicated Redis key with a
-TTL of days, keyed on **limb name** and never on slot index, and applied immediately — then
+TTL of **30 days** (`CAL_CARRY_TTL_S`), keyed on **limb name** and never on slot index, and
+applied immediately — then
 upgraded in place when a fresh still window lands. This is deliberately **not** the §7.4 session
 snapshot: that one is discarded after `SESSION_GAP_S`, which is exactly the case where carry-over
 matters (the athlete came back the next day). **Only a device with no history ever runs on
@@ -374,7 +380,7 @@ forbidden by §1.1 and are exactly the failure mode of the stale model (§3.2).
 **Persistence.** Accel gain is stable across sessions; gyro bias drifts with temperature.
 Recompute per session when a still window lands, and carry the last-known-good values as
 fallback. Two keys, deliberately: the §7.4 snapshot (same session, TTL `2×SESSION_GAP_S`) and
-`biomech:cal:{device_id}` (across sessions, TTL days). A new session **demotes** its measured
+`biomech:cal:{device_id}` (across sessions, TTL **30 days**, `CAL_CARRY_TTL_S`). A new session **demotes** its measured
 values to carried and starts the search again — including the 3 s discard. Both are keyed on
 limb name, never on slot index.
 
@@ -387,7 +393,9 @@ neither (measured this session) — so the UI can mark the discontinuity rather 
 as a change in the athlete.
 
 `m4`'s transmission baseline `R_base` is **not** part of this routine — it requires *movement*
-representative of the actual activity, so it self-learns from the first 60 s of movement (§5.4).
+representative of the actual activity, so it self-learns from movement (§5.4) — **a minimum of
+120 s of it**: 60 s of settle (`M4_SETTLE_S`) and then 60 s within one intensity band
+(`M4_BASELINE_LOCK_S`).
 A 15 s calibration wiggle would not be representative of running or of a working set.
 
 ---
@@ -470,7 +478,8 @@ rebuild (§5.4).
 
 ## 5. The five primitives
 
-All windows are trailing and causal. `W_PEAK = 1.0 s`; `MOVE_GATE = 0.10 m/s²` on tick-mean
+All windows are trailing and causal. `PEAK_WINDOW_TICKS = 60` ticks (= 1.0 s at 60 Hz);
+`MOVE_GATE_MS2 = 0.10 m/s²` on tick-mean
 `adyn` (measured still 0.025–0.032, squatting 0.65–0.94 — ~3× above noise, ~7× below movement).
 **[V]**
 
@@ -493,8 +502,12 @@ under-report impacts and vary with cadence rather than load. **[V]** This two-le
 true `p99` over the raw 1 s at **1.08 ± 0.04** — tight and unbiased — where ring-p90 wandered
 between 0.38× and 0.93×. **[V]**
 
-Shank-preferred (the validated site for impact surrogates); falls back to thigh if absent, flagged
-`no_shank`. Above 2.6% saturation it is reported as a marked LOWER BOUND rather than
+Shank-preferred (the validated site for impact surrogates); with no shank mapped it falls back to
+**ALL mapped limbs**, not to the thighs specifically — the shipped `impact_i` is
+`shank_i if any shank else arange(n)` — flagged
+`no_shank`. *(Corrected 2026-08-06; on a 4-sensor rig the two are the same set only because the
+non-shank slots are the thighs.)* Above 2.6% saturation it is reported as a marked LOWER BOUND
+rather than
 `null` (§3.7) — the +-16 g part clips inside real athletic movement.
 
 ### 5.2 `m2` — Loading Rate
@@ -635,8 +648,9 @@ baseline-relative, per user decision:
 ```
 tremor    = mean power 4–12 Hz / mean power 0.5–20 Hz, over live limbs
 band      = intensity band of the current shank EMA |a_dyn|   (M4_BAND_EDGES)
-base[b]   = time-weighted MEAN of `tremor` over 60 s of movement IN BAND b,
-            learned only after M4_SETTLE_S, then locked (with the limb mask)
+base[b]   = time-weighted MEAN of `tremor` over M4_BASELINE_LOCK_S = 60 s of movement IN BAND b,
+            learned only after M4_SETTLE_S = 60 s of movement, then locked (with the limb mask)
+            ⇒ the MINIMUM to a first m4 value is 120 s of movement, not 60
 m4        = 100 · clamp( max(tremor/base[band] − 1, 0) / 1.0 , 0, 1 )
 ```
 
@@ -701,7 +715,8 @@ Three fixes, all load-bearing:
    answerable: *"at the intensity being worked at right now, is shock being transmitted
    differently than when fresh at this same intensity?"*
 2. **Time-weighted mean, not a snapshot.** One unlucky tick can no longer set the reference.
-3. **Settle gate (`M4_SETTLE_S` = 3 transmission time constants).** Nothing is learned until the
+3. **Settle gate — `M4_SETTLE_S` = 3 transmission time constants = `3 × 20 s` = 60 s of
+   movement, served *before* the band's own 60 s lock begins.** Nothing is learned until the
    20 s EMA has converged — it seeds from the first active tick, when the gravity baseline is
    still settling and `a_dyn` briefly carries most of 9.81 m/s², so the shank mean sweeps down
    through every band during warm-up. Without the gate a band locked on that sweep and read 100
@@ -721,8 +736,8 @@ and ~31 on irregular landing work, i.e. near its nominal 0 when movement is cons
 what the metric always claimed to mean. **[V]**
 
 ⚠️ **`m4` is NOT validated against real data — see §11.1.** The squats log holds only ~20 s of
-movement, below the 60 s baseline lock, so **`m4` never emits a value on the only capture that
-exists.** It ships on synthetic fixtures, validated live in S1-T15 step 4.
+movement, an order below the **120 s** minimum (60 s settle + 60 s in-band lock), so **`m4` never
+emits a value on the only capture that exists.** It ships on synthetic fixtures, validated live in S1-T15 step 4.
 
 ### 5.5 `m5` — L/R Balance
 
@@ -872,7 +887,17 @@ ratio to a power (sigmoid rather than hyperbolic, so light activity stays low) a
 that **`demand == capacity` reads 100** for any exponent. Degradation lowers `capacity`, so a
 degraded athlete reaches full scale at lower demand — which is the intent.
 
-🚩 **`ACUTE_EXPONENT` raised 2 → 4 on 2026-08-03.** At `n = 2` the curve was still far too eager
+🚩 **HISTORY (2026-08-03, superseded later the same day): `ACUTE_EXPONENT` raised 2 → 4.**
+**The shipped value is `ACUTE_EXPONENT = 3.5`** — §6.1a re-fitted 4 → 3.5 against the worn
+protocol once the dose floor was removed, and the §6.1 code block above is authoritative. Read
+everything from here to the end of §6.1 as the *pre-§6.1a* state: the bold `n = 4` column of the
+table below is no longer the live exponent, and the ladder it produces
+(slow walk 0.9 / light jog 13.8 / hard run 57.4 / sprint 86.5) is **not** what the shipped model
+reads. **The live ladder is §6.1a's** — squats 1.3, walk 2.6, jog 6.0, kick 8.4,
+single-leg landing 17, jump 21 fresh (~33 at the fatigued capacity). The reasoning below is kept
+because it is why the exponent is high at all.
+
+At `n = 2` the curve was still far too eager
 at the bottom: a slow walk read 20–30 and a light jog 50–70 on a scale labelled *injury risk*.
 Measured on the §4.1 ladder at `n = 2`: slow walk 26.0, light jog 55.3 — reproducing the reported
 complaint almost exactly. `n = 4` is not a fitted constant. Injury is a **threshold event, not an
@@ -882,19 +907,22 @@ by load frequency (Kalkhoven — first-principles athletic-injury model). The bo
 daily-stress-stimulus law uses `m = 4` (Whalen 1988) and fatigue-damage exponents span 2.1–5.8
 (Pattin 1996), so a 4th-power ratio is the same physics `DOSE_EXPONENT` already applies. **[L]**
 
-What the exponent does to the ladder, at fixed demand:
+What the exponent does to the ladder, at fixed demand — the `n = 4` column is the **historical**
+choice of 2026-08-03, not the shipped `3.5`:
 
-| demand | n=2 | **n=4** | n=6 |
+| demand | n=2 | ~~n=4~~ *(historical)* | n=6 |
 |---|---|---|---|
-| 24 (slow walk) | 11.0 | **0.7** | 0.0 |
-| 47 (light jog) | 36.4 | **9.4** | 2.2 |
-| 71 (hard run) | 66.7 | **40.1** | 22.3 |
-| 84 (sprint) | 83.1 | **67.2** | 52.9 |
+| 24 (slow walk) | 11.0 | 0.7 | 0.0 |
+| 47 (light jog) | 36.4 | 9.4 | 2.2 |
+| 71 (hard run) | 66.7 | 40.1 | 22.3 |
+| 84 (sprint) | 83.1 | 67.2 | 52.9 |
 
-Together with the §5.3 dose-law fix this is what moves the ladder to slow walk **0.9**, light jog
-**13.8**, hard run **57.4**, sprint **86.5** (§4.1). Note the two fixes are independent: the
-exponent alone took a slow walk from 26.0 to 15.9, and the remaining 15 points were the dose
-floor.
+~~Together with the §5.3 dose-law fix this is what moves the ladder to slow walk **0.9**, light jog
+**13.8**, hard run **57.4**, sprint **86.5** (§4.1).~~ **Pre-§6.1a history, 2026-08-03** — that
+ladder was computed at `n = 4` with the dose floor still present, and is superseded by §6.1a's
+live ladder (squats 1.3, walk 2.6, jog 6.0, kick 8.4, single-leg landing 17, jump 21). Note the
+two fixes of that day were independent: the exponent alone took a slow walk from 26.0 to 15.9,
+and the remaining 15 points were the dose floor — which §6.1a then removed outright.
 
 ### 6.1a The dose floor was removed — measured, 2026-08-03 **[V]**
 
@@ -978,11 +1006,15 @@ removed (§6.1a), `m3` carries the accumulated-fatigue signal through `degradati
 athlete. `degradation` is therefore load *and* movement-quality degradation, not movement quality
 alone — see the §6.1 code block, which is authoritative.
 
-⚠️ **Consequence during warm-up:** for the first 60 s `m4` and `m5` are both `null`, but `m3` is
+⚠️ **Consequence during warm-up:** `m4` and `m5` are both `null` until their gates clear —
+**`m5` at 30 s of accumulated asymmetry time, `m4` at 120 s of movement** (60 s `M4_SETTLE_S`
+then 60 s `M4_BASELINE_LOCK_S` in one band; corrected 2026-08-06, this paragraph used to say
+60 s for both). `m3` is
 **never** `null` (the dose accumulator always yields a float), so `degradation` always has at
-least one available term and renormalises over it. Warm-up degradation is therefore `= m3`. The
-composite's meaning is still narrower in minute one, and it must be flagged `warming_up` so the
-UI does not present an unqualified risk number then.
+least one available term and renormalises over it. Warm-up degradation is therefore `= m3`, and
+for the second minute `= m3` and `|m5|`. The
+composite's meaning is still narrower in the opening minutes, and it must be flagged
+`warming_up` so the UI does not present an unqualified risk number then.
 
 ### 6.2 Why this shape
 
@@ -1047,7 +1079,7 @@ dynamic acceleration is ~3.6 m/s² — below the new impact floor, and genuinely
 
 🚩 **This capture can therefore no longer validate any metric numerically.** It validates only
 that a low-load activity reads low. The numeric validation has moved to the synthetic fixtures
-and to `test_sustained_load_builds_dose_and_decays_to_the_floor`. **Closing this needs a real
+and to `test_rest_reads_zero_however_much_dose_has_accumulated`. **Closing this needs a real
 capture containing running and jumping — see open item 13 and
 `scripts/calibrate_capture.py`.**
 
@@ -1061,10 +1093,12 @@ was 0.6 s of hard-training equivalent, so any movement cleared it within a secon
 
 **Consequence: this capture can no longer validate `m3` or the dose-decay behaviour** —
 both are zero here, so the assertions would be vacuous.
-`test_sustained_load_builds_dose_and_decays_to_the_floor` takes that over on 10 minutes of
-hard-run-equivalent synthetic load followed by rest, asserting that dose accumulates, persists
-through a short rest, decays, and that the composite settles onto exactly `0.50 × m3`. The
-identity itself still holds on this capture — at zero.
+**`test_rest_reads_zero_however_much_dose_has_accumulated`** takes that over on 5 minutes of
+hard-run-equivalent synthetic load followed by 20 s of rest, asserting that dose accumulates,
+persists through the rest, that `degradation > 0`, and that the **composite falls to ~0 at rest**
+however much dose has been built. *(Renamed and rewritten 2026-08-03 with §6.1a — it replaces
+`test_sustained_load_builds_dose_and_decays_to_the_floor`, which no longer exists. The old
+"settles onto exactly `0.50 × m3`" clause went with it: **there is no dose floor any more.**)*
 
 ⚠️ **Re-measured 2026-08-02** after the §4 normalisation floors were raised against a live
 wearing session. The earlier row read `m1` 44.1, `m2` 52.6, composite 35.2 for the same file:
@@ -1075,7 +1109,7 @@ below walking on `m1` is correct, not a regression: `m1` is *impact*, and a squa
 strike than a step.
 
 ⚠️ **`m4` and `m5` are `null` in every row** — the log contains only 19.9 s of movement, below
-their 60 s / 30 s warm-ups. This table therefore validates `m1`, `m2`, `m3` and the composite
+their **120 s** / 30 s warm-ups. This table therefore validates `m1`, `m2`, `m3` and the composite
 **only**. See §11.1.
 
 *Produced by the **shipped implementation** (`backend/ingest/biomech.py`, S1-T15) replaying
@@ -1094,9 +1128,15 @@ from a single 16.7 ms tick reads **3.55 m/s²** vs **8.29 m/s²** over 1 s — a
 because a 10-sample window usually misses the impact entirely. **[V]**
 
 **Two-level summary structure (required — not an optimisation detail).** Rather than buffering
-1 s of raw derived samples (~600/limb), each tick reduces its ~10 new samples to **three
-float32 summaries** (`p90 adyn`, `p90 jerk`, `mean adyn`), and only **60 of those summaries**
+1 s of raw derived samples (~640/limb), each tick reduces its ~10 new samples to **two ringed
+summaries** (`p90 adyn` → `pk_a`, `p90 jerk` → `pk_j`), and only **60 of those summaries**
 (= 1 s) are retained. `m1`/`m2` then take the **`max` over those 60 values**, not a percentile.
+
+*(Corrected 2026-08-06 against the shipped code: the rings are **float64**, not float32, there
+are **two** of them rather than three, and each is paired with a **boolean validity mask**
+(`ring_valid`) so a tick a limb produced no data for is excluded from the `max`. **`mean adyn`
+is never ringed** — it is folded into the 20 s control EMA in-tick, which is O(1) and needs no
+history.)*
 
 🚩 **The two levels use different statistics and the pairing is mandatory — see §5.1.** The `p90`
 is *within* the tick, where it rejects single-sample artifacts; the aggregate *across* the ring is
@@ -1106,7 +1146,7 @@ values", contradicting §5.1. §5.1 is correct.)*
 
 | Buffer | Length | Contents | Bytes/device |
 |---|---|---|---|
-| Per-tick summaries | 60 ticks = 1.0 s × 4 limbs | 3 × float32 summaries | **2,880 B** |
+| Per-tick summaries | 60 ticks = 1.0 s × 4 limbs | 2 × float64 rings (`pk_a`, `pk_j`) + a bool `ring_valid` mask | **≈4,080 B** |
 | Control window | 20 s | running sums of `adyn` per limb — **not** a buffer | ~0 |
 | Filter state | — | LPF/baseline `zi`, last `a_vec`, last timestamp | ~0 |
 | Session state | — | `dose`, `accL`, `accR`, `R_base`, counters, calibration | ~0 |
@@ -1196,8 +1236,14 @@ disappearing would resize the state and destroy every filter's history. The desi
 - A boolean `active[4]` mask marks which limbs had real data this tick. **Inactive limbs are
   excluded from all aggregation** (`m1`..`m5`); the §8 degradation ladder then applies exactly
   as specified.
-- Devices beyond `MAX_DEVICES` (`.env`, default 5) are dropped and counted in
-  `ingest:stats/global:dev_dropped`, never silently mixed into another device's stream.
+- Devices beyond `MAX_DEVICES` (`.env`, default 5) are never silently mixed into another
+  device's stream. **Refined 2026-08-06 (shipped behaviour, `state.py`):** a new device at the
+  cap first **displaces the longest-silent *offline* device** (one whose `last_seen` is older
+  than `OFFLINE_AFTER_S`) and takes its place — a trainer swapping a wearable would otherwise
+  wait out the whole session gap before the replacement could register. **Only when every
+  tracked device is live** is the newcomer dropped and counted in
+  `ingest:stats/global:dev_dropped` (logged once per device id). A separate `evict_stale()`
+  sweep releases devices silent beyond `SESSION_GAP_S`.
 
 **Per-device cost is flat; the total scales linearly** — measured on the shipped
 implementation: **[V]**
@@ -1294,8 +1340,22 @@ is O(1) scalars, so persisting it is cheap. **Confirmed required by the user.**
 | `move_t`, `asym_t` | float | movement-time accumulators — `move_t` gates m4's settle, `asym_t` is m5's 30 s warm-up gate |
 | `schema_version` (`v`) | int | **currently 3**; reject-and-restart on mismatch. Both v1 **and v2** are rejected — v2 predates the fast/slow dose split, so its single `dose` scalar cannot be restored into two pools |
 
+⚠️ **Note 2026-08-06 — `r_mask[]` is NOT in the snapshot, so `m4`'s band baseline does not
+usefully survive a restore.** `m4` freezes whenever the active limb set differs from the mask its
+baseline locked on (§5.4), which makes the mask part of the baseline. `snapshot()` writes
+`r_base`/`r_sum`/`r_time` but **not** `r_mask`; `restore()` rebuilds `r_base` and leaves `r_mask`
+at `[None] × M4_BANDS`. Every subsequent tick in a restored band therefore compares the live mask
+against `None`, takes the freeze branch, and — because `r_base` is *not* `None` — never re-learns
+either: `m4` emits nothing for that band, with no `warming_up` flag, until the athlete works in a
+band whose baseline was never locked. Effectively **`m4` re-warms (at best) across a restart**,
+which is not what the paragraph above implies. Not fixed in the shipped code; it is also why
+test 21 pins only the dose/pool half of the round trip.
+
 🚩 **Calibration MUST be keyed on the limb name (equivalently the sensor triple it is mapped
-from), never on the slot index.** Slots are assigned dynamically on first packet (§7.2), so if devices reconnect
+from), never on the slot index.** Slots are the **sorted `LIMB_MAP` limb names** (§7.2) — the
+ticker emits every mapped limb on every tick, so a slot's identity comes from the sort order of
+the configured names rather than from arrival order. Change `LIMB_MAP` and the indices move; so
+if devices reconnect
 in a different order after a restart, slot-keyed calibration would silently apply the wrong
 sensor's gain and bias — and since the corrections are small (0.5%), the result would look
 plausible rather than obviously wrong. Slot index is an implementation detail of the batch layout
@@ -1337,14 +1397,22 @@ terms so a device with fewer sensors is not systematically scored as lower-risk.
 |---|---|---|---|---|---|---|
 | 4 (both legs, shank+thigh) | ✔ | ✔ | ✔ | ✔ | ✔ | full |
 | 2 — one leg (shank+thigh) | ✔ | ✔ | ✔ | ✔ | `null` | over `m4`,`m3` |
-| 2 — both shanks | ✔ | ✔ | ✔ | `null` | ✔ | over `m5`,`m3` |
-| 2 — both thighs | ✔¹ | ✔ | ✔ | `null` | ✔ | over `m5`,`m3` |
-| 1 — any | ✔¹ | ✔ | ✔ | `null` | `null` | `m3` only |
+| 2 — both shanks | ✔ | ✔ | ✔ | ✔² | ✔ | over `m4`,`m5`,`m3` |
+| 2 — both thighs | ✔¹ | ✔ | ✔ | ✔² | ✔ | over `m4`,`m5`,`m3` |
+| 1 — any | ✔¹ | ✔ | ✔ | ✔² | `null` | over `m4`,`m3` |
 | 0 / no data | held | held | held | held | held | held |
 
-¹ `m1` falls back to thigh, flagged `no_shank` — thigh impact is not the validated shank
+¹ `m1` falls back to **all mapped limbs** (`impact_i` = every slot when no shank is mapped),
+flagged `no_shank` — thigh impact is not the validated shank
 surrogate. `quality` (TRD §4 step 8) already reflects missing sensors, so the UI can distinguish
 "low risk" from "less data".
+
+² **Corrected 2026-08-06.** These three rows previously read `null` for `m4`, which was true of
+the shank/thigh **transmission ratio**. Since the 2026-08-03 tremor rebuild (§5.4) `m4` needs
+only **one streaming limb** — the tremor fraction is measured per limb and averaged over whatever
+is live — so it is available on every row above, and the composite's `degradation` renormalises
+over `m4` too. `test_degradation_ladder` asserts exactly this (`both shanks` → m4 available,
+single sensor → m4 available).
 
 ---
 
@@ -1355,11 +1423,20 @@ surrogate. `quality` (TRD §4 step 8) already reflects missing sensors, so the U
 | `m1` | Impact | IMP | Peak shock magnitude reaching the lower leg |
 | `m2` | Loading Rate | RATE | How abruptly load is being applied |
 | `m3` | Accumulated Load | LOAD | Total mechanical work absorbed this session |
-| `m4` | Movement Control | CTRL | Shock absorption vs. this athlete when fresh |
-| `m5` | L/R Balance | BAL | Left/right load imbalance |
-| `composite` | **Injury Risk** | RISK | Load applied vs. current capacity — a monitoring aid, not a prediction |
+| `m4` | Movement Control | CTRL | Movement tremor vs. this athlete when fresh — rises as control degrades |
+| `m5` | L/R Balance | BAL | How evenly load is shared left/right in this session — magnitude, with the side carrying more |
+| `composite` | **Injury Risk** | RISK | Load applied vs. current capacity |
 
-Bands (display only, §6.3): 0–30 low, 30–60 moderate, 60–80 elevated, 80–100 high.
+*(Tooltips synced to the shipped `metrics.ts` 2026-08-06. `m4`'s was rewritten on 2026-08-03 with
+the tremor rebuild — it no longer says "shock absorption". `m5`'s now names the sign convention,
+since 2026-08-03 made it signed. The composite's **"— a monitoring aid, not a prediction"**
+qualifier was **removed on 2026-08-05 as part of the demo posture**; §2's claims limits are
+unchanged and still bind any copy written for a real deployment.)*
+
+Bands (display only, §6.3): **<10 low, 10–25 moderate, 25–45 elevated, ≥45 high**
+(`RISK_BAND_CUTOFFS` in `metrics.ts`). **Re-cut 2026-08-03 for the §6.1a composite** — under the
+old 0–30/30–60/60–80/80–100 cut the entire worn protocol, fatigue included, collapsed into
+"low", because the §6.1a ladder puts a jump at ~21 fresh.
 
 **Rules:** `m4`/`m5` render **greyed when `null`** (warming up / sensors absent) — never as 0,
 which would read as "perfect". Never show a directional claim ("your left leg is weaker") — §5.5.
@@ -1375,24 +1452,46 @@ Any individual flag must show the component panel that drove it (§2).
    DDL already permits it (`m1..m5` nullable `REAL`); `metrics_1m`'s `avg()` skips NULLs.
 2. **Range 0–100**, not the stub's 0–1 — frontend axis bounds must change with the model.
 3. **`Metrics` gains `flags: frozenset[str]`** and **`raw: dict[str,float]`** — diagnostics only,
-   published to `biomech:diag:{device_id}`, never written to `metrics`. `raw` carries the signed
-   `R`, `R_base`, signed `usi_pct`, `dose`, `move_t`, `intensity`, `a_int`, `w_int`, `sat_frac`,
-   `m1_lo`, `demand`, `degradation`, and the **per-tick noise weight `W`** — `W` is there
+   published to `biomech:diag:{device_id}`, never written to `metrics`. **`raw`'s shipped key set
+   (synced 2026-08-06):** `R` (the **unsigned tremor fraction** since the 2026-08-03 rebuild, no
+   longer a signed shank/thigh ratio), `R_base`, `m4_band`, `m4_band_t`, **signed** `usi_pct`,
+   **signed** `usi_fast_pct`, `dose`, `dose_fast`, `dose_slow`, `move_t`, `intensity`, `a_int`,
+   `w_int`, `sat_frac`, `m1_lo`, `demand`, `degradation`, `cal_left`, and the **per-tick noise
+   weight `W`** — `W` is there
    specifically because a constant `1.0` is the visible signature of the §5.5 bug (weighting
-   applied to the accumulators instead of per tick). Flag vocabulary:
+   applied to the accumulators instead of per tick). Unavailable values are published as `NaN`,
+   never omitted. Flag vocabulary:
 
    | Flag | Meaning |
    |---|---|
-   | `warming_up` | `m4`/`m5` still inside their 60 s / 30 s warm-up (§5.4, §5.5). Only when the sensors those metrics need have actually streamed — see `degraded_sensors` |
+   | `warming_up` | `m4`/`m5` still inside their **120 s / 30 s** warm-up (§5.4, §5.5). Only when the sensors those metrics need have actually streamed — see `degraded_sensors` |
    | `partial` (debounced ≥0.75 s: a lossy link flickers `active` tick-to-tick and an
      undebounced flag toggled hundreds of times per second in a live session) | a required sensor went inactive mid-session; `m4`/`m5` frozen or `null` |
-   | `no_shank` | `m1` fell back to thigh sensors |
+   | `no_shank` | `m1` fell back to all mapped limbs (§5.1) |
    | `saturated` | >2.6% clipped samples; **`m1`/`m2` are LOWER BOUNDS**, render as ">= x" (§3.7). They are still reported -- suppression to `null` was removed 2026-08-03 |
    | `degraded_sensors` | device streaming <4 sensors (§8), **or** a sensor a metric requires was mapped but has never produced data (flat battery, bad strap). Both are "this value is never coming"; `warming_up` promises the opposite, so the two must not be confused. Tested against `ema_seen`, never against `LIMB_MAP` alone |
    | `uncalibrated` | at least one sensor running on default `k`/`bias`/`σ` — no history and no still window yet (§3.8) |
    | **`carried_over`** | **at least one sensor running last-known-good values from a PREVIOUS session (`biomech:cal:{dev}`), applied but not measured on this athlete today (§3.8)** |
    | `cal_failed` | a calibration attempt hit a validity guard and was rejected; last-known-good stands and detection continues |
    | **`unvalidated`** | **`m4`/`m5` — synthetic fixtures only, no real-data validation (§11.1). Set whenever `m4` or `m5` actually emits a value; a tick where both are `null` carries no `unvalidated` flag, because there is no unvalidated number on screen to qualify.** |
+
+   ⚠️ **Note 2026-08-06 — `warming_up` and `degraded_sensors` are CONFLATED for shank-only and
+   thigh-only rigs.** The shipped gate that chooses between them (`pair_live`, `biomech.py`
+   ~1362) still requires a **shank *and* a thigh** to have streamed, which is a leftover of the
+   transmission-ratio era: `m4` has needed only one streaming limb since the 2026-08-03 tremor
+   rebuild (§5.4, §8). So a both-shanks or both-thighs rig gets `degraded_sensors` — "this value
+   is never coming" — while `m4` is in fact simply **warming**, and does emit once its band locks.
+   The distinction the two flags exist to draw is therefore wrong for exactly those configs.
+   Behaviour is intentionally unchanged for now; the 4-sensor rig, which is what the product
+   ships against, is unaffected.
+
+   ⚠️ **Note 2026-08-05 (demo posture) — `unvalidated` is emitted but NOT displayed.** The flag
+   is still set on the wire exactly as specified above, and `/api/health` still surfaces it, but
+   the product UI hides it (`HIDDEN_FLAGS` in `frontend/src/lib/metrics.ts`, and the
+   unvalidated chip is not rendered in `InsightsPanel.tsx`). **§11.1's requirement that the flag
+   be *visible* to the trainer is therefore deliberately not met in the demo build** — the value
+   is still qualified everywhere except on screen. Restore the rendering before anything is
+   presented to a real trainer.
 
 4. **`ingest:stats` gains `sat_count`** per sensor (§3.7).
 5. **`SESSION_GAP_S`** (default 300) is an **`.env` key**, added to TRD §7. *(Earlier revisions
@@ -1408,7 +1507,8 @@ Any individual flag must show the component panel that drove it (§2).
    dict[limb, Calibration] | None` remains alongside it as the batch form for a caller holding a
    complete window; it returns `None` on any validity-guard failure. Flags gain `uncalibrated`,
    `carried_over`, `cal_failed`. The carry-over key `biomech:cal:{device_id}` is
-   read/written by ingest only (BACKEND_SCHEMA §4) — **no API route**.
+   read/written by ingest only (BACKEND_SCHEMA §4) — **no API route** — with a TTL of
+   **30 days** (`CAL_CARRY_TTL_S`).
 
 ---
 
@@ -1433,7 +1533,8 @@ regression. Kept for provenance; the live assertions are the §11.1 fixtures and
 ### 11.1 ⚠️ `m4` and `m5` ship WITHOUT real-data validation — deliberate, user-approved
 
 `squats.bin` is the only capture that exists and it contains **19.9 s of movement**, below `m4`'s
-60 s baseline lock and `m5`'s 30 s warm-up. **Neither metric emits a single value on it.** Two of
+**120 s** minimum (60 s `M4_SETTLE_S` then 60 s `M4_BASELINE_LOCK_S` in one band) and `m5`'s 30 s
+warm-up. **Neither metric emits a single value on it.** Two of
 five primitives therefore have **no golden values from real hardware**, and the composite is
 validated only in the regime where its `degradation` term reduces to `m3`.
 
@@ -1444,8 +1545,14 @@ step 4.** This must be visible in the code, not just here:
   only, pointing at this section.
 - Their `Metrics` entries carry the flag **`unvalidated`** for the whole of stage 1, so the
   `/debug` viewer and `/api/health` can surface it.
-- `test_biomech.py` groups these tests under `class TestSyntheticOnly` with a docstring stating
-  that passing does **not** demonstrate real-world correctness.
+  ⚠️ **Note 2026-08-05 (demo posture): the flag is emitted on the wire but the product UI hides
+  it** (`HIDDEN_FLAGS` in `frontend/src/lib/metrics.ts`; the chip is not rendered in
+  `InsightsPanel.tsx`). **This section's visibility requirement is therefore deliberately not met
+  in the demo build** — see the matching note in §10.
+- `test_biomech.py` **has no classes at all** — the suite is **46 module-level test functions**,
+  grouped only by section-header comments. The synthetic-only caveat lives in the **module
+  docstring**, not in a `TestSyntheticOnly` class. *(Corrected 2026-08-06; earlier revisions
+  specified a class that was never written.)*
 
 ⚠️ **`m5`'s warm-up gate now counts accumulated-asymmetry time, not total movement time**
 (fixed 2026-08-02). `move_t` advances on every moving tick including ones where a side was
@@ -1483,14 +1590,20 @@ one percentage point of USI is 5.56 `m5` points, so a residual **2% left/right g
 
 **Synthetic fixtures required** (each a generated frame stream, not a recording):
 
-| Fixture | Asserts |
-|---|---|
-| 5 min symmetric movement | `m5` emits after 30 s and converges to ≈ 0 |
-| 5 min with a **known 12% L/R load imbalance** | `m5` converges to 12% wUSI ⇒ ≈ 67 (±5) |
-| 5 min with `R` ramped +25% after the baseline locks | `m4` locks `R_base` at 60 s, then rises to ≈ 50 (±5) |
-| 5 min with `R` ramped **−25%** | `m4` also rises to ≈ 50 — proves direction-agnostic (§5.4) |
-| One-sided sensor death at t = 90 s | `m5` freezes, then `null` + `partial`; **never** rises toward 100 |
-| Shank death with thigh alive at t = 90 s | `m4` freezes, then `null` + `partial`; **never** pins at 100 |
+| Fixture | Asserts | In the suite? |
+|---|---|---|
+| 5 min symmetric movement | `m5` emits after 30 s and converges to ≈ 0 | **No** |
+| 5 min with a **known 12% L/R load imbalance** | `m5` converges to 12% wUSI ⇒ ≈ 67 (±5) | **No** |
+| 5 min with the tremor fraction ramped **+25%** after the band baseline locks | `m4` locks `R_base` after 120 s of movement (60 s settle + 60 s in band), then rises to ≈ 50 (±5) | **No** |
+| ~~5 min with `R` ramped **−25%**~~ — **deleted 2026-08-06** | ~~`m4` also rises to ≈ 50 — proves direction-agnostic~~ **Wrong since 2026-08-03: `m4` IS directional** (`drift = tremor/base − 1`, clamped at 0), so a −25% ramp reads **0**, not ~50. The replacement claim, if it is ever written: a −25% ramp must read exactly 0 and must never be scored as a loss of control | — |
+| One-sided sensor death at t = 90 s | `m5` freezes, then `null` + `partial`; **never** rises toward 100 | Yes — `test_a_dead_side_still_cannot_move_m5`, `test_one_sided_sensor_loss_does_not_read_as_asymmetry` |
+| Shank death with thigh alive at t = 90 s | `m4` freezes, then `null` + `partial`; **never** pins at 100 | Yes — `test_shank_loss_does_not_pin_m4` |
+
+⚠️ **Note 2026-08-06 — only the sensor-death rows are implemented.** The four
+**convergence-value** fixtures above (symmetric → 0, 12% → ≈67, and the two ±25% `m4` ramps) are
+**not** in `test_biomech.py`; the suite pins `m4`/`m5` *availability* and *failure modes* but
+never their numeric convergence. So the numbers in those rows are specifications, not passing
+assertions — which is a second, independent reason `m4`/`m5` carry `unvalidated`.
 
 **Exit condition for the gap:** during S1-T15 step 4, record **one ≥10-minute session with a
 deliberate fatigue block** (e.g. a long set to near-failure, or a run with a hard finish) on real
@@ -1505,23 +1618,44 @@ presented to a trainer as a finding — only as a trend with the `unvalidated` f
    `‖Δa/Δt + ω×a‖` recovers truth to <0.1 m/s³ at up to 1500 °/s (§3.4).
 3. **Orientation invariance** — apply an arbitrary fixed rotation to every sample of the squats
    log; all six outputs **bit-identical**. Guards the whole no-orientation claim.
+   *(As shipped, 2026-08-06: `test_orientation_invariance` runs a synthetic stream, not the
+   squats log, and asserts **`m1`/`m2`/`composite` to `abs=1e-4` and `m3` to `abs=1e-6`** —
+   not bit-identity; the residual is float64 round-off from rotating the inputs. **`m4` and `m5`
+   are not checked at all.**)*
 4. **Sample-rate independence** — decimate 600→300→150 Hz; `m3` within 5%; `m1` degrades
    gracefully, never jumps.
+   *(As shipped: `test_dose_is_sample_rate_independent` is parametrised over rates and asserts
+   only **`0 < m3 < 100` at each rate** — there is **no cross-rate 5% bound**, and `m1` is not
+   tested here at all.)*
 5. **Packet-loss robustness** — drop 30% of samples at random; `m3` within 10%.
+   *(As shipped: `test_packet_loss_does_not_collapse_dose` asserts only **`m3 > 0` and
+   `m1 > 0`** — no 10% bound. Open item 11 is why: the measured damage is far larger than 10%,
+   so the bound could not honestly be asserted.)*
 6. **Gravity-only input** — constant 9.81 m/s² on any axis ⇒ all primitives zero.
 7. **Free-fall** — must not produce a spurious `m1` peak (§3.3 fold-over).
+   *(As shipped: `test_free_fall_does_not_produce_a_phantom_impact` asserts **`m1 < 40`**, which
+   bounds the fold-over rather than excluding a peak outright.)*
 8. **Saturation floor** — a synthetic clipped impact => `m1`/`m2` still reported, `saturated`
     flag set; and a single clipped sample must NOT raise the flag. Plus: at a clipped impact,
     rotation must move `demand`, while pure rotation with no impact must not.
 9. **Degradation ladder** — every row of §8 gives the right `null` pattern, and the composite
    does not fall merely because sensors are missing.
+   *(As shipped: `test_degradation_ladder` asserts the `m4`/`m5` availability pattern, that
+   `m1`/`m2`/`m3` are non-`null`, that `degraded_sensors` is flagged below 4 limbs, and that
+   **`composite > 0`** — it does **not** compare the degraded composite against the 4-sensor
+   value, so "does not fall merely because sensors are missing" is argued, not pinned.)*
 10. **Held ticks** — empty `frames` repeats previous `Metrics`, accumulates no dose.
 11. **Session reset** — a >300 s gap zeroes `dose`/`R_base`; a 3 s gap does not.
+    *(As shipped: `test_session_reset_clears_dose_but_keeps_calibration` exercises the reset by
+    calling **`reset_session()` directly**, then asserts `dose`/`move_t` are zero, every
+    `r_base` band is `None`, and calibration survives. The gap **threshold** is not exercised:
+    the "a 3 s gap does not reset" half is currently **unpinned**.)*
 12. **Calibration correctness** — synthetic sensors given known gain/bias errors ⇒ the running
     sums recover them within 0.1%, and `m5` bias caused by a deliberate 3% L/R gain mismatch
-    drops to <0.5 points after correction. *(The 3% is applied as ±1.5% per side: a single
-    sensor reading 3% off gravity is indistinguishable from a faulty one and is correctly
-    refused by the acceptance guard — which test 13 asserts.)*
+    drops to <0.5 points after correction. *(The 3% is applied as ±1.5% per side; since the
+    2026-08-04 widening of the stillness guard from 2% to **6%** (§3.8) either split would now
+    calibrate — the symmetric one keeps the fixture's `m5` math simple. This parenthetical was
+    the last remaining description of the old 2% guard; corrected 2026-08-06.)*
 13. **Calibration rejection** — a "still" window containing movement (`|ω|` > 5 °/s), or a
     sensor reading `|a|` = 8.0 m/s², must leave the previous values in place: `calibrate()`
     returns `None`, and automatic detection never accepts the window.
@@ -1545,11 +1679,19 @@ presented to a trainer as a finding — only as a trend with the `unvalidated` f
 19. **Mid-run sensor fault** — kill one sensor of a 3-device set for 2 s: the affected device
     falls to its §8 degraded row, **other devices are bit-identically unaffected**, and on
     reconnect `m1` returns within noise of a slot that stayed live (≤1.2× — measured 1.10×).
-20. **Slot exhaustion** — a 6th device with `MAX_DEVICES = 5` is dropped and counted, never
-    mixed into an existing slot.
+20. **Slot exhaustion** — a 6th device with `MAX_DEVICES = 5` is dropped and counted **when all
+    five are live**, never mixed into an existing slot; when one of the five is *offline* the
+    6th **displaces the longest-silent** of them instead (§7.2). Both halves are pinned:
+    `test_max_devices_cap_drops_extra_live_devices`, `test_new_device_displaces_an_offline_one`,
+    plus `test_evict_stale_releases_slots`.
 21. **State snapshot round-trip** — snapshot mid-session, restart, restore: `dose`/`accL`/`accR`
-    resume with the correct elapsed decay applied, and `R_base` survives. A restore with
+    resume with the correct elapsed decay applied. A restore with
     `now − last_tick_t > SESSION_GAP_S` must discard and start fresh (§7.4).
+    ⚠️ *As shipped (checked 2026-08-06), `test_snapshot_round_trip_applies_elapsed_decay` asserts
+    only the **dose/pool half**: each pool ages at its own half-life, the slow pool survives, and
+    an over-long gap is refused. The "`R_base` survives" half is **neither implemented nor
+    pinned** — see the `r_mask` note in §7.4 — so it has been dropped from the claim above rather
+    than left as an untested promise.*
 22. **Calibration key stability** — snapshot with devices in one slot order, restore with the
     order permuted; each sensor must receive **its own** `k`/`gyro_bias`/`sigma` (§7.4).
 23. **Radians guard** — feed a known `ω` and `a`; assert `m2` matches the closed-form
@@ -1620,13 +1762,13 @@ topology.
 | 13 | **`A_DOSE_REF` / `W_DOSE_REF` and the §4 bounds are anchored to a SYNTHETIC gait generator, not to this device.** They set the whole scale of `m3` and where every activity lands on `m1`/`m2`. The only real capture (`squats.bin`) is 16 s of gentle squatting and now reads ~0 throughout (§6.4), so it cannot anchor them | **before trusting any absolute value** | **Open — tooling ready.** `scripts/calibrate_capture.py` replays a real worn capture through the shipped `compute()` and prints the cube-mean statistics each constant needs. Needs one session with walking, running and jumping, plus rough per-movement timestamps |
 | 11 | **Packet loss degrades `m1` far harder than expected, and pushes `m2` the *wrong way*.** Measured 2026-08-03 by replaying `squats.bin` through `compute()` with per-sample random drop (squat phase, vs the 0% arm): 5% loss → `m1` −49%, `m2` **+34%**; 20% → `m1` −65%, `m2` **+42%**; 50% → `m1` −80%, `m3` −99%; 70% → all metrics collapse (composite −97%). `m1` falls because it is `p90` *within* a tick and a thinned tick under-estimates the peak; `m2` **rises** because the rate-adaptive `α = 1 − exp(−Δt/τ)` grows with the widened sample spacing, so the low-pass smooths less and more jerk survives. Per-sample uniform drop is the harshest model — real UDP loss is bursty, so these are an upper bound on the damage | before trusting any absolute metric on a lossy link | **Open.** Aggregates must not be compared across quality regimes |
 | 12 | **`quality` ≈ 0.35 is probably not 65% packet loss.** The live 11-minute session read `quality` 0.35 yet produced coherent, well-ordered metrics (walking 29, jumps 56, intervals 77). Item 11 shows that a *genuine* 65–70% per-sample loss drives the composite to ~0.4 — three orders of magnitude away from what was observed. Since `quality` is a ratio against the **configured** `EXPECTED_INPUT_HZ` (changed 600 → 640 on 2026-08-02), a low reading is equally consistent with real loss and with that constant being too high. **A 0%-loss simulator control arm settles it in ten minutes** and should be run before any hardware work is done on the strength of the 0.35 figure | before acting on the loss figure | **Open — cheap to close** |
-| 10 | **`m4`/`m5` have no real-data validation** — the only capture has 19.9 s of movement vs their 60 s / 30 s warm-ups. Shipping on synthetic fixtures by user decision; flagged `unvalidated` in code and surfaced in `/api/health` | **S1-T15 step 4** | §11.1 — needs one ≥10-min session with a deliberate fatigue block to close |
-| 4 | `m4` direction — is transmission drift up or down under fatigue for *this* population? Signed `R` is retained in `raw` to answer this | post-MVP | Currently direction-agnostic (§5.4) |
+| 10 | **`m4`/`m5` have no real-data validation** — the only capture has 19.9 s of movement vs their **120 s** (60 s settle + 60 s in-band lock) / 30 s warm-ups. Shipping on synthetic fixtures by user decision; flagged `unvalidated` in code and surfaced in `/api/health` | **S1-T15 step 4** | §11.1 — needs one ≥10-min session with a deliberate fatigue block to close |
+| 4 | `m4` direction — is transmission drift up or down under fatigue for *this* population? | post-MVP | **Moot since the 2026-08-03 tremor rebuild:** `m4` is **directional** (`drift = tremor/base − 1`, clamped at 0) and the literature *does* fix the sign of tremor. `raw.R` is now the unsigned tremor fraction, not a signed transmission ratio (§5.4) |
 | 5 | UI claims language (§2) — "Injury Risk" as a product name vs. the evidence on composite validity | stage 3 frontend session | Flagged for your decision |
 | 6 | Confirm no device ships a different full-scale range | before multi-device trials | ±16 g / ±2000 °/s assumed (user: **keeping ±16 g**) |
 | 7 | ~~Session-state persistence~~ | — | **CLOSED — user approved.** Specified as required in §7.4 (1 Hz Redis snapshot, ~200 B/device, decay applied on restore) |
 | 8 | ~~Calibration UX — who triggers it, and how the athlete is told to stand still~~ | — | **CLOSED — user decision, supersedes the deferral.** Nobody triggers it: automatic still-detection, every session, with last-known-good carried across sessions (§3.8). The UI's only job is to render `uncalibrated` / `carried_over` / `cal_failed` and mark the step change |
-| 9 | Slot-table sizing: `MAX_DEVICES` (5) is fixed at startup (§7.2). Raising it needs an ingest restart — acceptable for MVP | post-MVP | Devices beyond the cap are dropped and counted |
+| 9 | Slot-table sizing: `MAX_DEVICES` (5) is fixed at startup (§7.2). Raising it needs an ingest restart — acceptable for MVP | post-MVP | At the cap a new device **displaces the longest-silent offline device**; it is dropped and counted only when all tracked devices are live (refined 2026-08-06, §7.2) |
 
 ### References
 

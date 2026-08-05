@@ -28,15 +28,23 @@ GYRO_DPS_PER_COUNT = 1.0 / GYRO_LSB_PER_DPS             # 6.1035e-2
 # --- saturation (SPEC Section 3.7) ------------------------------------------
 # int16 clips at +-32767. A sample is "saturated" when ANY axis is within 1% of
 # full scale. Saturated samples are counted, not discarded -- a clipped impact
-# is still a real large impact -- but a window with too many of them suppresses
-# m1/m2 rather than reporting a silently truncated peak.
+# is still a real large impact -- and a window with too many of them marks m1/m2
+# as LOWER BOUNDS rather than reporting a silently truncated peak.
+#
+# CHANGED 2026-08-03: suppression to null was REPLACED by the lower-bound
+# marking. Above the fraction below, m1/m2 are still reported and the
+# `saturated` flag is set so the UI renders them as ">= x"; they are no longer
+# suppressed. Suppressing removed Impact and Loading Rate exactly when load was
+# highest, and took the composite's demand term with them (SPEC 3.7).
 FS_COUNTS = 32767.0
 SAT_THRESHOLD_COUNTS = 0.99 * FS_COUNTS
 
-# Fraction of saturated samples above which m1/m2 are suppressed.
+# Fraction of saturated samples above which m1/m2 are marked as lower bounds.
+# The NAME is historical -- it dates from when this threshold suppressed them to
+# null -- and is kept so the constant does not churn across the codebase.
 # NOTE: borrowed, not derived. Comes from a gyroscope clipping study on
 # foot-mounted running sensors (cumulative error stays <5% below this fraction)
-# and applied here to accelerometer suppression on the shank. Plausible but
+# and applied here to the accelerometer on the shank. Plausible but
 # unvalidated for this use -- retune once real running data exists.
 SAT_SUPPRESS_FRACTION = 0.026
 

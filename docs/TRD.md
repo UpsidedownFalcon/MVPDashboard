@@ -121,7 +121,8 @@ assumes the exact rate: it measures per-sensor rate live and computes quality ag
 3. **Clock alignment:** per `(device, source)`, maintain `offset = server_recv_time −
    device_ts` as a rolling minimum (least-queued packets) with slow drift tracking;
    map all samples to server time. Offset jump > `RESET_OFFSET_JUMP_S` (default 5s)
-   ⇒ device/leg rebooted ⇒ reset that source's buffers. Raw timestamps are never
+   sustained for >10 consecutive samples (`RESET_CONSECUTIVE`) ⇒ device/leg
+   rebooted ⇒ reset that source's buffers. Raw timestamps are never
    compared across sources — mapped server time is the only common clock. There is
    no explicit leg-pairing step: both legs are released into the same 60Hz tick
    window (step 5), which is what "aligned across limbs" means downstream.
@@ -264,7 +265,7 @@ numpy releases the GIL. Escape hatch if the real biomech is heavy: per-device
   with asyncpg COPY (≤300 rows). DB down ⇒ buffer caps at ~60s then drops oldest +
   counts; WS streaming unaffected.
 - **REST + WS API:** full spec in [BACKEND_SCHEMA.md](BACKEND_SCHEMA.md) §3.
-- **Auth (activated in stage 3):** bcrypt (passlib) password hashes; JWT (HS256,
+- **Auth (activated in stage 3):** bcrypt (used directly — passlib is unmaintained) password hashes; JWT (HS256,
   `JWT_SECRET`) in an httpOnly/Secure/SameSite=Lax cookie, `JWT_EXPIRE_HOURS`
   (default 24). Cookie authenticates REST and the WS handshake. Users seeded by
   `seed_users.py` from env, run by the api entrypoint on every start. Stages 1–2 *ran* all routes
@@ -272,23 +273,26 @@ numpy releases the GIL. Escape hatch if the real biomech is heavy: per-device
   `POST /api/auth/logout` and `GET /api/health/live`** — everything else, including `/debug` and
   the WS handshake, requires the cookie. The api **refuses to start without `JWT_SECRET`**.
 - **Jobs (asyncio loops in the api process):**
-  - *predict* every `PREDICT_INTERVAL_S` (default 300): per device, fit on recent
+  - *predict* every `PREDICT_INTERVAL_S` (default 60): per device, fit on recent
     `metrics_1m` composite over `PREDICT_TRAIN_WINDOW`; write one row per horizon in
-    `FUTURE_HORIZONS` to `forecasts`. **Stub tonight:** numpy linear fit, CI from
-    residual std × horizon scaling. *Model: TBD (dedicated session). Interface SET:*
-    `predict.fit(history: DataFrame) -> {horizon: (pred, ci_low, ci_high)}`.
-  - *insights* every `INSIGHT_INTERVAL_S` (default 60): evaluate a rule list over
+    `FUTURE_HORIZONS` to `forecasts` — or the span-capped `PREDICT_BOOTSTRAP_HORIZONS`
+    while a device is still on the bootstrap path. **Model:** OLS trend
+    (`trend-ols-1`, plus `trend-ols-boot-1` bootstrap) with a genuine two-sided
+    prediction interval. *Interface SET:*
+    `predict.fit(history: DataFrame, horizons: list[timedelta]) -> dict[timedelta, Forecast]`.
+  - *insights* every `INSIGHT_INTERVAL_S` (default 15): evaluate a rule list over
     window aggregates + latest forecasts; insert rows with per-rule cooldown
-    (`INSIGHT_COOLDOWN_S`, default 600) to avoid spam. **Starter rules tonight**
-    (composite threshold; rising trend + forecast crossing). *Rule catalogue &
-    thresholds: TBD.*
+    (`INSIGHT_COOLDOWN_S`, default 120) to avoid spam. **8 rules** grouped onto
+    ≤3 actions — see [ANALYTICS.md](ANALYTICS.md) §4.
 
 ## 6. Storage — SET IN STONE
 
 One TimescaleDB for everything (full DDL in [BACKEND_SCHEMA.md](BACKEND_SCHEMA.md)):
 `metrics` 60Hz hypertable (retention `METRICS_RETENTION`, default 30d) → `metrics_1m`
 continuous aggregate (kept forever; past-window queries aggregate over it at request
-time) → separate `forecasts`, `insights`, `devices`, `users` tables.
+time — except windows ≤5 min and the `INSIGHT_LIVE_WINDOW` read, which query the raw
+`metrics` table directly (the cagg is materialized-only)) → separate `forecasts`,
+`insights`, `devices`, `users` tables.
 Explicitly rejected: extra columns on `metrics` for windows/forecasts (different
 cadence, keys, and retention; constant UPDATEs would bloat Postgres).
 
@@ -300,22 +304,22 @@ Everything that connects components lives in **one root `.env`** (template:
 
 | Key | Default (test) | Notes |
 |---|---|---|
-| `DOMAIN` | dash.example.com | dashboard hostname (Caddy + cookies) |
+| `DOMAIN` | dash.example.com | dashboard hostname (Caddy only; the session cookie is host-only, no Domain attribute) |
 | `UDP_PORT` | 5005 | device ingest. **Local dev may differ** — Docker Desktop on the dev machine wedged both 5005 and 5010 (port shows bound, nothing reaches the container); the local `.env` overrides it and real-device sessions run ingest natively on the host. See README “Gotchas”. The VPS keeps 5005. |
 | `API_PORT` | 8000 | internal only (Caddy proxies) |
 | `POSTGRES_*` | db/5432/mvpdash/… | host, port, db, user, password |
 | `REDIS_URL` | redis://redis:6379/0 | |
 | `JWT_SECRET`, `JWT_EXPIRE_HOURS` | —, 24 | |
-| `SEED_USERS` | trainer:changeme | comma-sep `user:pass` pairs, seeded once |
+| `SEED_USERS` | trainer:changeme | comma-sep `user:pass` pairs, re-seeded (upserted) on every api start |
 | `EXPECTED_INPUT_HZ` | 640 | per sensor; **measured** on the real device (median inter-sample spacing 1563 us across all 4 sensors, two captures 2026-08-02). The earlier 600 was an estimate and made `quality` read ~6% low. |
 | `OUTPUT_HZ` | 60 | tick + WS + DB rate |
 | `LIMB_MAP` | JSON, see §3 | `(source,sensor) → limb` |
 | `JITTER_BUFFER_MS` | 50 | reorder window |
 | `OFFLINE_AFTER_S` | 2 | online/offline threshold |
-| `RESET_OFFSET_JUMP_S` | 5 | offset jump ⇒ reboot, reset source buffers (§4 step 3) |
+| `RESET_OFFSET_JUMP_S` | 5 | offset jump sustained for >10 consecutive samples (`RESET_CONSECUTIVE`) ⇒ reboot, reset source buffers (§4 step 3) |
 | `SESSION_GAP_S` | 300 | gap after which biomech resets accumulated load/baselines (biomech SPEC §7); deliberately ≫ `OFFLINE_AFTER_S` |
-| `PAST_WINDOWS` | `5m,30m,2h` | **3 durations. Deployment: `1h,1d,7d` recommended** (1 h ≈ the session scale at 1.3 dose half-lives, 1 d the day, 7 d a training week; 3 d is neither) — [ANALYTICS.md](ANALYTICS.md) §7. Provisional: no multi-day data exists yet |
-| `FUTURE_HORIZONS` | `10m,30m,1h` | ⚠️ **Keep these in production; the earlier `1d,3d,1w` is struck.** Accumulated dose has a 45-min half-life, so by 1 day it has decayed to ~10⁻⁴ and the "forecast" is only "returns to baseline"; the acute term is not forecastable beyond persistence at all. Forecasting this composite a week ahead is not defensible under biomech SPEC §2 — [ANALYTICS.md](ANALYTICS.md) §7 |
+| `PAST_WINDOWS` | `5m,30m,2h` | **3 durations. Deployment: `1h,1d,7d` recommended** (1 h ≈ the session scale — about 4 fast dose half-lives (0.7 slow), 1 d the day, 7 d a training week; 3 d is neither) — [ANALYTICS.md](ANALYTICS.md) §7. Provisional: no multi-day data exists yet |
+| `FUTURE_HORIZONS` | `10m,30m,1h` | ⚠️ **Keep these in production; the earlier `1d,3d,1w` is struck.** Accumulated dose decays in two pools — 15 min (easy) and 90 min (hard) half-lives — so by 1 day both pools are ~0 and the "forecast" is only "returns to baseline"; the acute term is not forecastable beyond persistence at all. Forecasting this composite a week ahead is not defensible under biomech SPEC §2 — [ANALYTICS.md](ANALYTICS.md) §7 |
 | `PREDICT_INTERVAL_S` / `PREDICT_TRAIN_WINDOW` | **60** / 2h | |
 | `PREDICT_BOOTSTRAP_BUCKET_S` | 15 | sub-minute bucket size for the bootstrap forecast (reads the raw hypertable before `metrics_1m` can serve the device) |
 | `PREDICT_BOOTSTRAP_WINDOW` | 15m | how far back the bootstrap reads |
@@ -330,14 +334,12 @@ Everything that connects components lives in **one root `.env`** (template:
 | `POSTGRES_HOST` / `POSTGRES_PORT` | db / 5432 | expanded from the `POSTGRES_*` row above, which listed no per-key defaults |
 | `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD` | mvpdash / mvpdash / changeme | password is a placeholder — real value only in `.env`, never committed |
 | `JWT_EXPIRE_HOURS` | 24 | cookie lifetime; `JWT_SECRET` has no default on purpose (empty until stage 3) |
-| `PREDICT_TRAIN_WINDOW` | 2h | history fed to `predict.fit()`; duration syntax |
-| `INSIGHT_COOLDOWN_S` | 600 | per-rule re-fire suppression, so one condition cannot spam the feed |
 
 Duration syntax everywhere: `<int><s|m|h|d|w>`.
 
-## 8. Deployment & network — SET IN STONE (provider = Hetzner unless changed)
+## 8. Deployment & network — SET IN STONE (any Docker-capable VPS — sized ~2 vCPU / 4 GB, Ubuntu LTS)
 
-- VPS: Hetzner CX22-class (2 vCPU / 4GB, ~€5/mo), Ubuntu LTS, Docker + compose plugin.
+- VPS: 2 vCPU / 4GB, Ubuntu LTS, Docker + compose plugin.
 - DNS: Cloudflare **DNS-only (grey cloud)** A-record `dash.<domain>` → VPS IP.
   Cloudflare cannot proxy UDP, and DNS-only lets Caddy obtain Let's Encrypt certs
   with zero extra config. Devices are configured with the **raw `VPS_IP:5005`**.
@@ -366,7 +368,7 @@ Duration syntax everywhere: `<int><s|m|h|d|w>`.
 
 ## 10. Observability — SET IN STONE
 
-`GET /api/health` returns: per-device/sensor measured input rate, last_seen, tick
+`GET /api/health` returns: per-device/sensor measured input rate, tick
 output rate, and all drop counters (CRC-fail, late-drop, buffer-drop, WS-drop,
 DB-buffer-drop), plus DB/Redis connectivity. This is the first place to look when
 anything misbehaves; the frontend quality badge is driven from the same numbers.
@@ -383,7 +385,7 @@ required 21 read exactly like "device not connected" (§3).
 |---|---|---|
 | ~~5 primitives + composite definitions, units, calibration~~ | **DECIDED** — [biomech/SPEC.md](biomech/SPEC.md) (S1-T14) | — implemented in S1-T15 |
 | Asymmetry full-scale threshold (`M5_FULL_SCALE_USI`) + reference-bound calibration | biomech SPEC §13 open items | **18%** (literature-derived, Delgado-García 2025); reference bounds still provisional |
-| ~~Prediction model + CI method~~ | **DECIDED** — [ANALYTICS.md](ANALYTICS.md) §2, `model_version='trend-ols-1'` (+ `trend-ols-boot-1` for the first ~2.5–3.5 min, response flagged `provisional`) | — OLS trend with a genuine two-sided **prediction interval**. The earlier `dose-scenario-1` band was retired with the dose floor: under the current composite "if they stop now" is trivially 0 |
+| ~~Prediction model + CI method~~ | **DECIDED** — [ANALYTICS.md](ANALYTICS.md) §2, `model_version='trend-ols-1'` (+ `trend-ols-boot-1` from ~2.5–3.5 min (first forecast) until `metrics_1m` can serve the device (~11 min), response flagged `provisional`) | — OLS trend with a genuine two-sided **prediction interval**. The earlier `dose-scenario-1` band was retired with the dose floor: under the current composite "if they stop now" is trivially 0 |
 | ~~Insight rule catalogue~~ | **DECIDED** — [ANALYTICS.md](ANALYTICS.md) §4, **8 rules** grouped onto ≤3 actions | — thresholds still open: ⚠️ `composite_high`'s 85/92 were chosen against *instantaneous* composite readings. The `INSIGHT_LIVE_WINDOW` (30 s off the raw table) was added to narrow that mismatch, but re-calibration is still gated on data that does not exist |
 | Window statistic choice (mean vs peak/percentile) | needs a `metrics_1m` rebuild | ⚠️ m1/m2 are peak-hold extremes reported as **means**, m3 is an accumulator reported as a **mean** ([ANALYTICS.md](ANALYTICS.md) §5). Free to fix now (712 rows), impossible later for old buckets |
 | ~~Final UI design~~ | **DECIDED 2026-08-03** — [UIUX.md](UIUX.md) is the binding spec (design session S3-T01, from `mockup/`) | — shipped and deployed |

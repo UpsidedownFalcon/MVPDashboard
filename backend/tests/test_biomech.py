@@ -465,10 +465,11 @@ def test_held_tick_repeats_and_accumulates_no_dose():
 
 # Amplitudes here are a HARD-RUN equivalent (16 m/s^2 / 480 deg/s), not the
 # gentler `_moving` default. Since 2026-08-03 the dose power law acts on the
-# physical load ratio against A_DOSE_REF/W_DOSE_REF and M3_LO is 0.5 dose-minutes
-# (= 30 s of hard-training equivalent), so a light synthetic load accumulates a
-# real but sub-floor dose and reads m3 = 0 -- which would make these assertions
-# vacuous rather than failing. The amplitude is what changed, not the claim.
+# physical load ratio against A_DOSE_REF/W_DOSE_REF and M3_LO is 0.03
+# dose-minutes (= ~2 s of hard-training equivalent), so a light synthetic load
+# accumulates a real but sub-floor dose and reads m3 = 0 -- which would make
+# these assertions vacuous rather than failing. The amplitude is what changed,
+# not the claim.
 _HARD_A_MS2 = 16.0
 _HARD_W_DPS = 480.0
 
@@ -848,17 +849,19 @@ def test_squats_replay_golden_values():
     #
     # m3 is now 0 across the whole capture, and that is the point rather than a
     # regression. The dose power law acts on the physical load ratio against a
-    # hard-running reference, and M3_LO is 0.5 dose-minutes (= 30 s of hard
+    # hard-running reference, and M3_LO is 0.03 dose-minutes (= ~2 s of hard
     # training equivalent). This file holds 16 s of GENTLE squatting, whose
     # measured cube-mean load is ~14% of hard running; cubed and integrated that
-    # is 0.0011 dose-minutes, three orders below the floor. SPEC §5.3 already
+    # is 0.0011 dose-minutes, still ~1.5 orders below the floor (it was three
+    # orders below the 0.5 floor this comment was first written against).
+    # SPEC §5.3 already
     # argued this is the physically correct answer ("16 seconds of moderate
     # squatting genuinely is a negligible cumulative load"); the old scale said
     # 13.7/100 because its floor was 0.6 s of hard-training equivalent, so any
     # movement at all cleared it within a second.
     #
     # Consequence: this capture can no longer validate m3 or the dose-floor
-    # identity. test_sustained_load_builds_dose_and_decays_to_the_floor below
+    # identity. test_rest_reads_zero_however_much_dose_has_accumulated below
     # takes that over on a synthetic load long enough to matter.
     still, mean = phase(2, 11)
     assert mean(lambda m: m.m1) < 2.0
@@ -867,7 +870,7 @@ def test_squats_replay_golden_values():
     assert mean(lambda m: m.composite) < 2.0
 
     squat, mean = phase(16, 31)
-    # Re-measured 2026-08-03 after M1_LO_FLOOR 2.0 -> 8.0 and M2_LO 800 -> 2500.
+    # Re-measured 2026-08-03 after M1_LO_FLOOR 2.0 -> 6.0 and M2_LO 800 -> 2500.
     # This capture is 16 s of GENTLE bodyweight squatting whose peak dynamic
     # acceleration is ~3.6 m/s^2 -- below the new impact floor, and genuinely
     # below WALKING (~11 m/s^2), which is why SPEC §6.4 already noted "a squat
@@ -875,7 +878,7 @@ def test_squats_replay_golden_values():
     #
     # ⚠️ That means this capture no longer validates ANY metric numerically --
     # it validates only that a low-load activity reads low. The synthetic
-    # fixtures and test_sustained_load_builds_dose_and_decays_to_the_floor carry
+    # fixtures and test_rest_reads_zero_however_much_dose_has_accumulated carry
     # the numeric validation until a real capture with running/jumping exists
     # (docs/biomech/SPEC.md open item 13).
     assert mean(lambda m: m.m1) < 1.0                     # measured 0.04

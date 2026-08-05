@@ -200,8 +200,10 @@ class Registry:
             sensor = device.sensor(source_id, sensor_id)
             imu = batch.imu[idx]
             # Clipping is unrecoverable and a clipped impact still matters, so
-            # count it rather than dropping it; biomech suppresses m1/m2 only
-            # once the saturated fraction gets high (SPEC §3.7).
+            # count it rather than dropping it; once the saturated fraction gets
+            # high, biomech MARKS m1/m2 AS LOWER BOUNDS (the `saturated` flag,
+            # rendered ">= x") rather than suppressing them -- suppression to
+            # null was removed 2026-08-03 (SPEC §3.7).
             sensor.stats.sat_count += int(
                 (np.abs(imu) >= SAT_THRESHOLD_COUNTS).any(axis=1).sum()
             )

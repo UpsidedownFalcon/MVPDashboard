@@ -149,7 +149,7 @@ Absolute thresholds have no such property, so they are used only where the scale
 
 A rule reads `ctx.metrics` — all five primitives *and* the composite, each with its value in the
 shortest window, its baseline in the longest, its spread, its `z` and its trend — plus
-`ctx.horizons`, every projected horizon with its full scenario band. Rules are not permitted to
+`ctx.horizons`, every projected horizon with its prediction interval. Rules are not permitted to
 depend on one number: `load_spike` reports what the projection says about where it is heading,
 and `accumulated_load` combines the dose's past trend with the future residual.
 
@@ -206,7 +206,9 @@ must not drift apart again; the previous copy here still carried the pre-2026-08
 
 ### 4.4 Gating — when a rule must stay quiet
 
-Every rule that makes a claim about the *person* is gated on `ctx.trustworthy`:
+Every within-athlete deviation rule (`load_spike`, `accumulated_load`, `impact_deviation`,
+`movement_quality`) is gated on `ctx.trustworthy`; the absolute-threshold and forecast rules
+(`composite_high`, `residual_load`, `rising_risk`) are not:
 
 - **Coverage** ≥ 10% of the window, so a sliver of data cannot masquerade as a session.
 - **Quality match** between the two windows being compared (within 0.75×). Measured 2026-08-03:
@@ -340,7 +342,8 @@ remains the append-only event log, and both are served from the same table.
 ## 4bis. Earlier insight fixes
 
 - **Cooldown ranks severity.** Keyed on `(device_id, rule_id)` alone, a `composite_high`
-  *warning* swallowed a genuine *alert* arriving seconds later for the full 600 s — the
+  *warning* swallowed a genuine *alert* arriving seconds later for the full cooldown
+  (600 s at the time; 120 s now) — the
   escalation a trainer most needs to see was the one case guaranteed to be dropped.
   Suppression is now one-directional: strictly-more-severe passes, equal and lower do not.
 - **`data_quality` reports a change, not a level.** The absolute 0.8 threshold fired
@@ -361,7 +364,6 @@ trainer, which is the SPEC §2 failure mode. Deferred deliberately.
 
 | Not done | Cost |
 |---|---|
-| `coverage` field (`sum(n)/(OUTPUT_HZ × window_s)`) | A window average is uninterpretable — a full hour of data is indistinguishable from four minutes of it. One arithmetic expression, but a new API field. **Cheapest item here.** |
 | `materialized_only = false` on `metrics_1m` | The newest 1–2 min stay invisible to the 30 m and 2 h windows. Needs a migration. |
 | `count(m1..m5)` / `max(m1..m5)` columns | m1/m2/m4/m5 means stay unweighted and null-blind, and no peak/percentile statistic is available for the primitives — so m1/m2 are still reported as *means*, the wrong statistic for a peak-hold metric. Needs a cagg rebuild, which is free now (712 rows) and impossible later for old buckets (the refresh policy's 2 h `start_offset` never recomputes them). |
 | `insufficient_history` trend state | "No data" still renders as a steady arrow — a fabricated claim about an athlete, closer to a SPEC §2 concern than a cosmetic one. |
@@ -382,24 +384,26 @@ SPEC §6.3 already rules ACWR out and the current literature is firmly behind th
   separately criticised as dominated by session duration and blind to training *content*.
 
 The literature's 7 d / 28 d timescales are also for **daily session-RPE**, whereas this
-signal is a 60 Hz mechanical load whose own accumulator has a 45-minute half-life.
+signal is a 60 Hz mechanical load whose own accumulator decays in two pools, with
+15 min (easy) / 90 min (hard) half-lives.
 
 **If a multi-day term is ever added** it should follow SPEC §7.3: two *uncoupled* EWMA load
 series (τ ≈ 3.5 d and 14 d) reported **side by side and never as a ratio**, computed from
 `metrics_1m`. It is deliberately not built now — there is no multi-week data to validate it
 against, so it would ship unvalidated.
 
-## 7. Durations — recommendation, not yet applied
+## 7. Durations — forecasts applied, windows still provisional
 
-TRD §7 sets production `PAST_WINDOWS=1h,1d,3d` and `FUTURE_HORIZONS=1d,3d,1w`. Both are
-`.env` values, so changing them is configuration.
+TRD §7 now sets `FUTURE_HORIZONS=10m,30m,1h` (applied; `1d,3d,1w` struck). The
+`PAST_WINDOWS` recommendation `1h,1d,7d` is not yet applied. Both are `.env` values,
+so changing them is configuration.
 
-- **Forecasts: keep `10m,30m,1h`; strike `1d,3d,1w`.** Dose has a 45-min half-life; by one
-  day it has decayed to ~10⁻⁴ of its value and the "forecast" is just "returns to
-  baseline". The acute term is unforecastable beyond persistence. The current *test*
-  durations are the correct *production* durations.
-- **Windows: `1h, 1d, 7d`.** 1 h is the session scale (~1.3 dose half-lives), 1 d the day,
-  7 d a training week. 3 d is neither. Provisional — no multi-day data exists.
+- **Forecasts: keep `10m,30m,1h`; strike `1d,3d,1w`.** Dose decays in two pools — 15 min
+  (easy) / 90 min (hard) half-lives — so by one day both pools are ~0 and the "forecast"
+  is just "returns to baseline". The acute term is unforecastable beyond persistence. The
+  current *test* durations are the correct *production* durations.
+- **Windows: `1h, 1d, 7d`.** 1 h is the session scale (1 h ≈ 4 fast half-lives (0.7 slow)),
+  1 d the day, 7 d a training week. 3 d is neither. Provisional — no multi-day data exists.
 
 ## 8. The composite = 100 anomaly is still unexplained
 
