@@ -726,10 +726,11 @@ The transmission EMA is also advanced **only while moving** — rest ticks used 
 both limb means toward the noise floor, so a baseline locking shortly after a rest was measured
 against a partly-rest-loaded EMA.
 
-⚠️ The session snapshot is now **schema v3** (v2 replaced the scalar `R_base` with a per-band
-table; v3 split `dose` into fast/slow pools); a v1 or v2
-snapshot is *rejected* rather than partly applied, since restoring a single-band baseline would
-reintroduce the confound the bands exist to remove (§7.4).
+⚠️ The session snapshot is now **schema v4** (v2 replaced the scalar `R_base` with a per-band
+table; v3 split `dose` into fast/slow pools; v4 added the per-band `r_mask` lock-time limb sets,
+2026-08-06). A v1 or v2 snapshot is *rejected* rather than partly applied, since restoring a
+single-band baseline would reintroduce the confound the bands exist to remove; a v3 snapshot is
+accepted with its `m4` baselines dropped (§7.4).
 
 **Result on the activity ladder:** `m4` now reads **4–14 across steady walking through sprinting**
 and ~31 on irregular landing work, i.e. near its nominal 0 when movement is consistent — which is
@@ -1338,18 +1339,20 @@ is O(1) scalars, so persisting it is cheap. **Confirmed required by the user.**
 | `cal_src[limb_name]` | str | `default` / `carried` / `measured` — calibration provenance (§3.8) |
 | `dose_fast`, `dose_slow` | float | the TWO dose pools (§5.3). **These are what `restore()` actually rebuilds from**, each decayed at its own half-life; the `dose` field above is an informational total |
 | `move_t`, `asym_t` | float | movement-time accumulators — `move_t` gates m4's settle, `asym_t` is m5's 30 s warm-up gate |
-| `schema_version` (`v`) | int | **currently 3**; reject-and-restart on mismatch. Both v1 **and v2** are rejected — v2 predates the fast/slow dose split, so its single `dose` scalar cannot be restored into two pools |
+| `r_mask[]` | list | **v4 (2026-08-06):** each band's lock-time limb set, serialised as **limb names** (never slot indices, same argument as `cal`) |
+| `schema_version` (`v`) | int | **currently 4**; v3 is still accepted with its `m4` baselines dropped (see below); v1/v2 are rejected — v2 predates the fast/slow dose split, so its single `dose` scalar cannot be restored into two pools |
 
-⚠️ **Note 2026-08-06 — `r_mask[]` is NOT in the snapshot, so `m4`'s band baseline does not
-usefully survive a restore.** `m4` freezes whenever the active limb set differs from the mask its
-baseline locked on (§5.4), which makes the mask part of the baseline. `snapshot()` writes
-`r_base`/`r_sum`/`r_time` but **not** `r_mask`; `restore()` rebuilds `r_base` and leaves `r_mask`
-at `[None] × M4_BANDS`. Every subsequent tick in a restored band therefore compares the live mask
-against `None`, takes the freeze branch, and — because `r_base` is *not* `None` — never re-learns
-either: `m4` emits nothing for that band, with no `warming_up` flag, until the athlete works in a
-band whose baseline was never locked. Effectively **`m4` re-warms (at best) across a restart**,
-which is not what the paragraph above implies. Not fixed in the shipped code; it is also why
-test 21 pins only the dose/pool half of the round trip.
+✅ **Fixed 2026-08-06 — `r_mask[]` now rides the snapshot (schema v4), so `m4`'s band baseline
+survives a restore.** `m4` freezes whenever the active limb set differs from the mask its baseline
+locked on (§5.4), which makes the mask part of the baseline. Before the fix `restore()` rebuilt
+`r_base` but left `r_mask` empty, so every restored band took the freeze branch forever — `m4`
+emitted nothing, with no `warming_up` flag, for the rest of the session. Now the mask is
+serialised by limb name and restored with the baseline; a **v3** snapshot (no masks) is still
+accepted but its `r_base` entries are dropped so the bands re-learn instead of freezing — a
+baseline is never restored without its mask. Only the (un-snapshotted) intensity EMA re-warms
+after a restart, so `m4` resumes within ~30–60 s. Pinned by
+`test_m4_baseline_survives_snapshot_restore` and
+`test_v3_snapshot_restores_dose_but_drops_m4_baselines`.
 
 🚩 **Calibration MUST be keyed on the limb name (equivalently the sensor triple it is mapped
 from), never on the slot index.** Slots are the **sorted `LIMB_MAP` limb names** (§7.2) — the
@@ -1475,15 +1478,15 @@ Any individual flag must show the component panel that drove it (§2).
    | `cal_failed` | a calibration attempt hit a validity guard and was rejected; last-known-good stands and detection continues |
    | **`unvalidated`** | **`m4`/`m5` — synthetic fixtures only, no real-data validation (§11.1). Set whenever `m4` or `m5` actually emits a value; a tick where both are `null` carries no `unvalidated` flag, because there is no unvalidated number on screen to qualify.** |
 
-   ⚠️ **Note 2026-08-06 — `warming_up` and `degraded_sensors` are CONFLATED for shank-only and
-   thigh-only rigs.** The shipped gate that chooses between them (`pair_live`, `biomech.py`
-   ~1362) still requires a **shank *and* a thigh** to have streamed, which is a leftover of the
-   transmission-ratio era: `m4` has needed only one streaming limb since the 2026-08-03 tremor
-   rebuild (§5.4, §8). So a both-shanks or both-thighs rig gets `degraded_sensors` — "this value
-   is never coming" — while `m4` is in fact simply **warming**, and does emit once its band locks.
-   The distinction the two flags exist to draw is therefore wrong for exactly those configs.
-   Behaviour is intentionally unchanged for now; the 4-sensor rig, which is what the product
-   ships against, is unaffected.
+   ✅ **Fixed 2026-08-06 — the stale `pair_live` gate is gone.** The gate that chose between
+   `warming_up` and `degraded_sensors` for a null `m4` used to require a **shank *and* a thigh**
+   to have streamed — a leftover of the transmission-ratio era, wrong since the 2026-08-03 tremor
+   rebuild made one streaming limb sufficient (§5.4, §8). It now reads `warming_up` whenever ANY
+   mapped limb has ever streamed (`ema_seen.any()`), and `degraded_sensors` only when nothing has.
+   Note the flags are **per-device unions**: a both-shanks rig now correctly shows `warming_up`
+   (m4 is coming) *alongside* `degraded_sensors` (m5's both-sides gate genuinely is never
+   satisfied with dead thighs) — both are true. Pinned by
+   `test_partial_rig_m4_warms_up_and_arrives`.
 
    ⚠️ **Note 2026-08-05 (demo posture) — `unvalidated` is emitted but NOT displayed.** The flag
    is still set on the wire exactly as specified above, and `/api/health` still surfaces it, but
@@ -1687,11 +1690,10 @@ presented to a trainer as a finding — only as a trend with the `unvalidated` f
 21. **State snapshot round-trip** — snapshot mid-session, restart, restore: `dose`/`accL`/`accR`
     resume with the correct elapsed decay applied. A restore with
     `now − last_tick_t > SESSION_GAP_S` must discard and start fresh (§7.4).
-    ⚠️ *As shipped (checked 2026-08-06), `test_snapshot_round_trip_applies_elapsed_decay` asserts
-    only the **dose/pool half**: each pool ages at its own half-life, the slow pool survives, and
-    an over-long gap is refused. The "`R_base` survives" half is **neither implemented nor
-    pinned** — see the `r_mask` note in §7.4 — so it has been dropped from the claim above rather
-    than left as an untested promise.*
+    *`test_snapshot_round_trip_applies_elapsed_decay` asserts the dose/pool half: each pool ages
+    at its own half-life, the slow pool survives, and an over-long gap is refused. The
+    "`R_base` survives" half is pinned since 2026-08-06 by
+    `test_m4_baseline_survives_snapshot_restore` (see the `r_mask` entry in §7.4).*
 22. **Calibration key stability** — snapshot with devices in one slot order, restore with the
     order permuted; each sensor must receive **its own** `k`/`gyro_bias`/`sigma` (§7.4).
 23. **Radians guard** — feed a known `ω` and `a`; assert `m2` matches the closed-form

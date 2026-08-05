@@ -672,12 +672,17 @@ class _Sess:
     # --- SPEC Section 7.4 snapshot ------------------------------------------
     def snapshot(self) -> dict:
         return {
+            # v4: adds `r_mask` (2026-08-06). Restoring `r_base` WITHOUT the
+            #     lock-time limb mask left the mask empty, which never matches
+            #     the live limb set -- m4 froze for the rest of the session.
+            #     A v3 snapshot is still accepted; its baselines are dropped so
+            #     the bands re-learn instead of freezing.
             # v3: `dose` split into fast/slow pools (Section 5.3).
             # v2: m4's single `R_base` scalar became a per-intensity-band table.
             # A v1 snapshot is REJECTED rather than partly applied -- restoring a
             # baseline learned under the old single-band rule would reintroduce
             # exactly the activity-change confound the bands exist to remove.
-            "v": 3,
+            "v": 4,
             "dose": self.dose,          # informational total; restore uses the pools
             "dose_fast": self.dose_fast,
             "dose_slow": self.dose_slow,
@@ -688,6 +693,13 @@ class _Sess:
             "r_sum": list(self.r_sum),
             "r_time": list(self.r_time),
             "r_base": list(self.r_base),
+            # Keyed by LIMB NAME (like `cal` below), never by slot index, so a
+            # LIMB_MAP change between sessions cannot silently misalign a mask.
+            "r_mask": [
+                [limb for limb, on in zip(self.limbs, m) if on]
+                if m is not None else None
+                for m in self.r_mask
+            ],
             "last_tick_t": self.last_tick_t,
             "session_start_t": self.session_start_t,
             # Keyed by LIMB NAME, never by slot index: slots are assigned
@@ -698,7 +710,7 @@ class _Sess:
         }
 
     def restore(self, snap: dict, now: float, session_gap_s: float) -> bool:
-        if snap.get("v") != 3:
+        if snap.get("v") not in (3, 4):
             return False
         last = snap.get("last_tick_t")
         if last is None or now - last > session_gap_s:
@@ -715,6 +727,27 @@ class _Sess:
         self.r_sum = (list(snap.get("r_sum") or []) + [0.0] * n)[:n]
         self.r_time = (list(snap.get("r_time") or []) + [0.0] * n)[:n]
         self.r_base = (list(snap.get("r_base") or []) + [None] * n)[:n]
+        masks = snap.get("r_mask")
+        if masks is None:
+            # v3 snapshot: no lock-time limb masks. A restored baseline with an
+            # empty mask never matches the live limb set, which used to freeze
+            # m4 for the rest of the session (fixed 2026-08-06). Drop the
+            # baselines instead -- the bands re-learn in 60 s of movement, and
+            # the dose/asymmetry accumulators above are what actually matter.
+            self.r_base = [None] * n
+            self.r_mask = [None] * n
+        else:
+            masks = (list(masks) + [None] * n)[:n]
+            self.r_mask = [
+                tuple(limb in set(m) for limb in self.limbs)
+                if m is not None else None
+                for m in masks
+            ]
+            # A band with a baseline but no mask would freeze exactly like the
+            # v3 case -- never restore one without the other.
+            for i in range(n):
+                if self.r_mask[i] is None:
+                    self.r_base[i] = None
         self.last_tick_t = last
         self.session_start_t = snap.get("session_start_t")
         src = snap.get("cal_src") or {}
@@ -1363,32 +1396,22 @@ def compute(
             # streaming, not when one leg of a pair drops out.
             flags.add("partial")
     if sess.r_base[band] is None:
-        # 🚩 STALE GATE, behaviour intentionally unchanged. `pair_live` still
-        # demands a shank AND a thigh, which was right for the old shank/thigh
-        # TRANSMISSION RATIO. The tremor index that replaced it on 2026-08-03
-        # needs only ONE streaming limb, so this OVER-REPORTS `degraded_sensors`:
-        # a both-shanks or both-thighs rig gets "this value is never coming"
-        # while m4 is in fact simply warming and will emit once its band locks.
-        # The two states are conflated for exactly those configs. The 4-sensor
-        # rig the product ships against is unaffected, which is why this is
-        # documented rather than changed (SPEC Section 10).
-        #
-        # If either limb is unmapped OR mapped but never
-        # actually streamed (flat battery, bad strap), no baseline can ever lock
-        # -- a permanently degraded sensor set, not a warm-up. Flagging it
-        # `warming_up` tells the UI to keep waiting for a value that is never
-        # coming. `ema_seen` is the has-ever-produced-data record: testing the
-        # static role indices alone caught only the unmapped case, so a dead
-        # thigh still read `warming_up` for the whole session.
+        # FIXED 2026-08-06: this gate used to demand a live shank AND thigh
+        # (`pair_live`), which was right for the old shank/thigh TRANSMISSION
+        # RATIO but over-reported `degraded_sensors` for the tremor index that
+        # replaced it on 2026-08-03 -- a both-shanks or both-thighs rig read
+        # "this value is never coming" while m4 was in fact simply warming.
+        # The tremor fraction averages over whatever limbs stream, so m4 is
+        # coming as long as ANY mapped limb has ever produced data
+        # (`ema_seen`); only a rig where nothing has ever streamed can never
+        # lock a baseline.
         #
         # Per BAND: entering a new intensity for the first time is a genuine
-        # warm-up for that band, and m4 is null until it has 60 s there. That is
-        # the honest answer -- the alternative is comparing against an unrelated
-        # activity, which is what pinned m4 at 100.
-        pair_live = (len(shank_i) and len(thigh_i)
-                     and bool(sess.ema_seen[shank_i].all())
-                     and bool(sess.ema_seen[thigh_i].all()))
-        flags.add("warming_up" if pair_live else "degraded_sensors")
+        # warm-up for that band, and m4 is null until it has 60 s there. That
+        # is the honest answer -- the alternative is comparing against an
+        # unrelated activity, which is what pinned m4 at 100.
+        flags.add("warming_up" if bool(sess.ema_seen.any())
+                  else "degraded_sensors")
 
     # m5: wUSI over decaying accumulators. Both the per-tick noise weighting
     # (where the units match) and the both-sides gate are load-bearing -- SPEC

@@ -13,6 +13,7 @@ reintroduce while "simplifying":
 
 from __future__ import annotations
 
+import json
 import math
 import time
 
@@ -426,26 +427,30 @@ def test_noise_weight_never_subtracts_from_the_accumulators():
     )
 
 
-def test_no_thigh_mapped_is_degraded_not_warming_up():
-    """R_base can never lock without a thigh, so it is not a warm-up (SPEC §10).
+def test_no_thigh_mapped_still_warms_m4_and_flags_degraded():
+    """A shanks-only LIMB_MAP: fewer sensors than the full rig, but m4 IS coming.
 
-    `warming_up` tells the UI a value is coming. With no thigh sensor in
-    LIMB_MAP, m4 is permanently unavailable — a degraded sensor set. Flagging
-    it `warming_up` leaves the UI waiting forever for m4.
+    HISTORY: this test used to assert `warming_up` was ABSENT because "m4 can
+    never lock without a thigh" — true for the shank/thigh transmission ratio,
+    false since the 2026-08-03 tremor rebuild (the degradation ladder pins
+    m4 = available for exactly this limb set). The stale `pair_live` gate that
+    enforced the old premise was removed 2026-08-06. `degraded_sensors` stays
+    (fewer limbs than the full rig is a real statement about the sensor set);
+    `warming_up` now honestly rides alongside it until m4's 120 s lock.
     """
     limbs = ("left_shin", "right_shin")
     state: dict = {}
     last = None
-    for k in range(60 * 70):                     # past both warm-ups
+    for k in range(60 * 70):                     # inside m4's 120 s warm-up
         a, w = _moving(k)
         frames, times = make_tick(a, w, limbs=limbs, t0=k * NS / FS)
         last = compute(frames, state, times)
 
-    assert last.m4 is None, "m4 cannot exist without a thigh sensor"
+    assert last.m4 is None, "still inside the 120 s warm-up at 70 s"
     assert last.m5 is not None, "m5 should still emit from the two shanks"
     assert "degraded_sensors" in last.flags
-    assert "warming_up" not in last.flags, (
-        "a metric that can never emit is degraded, not warming up"
+    assert "warming_up" in last.flags, (
+        "m4 is genuinely coming on a shanks-only map — never say 'never'"
     )
 
 
@@ -729,6 +734,101 @@ def test_snapshot_round_trip_applies_elapsed_decay():
     stale: dict = {}
     assert not biomech.restore(stale, snap, LIMBS, snap["last_tick_t"] + 999.0, 300.0), \
         "a gap longer than SESSION_GAP_S must start a fresh session"
+
+
+def test_m4_baseline_survives_snapshot_restore():
+    """The 2026-08-06 fix: `r_mask` rides the snapshot (schema v4), so a
+    mid-session ingest restart no longer silently kills m4.
+
+    Before the fix restore() rebuilt `r_base` but left `r_mask` empty, so the
+    mask-changed FREEZE branch fired on every subsequent tick: m4 emitted
+    nothing — with no `warming_up` flag — for the rest of the session. The
+    assertion window is the discriminator: a restored baseline re-emits as
+    soon as the (un-snapshotted) intensity EMA re-enters the locked band
+    (~30-60 s); a dropped one would need a further 60 s in-band re-learn on
+    top, and the frozen one never emits at all.
+    """
+    state: dict = {}
+    _drive(lambda k: _moving(k), 60 * 130, state)     # locks the m4 baseline
+    pre, _ = _drive(lambda k: _moving(k), 5, state)
+    assert pre[-1].m4 is not None, "fixture must lock m4 before the snapshot"
+
+    # production round-trips the snapshot through JSON — do the same
+    snap = json.loads(json.dumps(biomech.snapshot(state)))
+    assert snap["v"] == 4
+    assert any(m for m in snap["r_mask"]), "the locked band's mask must persist"
+
+    fresh: dict = {}
+    assert biomech.restore(fresh, snap, LIMBS, snap["last_tick_t"] + 10.0, 300.0)
+    t0 = 60 * 135 * NS / FS + 10.0                    # continue the timeline
+    emitted = False
+    for k in range(60 * 70):
+        a, w = _moving(k)
+        frames, times = make_tick(a, w, t0=t0 + k * NS / FS)
+        if compute(frames, fresh, times).m4 is not None:
+            emitted = True
+            break
+    assert emitted, (
+        "m4 must resume shortly after a warm restart — the restored "
+        "baseline+mask match the same limb set, so only the intensity EMA "
+        "needs to re-warm"
+    )
+
+
+def test_v3_snapshot_restores_dose_but_drops_m4_baselines():
+    """A pre-r_mask (v3) snapshot must degrade gracefully: keep the dose and
+    asymmetry accumulators, drop the m4 baselines so the bands re-learn —
+    never restore a baseline without its mask, which is the freeze bug."""
+    state: dict = {}
+    _drive(lambda k: _moving(k), 60 * 130, state)
+    snap = biomech.snapshot(state)
+    assert snap["dose"] > 0.0
+    snap["v"] = 3
+    snap.pop("r_mask")
+
+    fresh: dict = {}
+    assert biomech.restore(fresh, snap, LIMBS, snap["last_tick_t"] + 10.0, 300.0)
+    s2 = fresh["_biomech"]
+    assert all(b is None for b in s2.r_base), (
+        "v3 baselines must be dropped, not restored mask-less (they'd freeze)"
+    )
+    assert all(m is None for m in s2.r_mask)
+    assert s2.dose > 0.0, "the dose pools still survive a v3 snapshot"
+
+
+def test_partial_rig_m4_warms_up_and_arrives():
+    """Both shanks streaming, thighs dead, in the real ticker shape (all four
+    mapped limbs present every tick, dead ones empty).
+
+    m4 IS coming — the tremor index needs only one streaming limb — so its
+    warm-up must read `warming_up`. Before 2026-08-06 the stale shank+thigh
+    `pair_live` gate reported this rig as `degraded_sensors` ONLY: no
+    `warming_up` at all, i.e. "never coming" for a value that arrives two
+    minutes later. `degraded_sensors` legitimately stays present throughout —
+    m5's both-sides gate really is never satisfied with dead thighs — so the
+    fix is asserted as the PRESENCE of the warming signal plus m4's eventual
+    arrival, not the absence of the degraded one.
+    """
+    state: dict = {}
+    last = None
+    seen_warming_early = False
+    for k in range(60 * 160):
+        a, w = _moving(k)
+        frames, times = make_tick(a, w, t0=k * NS / FS)
+        for limb in ("left_thigh", "right_thigh"):
+            frames[limb] = np.empty((0, 6), dtype=np.float32)
+            times[limb] = np.empty(0, dtype=np.float64)
+        last = compute(frames, state, times)
+        if k == 60 * 30:                     # inside the 120 s m4 warm-up
+            assert last.m4 is None, "still warming at 30 s — fixture sanity"
+            seen_warming_early = "warming_up" in last.flags
+    assert seen_warming_early, (
+        "a live-but-partial rig must signal warming (m4 is coming) — the "
+        "stale pair gate reported only 'never coming'"
+    )
+    assert last.m4 is not None, (
+        "m4 must eventually arrive on a shanks-only rig in the ticker shape"
+    )
 
 
 def test_snapshot_calibration_is_keyed_by_limb_not_slot():
@@ -1245,15 +1345,23 @@ def _feed(dead: tuple[str, ...], ticks: int = 60 * 90):
     return m
 
 
-def test_thigh_dead_from_the_start_is_degraded_not_warming_up():
-    """m4 can never lock without a thigh — say so instead of waiting forever."""
-    m = _feed(("left_thigh", "right_thigh"))
+def test_thigh_dead_from_the_start_flags_degraded_and_m4_warms():
+    """Dead thighs: m5 is genuinely never coming, m4 genuinely is.
+
+    HISTORY: this test used to assert `warming_up` was ABSENT, on the premise
+    that "m4 can never lock without a thigh" — true for the shank/thigh
+    transmission ratio, false since the 2026-08-03 tremor rebuild (one
+    streaming limb suffices; test_partial_rig_m4_warms_up_and_arrives pins the
+    arrival). The stale `pair_live` gate that enforced the old premise was
+    removed 2026-08-06. The flags are a per-device union, and with dead thighs
+    BOTH are now true: `degraded_sensors` for m5's unsatisfiable both-sides
+    gate, `warming_up` for m4's genuine warm-up.
+    """
+    m = _feed(("left_thigh", "right_thigh"))     # 90 s: inside m4's 120 s warm-up
     assert m.m4 is None
-    assert "degraded_sensors" in m.flags
-    assert "warming_up" not in m.flags, (
-        "`warming_up` tells the UI a value is coming; with no thigh sensor "
-        "R_base can never lock and none ever will"
-    )
+    assert m.m5 is None
+    assert "degraded_sensors" in m.flags, "m5 really is never coming"
+    assert "warming_up" in m.flags, "m4 really is coming — never say 'never'"
 
 
 def test_one_side_dead_from_the_start_flags_m5():
