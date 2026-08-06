@@ -128,6 +128,26 @@ export interface CurrentAdvice {
   actions: AdviceAction[]
 }
 
+/** One age bucket of the advice timeline. `window` is "live" or a PAST_WINDOWS
+ *  label ("5m", "30m", "2h") — config strings, never hardcoded durations. */
+export interface AdviceBucket {
+  window: string
+  actions: AdviceAction[]
+}
+
+/** /api/insights/timeline — the reload-safe advice history (2026-08-06):
+ *  /current's live actions plus stored insights bucketed over the same
+ *  PAST_WINDOWS as the historical metrics. Buckets arrive newest-first,
+ *  actions newest-first within each; ≤ max_actions per bucket. */
+export interface AdviceTimeline {
+  device_id: string
+  generated_at: string
+  hold_s: number
+  max_actions: number
+  windows: string[]
+  buckets: AdviceBucket[]
+}
+
 export interface Recent {
   device_id: string
   t0: string | null
@@ -197,6 +217,8 @@ export const fetchInsights = (dev?: string, limit = 20) =>
 /** device is REQUIRED — advice is per athlete. */
 export const fetchCurrentAdvice = (dev: string) =>
   request<CurrentAdvice>(`/api/insights/current?device=${dev}`)
+export const fetchAdviceTimeline = (dev: string) =>
+  request<AdviceTimeline>(`/api/insights/timeline?device=${dev}`)
 export const fetchRecent = (dev: string, seconds: number) =>
   request<Recent>(`/api/metrics/recent?device=${dev}&seconds=${seconds}`)
 

@@ -156,21 +156,45 @@ muted text + transparent border, active = accent text + accent hairline border +
 5% wash (segmented controls use 7%); proper `tablist`/`tab`/`tabpanel` roles,
 arrow-key navigation):
 
-1. **Insights** — the advice standing right now, as cards. Source:
-   `GET /api/insights/current?device` (poll 10 s, `POLL_ADVICE_MS`), which is
-   already grouped, deduped, severity-ranked and capped at 3 server-side —
-   **the client must not repeat any of that**. Because that route deliberately
-   drops `context` and the long `rationale`, the panel also fetches
-   `GET /api/insights?device&limit=50` and joins on `(rule_id, created_at)`
+1. **Insights** — the advice **timeline** (since 2026-08-06), as one flat
+   chronological stack of cards. Source: `GET /api/insights/timeline?device`
+   (poll 10 s, `POLL_ADVICE_MS`), which is already bucketed by age over the
+   same `PAST_WINDOWS` as the History tab, grouped, deduped, capped at
+   ≤ `INSIGHT_MAX_ACTIONS` per time base and ordered server-side — **the
+   client must not repeat any of that**. This is what makes advice survive a
+   page reload: insights were always persisted (`/api/insights`), the panel
+   just used to read only the 150 s "currently standing" view. Because the
+   route drops `context` and the long `rationale`, the panel also fetches
+   `GET /api/insights?device&limit=100` and joins on `(rule_id, created_at)`
    purely to recover evidence.
+
+   **Stack rules — SET:**
+   - **No time toggle** (unlike History). All cards stack; the age reads off
+     the card itself.
+   - **Chronological**: latest at the top, oldest at the bottom — buckets
+     arrive newest-first (`live`, then `past 5m / 30m / 2h`) and cards are
+     newest-first within each bucket.
+   - **Top-right age label**: the card's time base — `live`, or
+     `windowLabel()` of its bucket ("past 5m"…), never a hardcoded duration;
+     the exact timestamp + "updated Ns ago" live in the hover tooltip.
+   - **≤ 3 cards per time base** (`INSIGHT_MAX_ACTIONS`, server-enforced).
+   - **Left edge = severity hue faded by age**: the 3px border keeps the
+     severity colour but its strength steps down per bucket
+     (`color-mix(severity, transparent)`, live = 100% → oldest ≈ 32%,
+     recomputed from the bucket count so a `PAST_WINDOWS` change reshapes the
+     ramp automatically). Lightest = newest, darkest = oldest.
+   - The **same action may recur in several buckets** — a condition that kept
+     firing is a story, not a duplicate; keys are bucket-qualified.
 
    **Card anatomy, in order** — the first line is what to do, so the eye lands
    on the action before anything else:
-   1. severity chip + icon (§6) and "updated Ns ago" (demo posture 2026-08-05:
-      the `unvalidated metric` chip is not rendered; `action.unvalidated` still
-      arrives from the API for when validation exists);
+   1. severity chip + icon (§6) and the age label top right (demo posture
+      2026-08-05: the `unvalidated metric` chip is not rendered;
+      `action.unvalidated` still arrives from the API for when validation
+      exists);
    2. **the action as a large bold headline** (22px/700, primary ink — colour
-      lives in the chip and the 3px severity left border, never the text);
+      lives in the chip and the 3px age-faded severity left border, never the
+      text);
    3. **blank vertical space — no separator rule** (an `<hr>` here reads as a
       divide between two things rather than one card);
    4. the rationale as ordinary sentences, one paragraph per supporting reason,
@@ -180,7 +204,7 @@ arrow-key navigation):
       identical every firing;
    6. the **Evidence expander** (`<details>`) over the joined `context`.
 
-   Empty `actions` is a calm empty state, never a warning — it is the normal
+   An empty timeline is a calm empty state, never a warning — it is the normal
    early-session condition. `aria-live="polite"` announces new advice.
 2. **History** (`GET /api/metrics/history?device&window`, poll 60 s) — a period
    selector row at the top: one segmented control listing the configured
@@ -503,7 +527,7 @@ checks PASS (lightness band, chroma, CVD ΔE worst adjacent 8.4, normal-vision
 | History tab | `GET /api/metrics/history` (window ∈ `PAST_WINDOWS`) | 60 s poll |
 | detail-page period labels, trend arrow, coverage chip | `GET /api/metrics/windows` | 60 s poll |
 | insight chip on an Overview panel | `GET /api/insights?device&limit=5` (device-scoped) | 30 s poll (`POLL_INSIGHTS_MS`) |
-| Insights tab (the advice cards) | `GET /api/insights/current` **+** `GET /api/insights?limit=50` (evidence join on `(rule_id, created_at)`) | 10 s poll (`POLL_ADVICE_MS`) |
+| Insights tab (the advice timeline) | `GET /api/insights/timeline` **+** `GET /api/insights?device&limit=100` (evidence join on `(rule_id, created_at)`) | 10 s poll (`POLL_ADVICE_MS`) |
 | rename | `PATCH /api/devices/:id` | on action |
 | auth | `POST /api/auth/login|logout`, `GET /api/auth/me` | on action |
 

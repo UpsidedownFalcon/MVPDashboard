@@ -36,9 +36,13 @@ from REST or a WS close with code 4401 → redirect `/login`.
          │                                                  while bootstrapping but is not
          │                                                  surfaced — demo posture 2026-08-05,
          │                                                  UIUX §4)
-         ├─ GET /api/insights/current?device=:id           (Insights tab — the STATE view:
-         │                                                  ≤3 grouped actions, poll 10s)
-         └─ GET /api/insights?device=:id&limit=50          (evidence join for those cards,
+         ├─ GET /api/insights/timeline?device=:id          (Insights tab — the advice TIMELINE
+         │                                                  since 2026-08-06: live + stored
+         │                                                  insights bucketed over PAST_WINDOWS,
+         │                                                  ≤3 actions per bucket, poll 10s.
+         │                                                  Survives page reloads; /current
+         │                                                  remains as the pure live view)
+         └─ GET /api/insights?device=:id&limit=100         (evidence join for those cards,
                                                             same 10s. The Overview chip uses
                                                             the same route at limit=5 / 30s)
 ```
@@ -107,9 +111,13 @@ every INSIGHT_INTERVAL_S (15s), per device:
   ─▶ cooldown check (INSIGHT_COOLDOWN_S per device+rule, severity-ranked)
   ─▶ INSERT insights (append-only EVENT log)
        ├─▶ GET /api/insights            ─▶ Overview chip + the evidence join
-       └─▶ GET /api/insights/current    ─▶ the STATE view: rows inside INSIGHT_HOLD_S
-             grouped on action_id, newest row per rule, ranked, cut to
-             INSIGHT_MAX_ACTIONS (3) ─▶ the Insights tab's advice cards
+       ├─▶ GET /api/insights/current    ─▶ the STATE view: rows inside INSIGHT_HOLD_S
+       │     grouped on action_id, newest row per rule, ranked, cut to
+       │     INSIGHT_MAX_ACTIONS (3)
+       └─▶ GET /api/insights/timeline   ─▶ the TIMELINE view (2026-08-06): the same
+             rows bucketed by age over PAST_WINDOWS (live / 5m / 30m / 2h with the
+             shipped config), each bucket grouped exactly like /current and cut to
+             INSIGHT_MAX_ACTIONS, newest-first ─▶ the Insights tab's advice stack
 ```
 
 ### 2.5 Online/offline status

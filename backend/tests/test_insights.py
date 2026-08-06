@@ -674,6 +674,82 @@ async def test_current_endpoint_returns_grouped_actions(scratch_app) -> None:
     assert empty["actions"] == []
 
 
+async def _plant_insight(conn, age_s: float, rule_id: str, action_id: str | None,
+                         severity: str = "warning") -> None:
+    """One stored insight row, `age_s` seconds old, shaped like the job writes."""
+    await conn.execute(
+        """INSERT INTO insights (created_at, device_id, severity, rule_id,
+                                 message, context, action, rationale,
+                                 action_id, reason)
+           VALUES (now() - $1 * interval '1 second', '30', $2, $3,
+                   $4, '{}'::jsonb, $5, $6, $7, $8)""",
+        age_s, severity, rule_id,
+        f"msg {rule_id}", f"legacy {rule_id}", f"long {rule_id}.",
+        action_id, f"reason {rule_id} at {age_s:.0f}s.",
+    )
+
+
+async def test_timeline_buckets_follow_past_windows(scratch_app) -> None:
+    """/api/insights/timeline: the reload-safe advice history (2026-08-06).
+
+    The scratch settings set PAST_WINDOWS=2m,10m,30m with the default 150 s
+    hold, so the 2m window is SHORTER than the hold and must be skipped — the
+    buckets become live(≤150s], (150s,10m], (10m,30m]. Everything else the
+    route promises is asserted here: per-bucket cap at INSIGHT_MAX_ACTIONS,
+    chronological order within a bucket (NOT severity order — that is /current's
+    presentation), the same action_id recurring across buckets, data_quality
+    excluded, and rows older than the longest window absent.
+    """
+    settings, conn, pool, client = scratch_app
+    await conn.execute(
+        "INSERT INTO devices (device_id, display_name) VALUES ('30','A')"
+    )
+    # live bucket
+    await _plant_insight(conn, 60, "composite_high", "ease_off", "warning")
+    await _plant_insight(conn, 70, "data_quality", None, "info")   # never a card
+    # (150s, 10m] bucket: four DISTINCT actions -> cap must cut one. The cut is
+    # by severity (group_actions), the surviving order is chronological.
+    await _plant_insight(conn, 400, "residual_load", "plan_recovery", "warning")
+    await _plant_insight(conn, 420, "impact_deviation", "lower_landings", "warning")
+    await _plant_insight(conn, 440, "impact_deviation2", "soften_landings", "alert")
+    await _plant_insight(conn, 460, "accumulated_load", "cap_session", "info")
+    # (10m, 30m] bucket: chronology + ease_off recurring from the live bucket
+    await _plant_insight(conn, 700, "movement_quality", "flag_review", "info")
+    await _plant_insight(conn, 1200, "composite_high", "ease_off", "warning")
+    # beyond the longest window: must not appear at all
+    await _plant_insight(conn, 2400, "composite_high", "ease_off", "alert")
+
+    body = (await client.get("/api/insights/timeline",
+                             params={"device": "30"})).json()
+    assert body["windows"] == ["live", "10m", "30m"], (
+        "a PAST_WINDOWS entry shorter than INSIGHT_HOLD_S must be skipped"
+    )
+    assert [b["window"] for b in body["buckets"]] == body["windows"]
+    live, mid, old = body["buckets"]
+
+    assert [a["action_id"] for a in live["actions"]] == ["ease_off"]
+    assert not any(r["rule_id"] == "data_quality"
+                   for b in body["buckets"] for a in b["actions"]
+                   for r in a["reasons"]), "sensor findings stay event-log-only"
+
+    # cap: 4 distinct actions -> 3; severity cut the info one; the survivors
+    # read newest-first, not severity-first
+    assert [a["action_id"] for a in mid["actions"]] == [
+        "plan_recovery", "lower_landings", "soften_landings",
+    ]
+    ts = [a["updated_at"] for a in mid["actions"]]
+    assert ts == sorted(ts, reverse=True), "chronological within the bucket"
+
+    # recurrence across buckets is a story, not a duplicate
+    assert [a["action_id"] for a in old["actions"]] == ["flag_review", "ease_off"]
+
+    # the 2400 s row is outside every bucket: the 30m ease_off card must be the
+    # 1200 s firing, and no bucket may hold anything older than the span
+    empty = (await client.get("/api/insights/timeline",
+                              params={"device": "99"})).json()
+    assert all(b["actions"] == [] for b in empty["buckets"])
+
+
 async def test_cooldown_lets_severity_escalate_but_not_regress(scratch_app) -> None:
     """A warning must NOT swallow a genuine alert.
 

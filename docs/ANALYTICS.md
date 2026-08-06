@@ -360,6 +360,29 @@ Correcting this needs re-calibration data that does not exist (712 rows locally)
 the statistic without re-calibrating would silently change what an alert means to a
 trainer, which is the SPEC §2 failure mode. Deferred deliberately.
 
+### 4.8 The advice timeline — `/api/insights/timeline` (2026-08-06)
+
+The Insights tab used to read only `/current`, so a page reload wiped anything older than
+the 150 s hold window — advice appeared to "start from scratch". Insights were **always
+persisted** (the `/api/insights` event log, kept forever); what was missing was a read-side
+view of the history. `/timeline` is that view:
+
+- **Buckets come from `PAST_WINDOWS`** — the same config the History tab uses, resolved at
+  request time, so changing the windows re-shapes the timeline with no code change. Bucket 0
+  is `live` (exactly `/current`'s `INSIGHT_HOLD_S` definition); each later bucket spans
+  (previous edge, window]. A window shorter than the hold is skipped (it would be an empty
+  range). Nothing older than the longest window is returned.
+- **Each bucket is collapsed by the same `group_actions()`** as `/current` — group on
+  `action_id`, newest row per rule, ≤ `INSIGHT_MAX_ACTIONS` per bucket, `data_quality`
+  event-log-only — then re-ordered **newest-first within the bucket**: the timeline is a
+  chronology, not a severity ranking (severity still colours the card chip/edge).
+- **The same `action_id` may recur across buckets.** A condition that kept firing across an
+  hour IS the story; deduping across buckets would erase it. Within one bucket it still
+  collapses to a single card.
+- `/current` is unchanged and remains the pure live view (the overview card's one-line
+  insight and any external consumer keep working). Pinned by
+  `test_timeline_buckets_follow_past_windows`.
+
 ## 5. Deliberately not done
 
 | Not done | Cost |
