@@ -17,10 +17,12 @@
 1. HIPPOS logo — the `<LogoFull />` inline SVG component (paths taken from
    `mockup/visual_guidelines/Logo/svg/`; see §10 for why it must be inline), links `/`.
 2. "Overview" nav item.
-3. **Athletes online** section: one row per online device — display name, live status
-   dot, current composite as a small number tinted by risk band. Rows appear/disappear
-   with the same 10 s rule as panels (§3). Click → `/device/:id`. Active route gets a
-   2px `--accent` left rail + 5% accent wash (old-mockup pattern, kept).
+3. **Athletes** section (2026-08-06; was "Athletes online"): one row per **registered**
+   device, online first then by name — display name, status dot (muted when offline),
+   current composite as a small number tinted by risk band (em-dash when offline).
+   Offline athletes stay listed with their stored data reachable. Click →
+   `/device/:id`. Active route gets a 2px `--accent` left rail + 5% accent wash
+   (old-mockup pattern, kept).
 4. Bottom block: WS connection dot (§6) + username + logout.
 
 Tablet ≤1024px: sidebar collapses to a top bar (logo, overview link, the full device
@@ -73,9 +75,11 @@ low-opacity cyan glow that breathes (no brand mark behind the card; static under
   row; state persists in `localStorage`. Daily users get density, first-time
   viewers get the story.
 
-**Device panels** — one per **online** device; a device silent >10 s disappears
-entirely (footer note "N offline hidden"; the online→offline badge flip still shows
-during the 2–10 s window). New devices appear on first packet. Grid: 1–4 columns
+**Device panels** — one per **registered** device, online first (2026-08-06;
+reverses the 2026-08-02 "silent >10 s disappears" rule). An offline device keeps
+its card: offline badge, frozen sparkline, and its stored projections and top
+insight stay browsable; the "Athletes online" hero stat counts only the online
+ones. New devices appear on first packet. Grid: 1–4 columns
 responsive (auto-fill, 330px min), cards `--surface` radius 16, hover raises border to `--border-hover`;
 the whole card is one click target → `/device/:id` (rename control excepted).
 
@@ -306,8 +310,9 @@ That was a real shipped bug: an owner stood still for over 30 s and the badge sp
 which is a state, not a wait, and it has its own info chip.
 
 **Shown only at the start of a session** (user decision 2026-08-04). The verdict latch resets
-only on a **real absence** — silent longer than `OFFLINE_HIDE_MS` (10 s), i.e. the device has
-dropped out of the UI entirely and its return counts as a new session. It deliberately does
+only on a **real absence** — silent longer than `OFFLINE_HIDE_MS` (10 s), whose return counts
+as a new session. (Since 2026-08-06 offline devices stay visible in the UI, so this threshold
+is purely the badge's re-arm rule — it no longer hides anything.) It deliberately does
 **not** key on the `online` flag, which flips after ~2 s: a brief packet dropout mid-session
 would otherwise re-arm the badge and restart the count. (The verdict RESET never keys on
 `online`; ARMING does — a badge cannot arm mid-dropout.)
@@ -355,8 +360,9 @@ athlete (SPEC §3.8).
 
 ## 7. Empty & error states — SET
 
-- No devices online: hero stays; panel area shows "Waiting for devices… point
-  wearables at this server's UDP port." (+ "N offline hidden" when applicable).
+- No devices **registered** (offline ones stay on the grid since 2026-08-06):
+  hero stays; panel area shows "Waiting for devices… point wearables at this
+  server's UDP port."
 - No insights: "Nothing to flag right now" + "Advice appears here within about a
   minute of something worth acting on."
 - History without enough data: "collecting… no data yet in past X"; partial coverage shows a
@@ -536,7 +542,8 @@ hidden, their display order, and the translation of jargon into trainer language
 "vs their normal range", `sd` as "their usual spread", quality/coverage as percentages). That is
 a §11-copy-rules-level decision, so it lives in one module rather than in a component.
 
-Frontend constants (`lib/config.ts`): `OFFLINE_HIDE_MS = 10_000`, `POLL_ADVICE_MS = 10_000`,
+Frontend constants (`lib/config.ts`): `OFFLINE_HIDE_MS = 10_000` (since 2026-08-06 only the
+calibration badge's re-arm threshold — it hides nothing), `POLL_ADVICE_MS = 10_000`,
 `HISTORY_MAX_BUCKETS = 30`, the live-chart set (`LIVE_BUFFER_S`, `BACKFILL_S`,
 `RENDER_DELAY_S`), the WS set (`WS_BACKOFF_MIN_MS`/`MAX_MS`, `WS_CLOSE_UNAUTHORIZED`), poll intervals
 above, metric map (`lib/metrics.ts` — SPEC §9 names/tooltips + §8 colors). Window

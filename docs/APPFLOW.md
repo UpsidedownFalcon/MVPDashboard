@@ -55,8 +55,10 @@ wearable powers on ─▶ first packet ─▶ auto-registered (name = device ID)
   ─▶ card appears "online" ─▶ trainer renames to wearer
 wearable silent > OFFLINE_AFTER_S ─▶ status event ─▶ the card badge flips to offline
   (last-seen shows on the detail overlay only)
-  ─▶ silent > 10 s (OFFLINE_HIDE_MS) ─▶ card and sidebar entry disappear entirely,
-     replaced by an "N offline hidden" footer note (user decision 2026-08-02)
+  ─▶ the card and sidebar entry STAY — offline badge, frozen live column, and the
+     stored history/projections/insights all remain browsable (user decision
+     2026-08-06, reversing the 2026-08-02 "silent >10s disappears" rule;
+     OFFLINE_HIDE_MS survives only as the calibration badge's re-arm threshold)
 wearable returns ─▶ online again (same identity, same name)
 ```
 

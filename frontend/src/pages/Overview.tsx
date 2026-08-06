@@ -61,7 +61,15 @@ function useSquadStats(deviceIds: string[], names: Record<string, string>) {
   return { topProjected: topProjected as { dev: string; value: number; horizon: string } | null, recentAlerts, names }
 }
 
-function Hero({ deviceIds, names }: { deviceIds: string[]; names: Record<string, string> }) {
+function Hero({
+  deviceIds,
+  names,
+  onlineCount,
+}: {
+  deviceIds: string[]
+  names: Record<string, string>
+  onlineCount: number
+}) {
   const { topProjected, recentAlerts } = useSquadStats(deviceIds, names)
   const band = topProjected ? RISK_BAND_META[riskBand(topProjected.value)] : null
 
@@ -97,7 +105,7 @@ function Hero({ deviceIds, names }: { deviceIds: string[]; names: Record<string,
       <div className="hero-stats">
         <div className="hero-stat">
           <div className="hero-stat-label">Athletes online</div>
-          <div className="hero-stat-value">{deviceIds.length}</div>
+          <div className="hero-stat-value">{onlineCount}</div>
         </div>
         <div className="hero-stat">
           <div className="hero-stat-label">
@@ -130,7 +138,7 @@ function Hero({ deviceIds, names }: { deviceIds: string[]; names: Record<string,
 }
 
 export default function Overview() {
-  const { visible, hiddenCount, isLoading, isError } = useVisibleDevices()
+  const { visible, onlineCount, isLoading, isError } = useVisibleDevices()
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem(HERO_KEY) === '1')
   const toggle = () => {
     setCollapsed((c) => {
@@ -149,23 +157,24 @@ export default function Overview() {
           {collapsed ? <ChevronDown size={14} aria-hidden /> : <ChevronUp size={14} aria-hidden />}
         </button>
         {!collapsed && (
-          <Hero deviceIds={visible.map((d) => d.device_id)} names={names} />
+          <Hero
+            deviceIds={visible.map((d) => d.device_id)}
+            names={names}
+            onlineCount={onlineCount}
+          />
         )}
       </section>
 
       {isError && <p className="notice">Failed to load devices — retrying…</p>}
       {isLoading && <p className="notice">Loading devices…</p>}
 
+      {/* Offline devices stay on the grid with their stored data (2026-08-06);
+          this empty state now means "nothing has ever registered". */}
       {!isLoading && visible.length === 0 && (
         <div className="card empty-state">
           <p>
             <b>Waiting for devices…</b> point wearables at this server's UDP port.
           </p>
-          {hiddenCount > 0 && (
-            <p className="notice">
-              {hiddenCount} offline device{hiddenCount > 1 ? 's' : ''} hidden
-            </p>
-          )}
         </div>
       )}
 
@@ -174,11 +183,6 @@ export default function Overview() {
           <DeviceCard key={d.device_id} device={d} />
         ))}
       </div>
-      {visible.length > 0 && hiddenCount > 0 && (
-        <p className="notice">
-          {hiddenCount} offline device{hiddenCount > 1 ? 's' : ''} hidden
-        </p>
-      )}
     </div>
   )
 }

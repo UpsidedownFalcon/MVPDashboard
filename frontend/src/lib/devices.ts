@@ -1,10 +1,16 @@
 // Device registry + liveness merge (UIUX §3): REST registry polled every 10s,
-// overridden by real-time WS status events and the tick stream itself. A
-// device silent > OFFLINE_HIDE_MS disappears from panels and sidebar.
+// overridden by real-time WS status events and the tick stream itself.
+//
+// CHANGED 2026-08-06 (user decision): offline devices are no longer hidden.
+// Every registered device stays in the sidebar and the overview grid — with
+// the offline badge, frozen live column and its stored history, projections
+// and insights — sorted online-first. The old rule (silent > OFFLINE_HIDE_MS
+// disappears entirely) is gone; OFFLINE_HIDE_MS survives only as the
+// calibration badge's re-arm threshold (CalibrationBadge.tsx).
 
 import { useQuery } from '@tanstack/react-query'
 import { fetchDevices, type Device } from './api'
-import { OFFLINE_HIDE_MS, POLL_DEVICES_MS } from './config'
+import { POLL_DEVICES_MS } from './config'
 import { useLive } from './ws'
 
 export interface LiveDevice extends Device {
@@ -13,8 +19,10 @@ export interface LiveDevice extends Device {
 }
 
 export interface VisibleDevices {
+  /** every registered device, online first then by name */
   visible: LiveDevice[]
-  hiddenCount: number
+  /** how many of them are currently online */
+  onlineCount: number
   isLoading: boolean
   isError: boolean
 }
@@ -25,8 +33,7 @@ export interface MergedDevices {
   isError: boolean
 }
 
-/** Full registry merged with live signals — includes devices the 10s rule
- *  hides (deep-linked detail pages must not go blank, UIUX §4). */
+/** Full registry merged with live signals, in registry order. */
 export function useMergedDevices(): MergedDevices {
   const query = useQuery({
     queryKey: ['devices'],
@@ -53,15 +60,18 @@ export function useMergedDevices(): MergedDevices {
   return { devices, isLoading: query.isLoading, isError: query.isError }
 }
 
+/** Every registered device, sorted for display: online first, then by name. */
 export function useVisibleDevices(): VisibleDevices {
   const { devices, isLoading, isError } = useMergedDevices()
-  const now = Date.now()
-  const visible = devices
-    .filter((d) => d.lastSignalMs != null && now - d.lastSignalMs <= OFFLINE_HIDE_MS)
-    .sort(
-      (a, b) =>
-        Number(b.online) - Number(a.online) ||
-        a.display_name.localeCompare(b.display_name),
-    )
-  return { visible, hiddenCount: devices.length - visible.length, isLoading, isError }
+  const visible = [...devices].sort(
+    (a, b) =>
+      Number(b.online) - Number(a.online) ||
+      a.display_name.localeCompare(b.display_name),
+  )
+  return {
+    visible,
+    onlineCount: visible.filter((d) => d.online).length,
+    isLoading,
+    isError,
+  }
 }

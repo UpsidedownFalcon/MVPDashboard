@@ -1,6 +1,7 @@
-// Left navigation (UIUX §1): logo, overview, live online-device list with a
-// mini risk number, connection dot, user + logout. Collapses to a top bar on
-// tablet widths (app.css).
+// Left navigation (UIUX §1): logo, overview, the athlete list (online first,
+// offline stay listed with a muted dot — 2026-08-06) with a mini risk number,
+// connection dot, user + logout. Collapses to a top bar on tablet widths
+// (app.css).
 
 import { LayoutGrid, LogOut } from 'lucide-react'
 import { NavLink } from 'react-router-dom'
@@ -30,8 +31,9 @@ export default function Sidebar() {
           Overview
         </NavLink>
 
-        <div className="eyebrow sb-sec">Athletes online</div>
-        {visible.length === 0 && <div className="sb-empty">none streaming</div>}
+        {/* Offline athletes stay listed (2026-08-06) — muted dot, em-dash risk */}
+        <div className="eyebrow sb-sec">Athletes</div>
+        {visible.length === 0 && <div className="sb-empty">none registered</div>}
         {visible.map((d) => {
           const c = latest[d.device_id]?.c
           const band = c != null ? RISK_BAND_META[riskBand(c)] : null

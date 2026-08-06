@@ -1,8 +1,10 @@
 // Frontend constants (UIUX §13). Anything the backend owns comes from the API
 // at runtime (window/horizon labels are read from responses, never hardcoded).
 
-/** Devices silent longer than this vanish from panels + sidebar (user decision
- *  2026-08-02; UIUX §3). The 2s online/offline badge flip still shows first. */
+/** A silence longer than this counts as a REAL absence — the calibration
+ *  badge's re-arm threshold (CalibrationBadge.tsx). It no longer hides
+ *  devices anywhere: offline athletes stay in the sidebar and on the grid
+ *  with their stored data (user decision 2026-08-06, reversing 2026-08-02). */
 export const OFFLINE_HIDE_MS = 10_000
 
 /** Rolling live buffer per device (seconds @ 60Hz). */
