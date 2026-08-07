@@ -1,15 +1,20 @@
 """GET /api/insights (S2-T05, schema §3): newest first, device optional.
 GET /api/insights/current: the same rows collapsed into the current advice.
 GET /api/insights/timeline: the same rows bucketed by age over PAST_WINDOWS.
+POST /api/insights/decisions: record Adopt/Override on one advice card.
 """
 
 from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from typing import Literal
 
 from fastapi import APIRouter, Query, Request
+from pydantic import BaseModel, Field
 
+from api.deps import _user_from_cookie
+from api.auth import COOKIE_NAME
 from api.jobs.insights import group_actions
 from api.queries import _iso
 
@@ -142,6 +147,33 @@ async def insight_timeline(
         actions.sort(key=lambda a: a["updated_at"], reverse=True)
         buckets.append({"window": label, "actions": _finalize(actions)})
 
+    # Attach the NEWEST Adopt/Override decision per card (decisions are
+    # append-only and changeable — migration 004). Matched on the _iso string
+    # of (action_id, action_updated_at): _iso truncates to milliseconds, and
+    # the stored timestamp round-tripped through the frontend's ISO value, so
+    # string equality is exact where raw datetime equality (µs vs ms) is not.
+    decisions = await pool.fetch(
+        """SELECT DISTINCT ON (action_id, action_updated_at)
+                  action_id, action_updated_at, decision, note,
+                  decided_by, created_at
+           FROM insight_decisions
+           WHERE device_id = $1
+           ORDER BY action_id, action_updated_at, decision_id DESC""",
+        device,
+    )
+    by_card = {
+        (d["action_id"], _iso(d["action_updated_at"])): {
+            "decision": d["decision"],
+            "note": d["note"],
+            "decided_by": d["decided_by"],
+            "decided_at": _iso(d["created_at"]),
+        }
+        for d in decisions
+    }
+    for bucket in buckets:
+        for a in bucket["actions"]:
+            a["decision"] = by_card.get((a["action_id"], a["updated_at"]))
+
     return {
         "device_id": device,
         "generated_at": _iso(now),
@@ -149,6 +181,56 @@ async def insight_timeline(
         "max_actions": settings.insight_max_actions,
         "windows": [label for label, _ in edges],
         "buckets": buckets,
+    }
+
+
+class DecisionBody(BaseModel):
+    """One Adopt/Override press on one advice card."""
+    device_id: str
+    action_id: str
+    # the card's `updated_at` exactly as the timeline returned it (ISO, ms)
+    action_updated_at: datetime
+    decision: Literal["adopted", "overridden"]
+    # override only: what the trainer is doing instead; blank/absent means
+    # "overridden without comment"
+    note: str | None = Field(default=None, max_length=500)
+
+
+@router.post("/api/insights/decisions", status_code=201)
+async def record_decision(request: Request, body: DecisionBody) -> dict:
+    """Store one Adopt/Override decision (migration 004).
+
+    Append-only: pressing "change" on a decided card simply inserts a newer
+    row, and the timeline surfaces the newest one per card — the full history
+    stays for later analysis. `note` is kept only for overrides; a blank note
+    is stored as NULL so the record reads "overridden", nothing more.
+    """
+    note = (body.note or "").strip() or None
+    if body.decision != "overridden":
+        note = None
+    # Router-level auth already guarded this request in production; the cookie
+    # read here only recovers the username for the audit trail (NULL when the
+    # app is mounted without the guard, e.g. in tests).
+    user = _user_from_cookie(
+        request.app.state.settings, request.cookies.get(COOKIE_NAME)
+    )
+    row = await request.app.state.pool.fetchrow(
+        """INSERT INTO insight_decisions
+               (device_id, action_id, action_updated_at, decision, note, decided_by)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           RETURNING decision_id, created_at""",
+        body.device_id, body.action_id, body.action_updated_at,
+        body.decision, note, user.username if user else None,
+    )
+    return {
+        "decision_id": row["decision_id"],
+        "decided_at": _iso(row["created_at"]),
+        "device_id": body.device_id,
+        "action_id": body.action_id,
+        "action_updated_at": _iso(body.action_updated_at),
+        "decision": body.decision,
+        "note": note,
+        "decided_by": user.username if user else None,
     }
 
 

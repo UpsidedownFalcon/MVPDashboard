@@ -383,6 +383,24 @@ view of the history. `/timeline` is that view:
   insight and any external consumer keep working). Pinned by
   `test_timeline_buckets_follow_past_windows`.
 
+### 4.9 Decision capture — Adopt / Override (2026-08-07)
+
+Every advice card carries **Adopt** and **Override** buttons; each press is stored in the
+append-only `insight_decisions` table (migration 004, BACKEND_SCHEMA §1) via
+`POST /api/insights/decisions`, and the newest decision per card rides back on
+`/timeline` as `action.decision`. Design points, all user decisions 2026-08-07:
+
+- **A "card" is one firing**: `(device_id, action_id, action_updated_at)`. The decision
+  follows the card as it ages through the buckets; a re-fired action is a fresh card
+  with fresh buttons — each firing is decided separately.
+- **Changeable, newest wins, nothing overwritten**: pressing "change" inserts a newer
+  row. The full press history is the point — which advice was adopted, which was
+  overridden and what the trainer did instead is exactly the adherence dataset a future
+  sports-scientist pass will want.
+- `note` is stored only for overrides; blank → NULL, which reads as "overridden,
+  no comment". `decided_by` records the session username.
+- Pinned by `test_decisions_store_and_ride_the_timeline`.
+
 ## 5. Deliberately not done
 
 | Not done | Cost |

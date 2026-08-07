@@ -206,7 +206,16 @@ arrow-key navigation):
    5. the **static coaching cue** (`tip`), under a **"Coaching cue"** label
       (demo posture; was "General cue — not measured") — it is catalogue text,
       identical every firing;
-   6. the **Evidence expander** (`<details>`) over the joined `context`.
+   6. the **Evidence expander** (`<details>`) over the joined `context`;
+   7. the **decision footer** (2026-08-07): undecided cards show two quiet
+      buttons — **Adopt** (record the advice was used) and **Override**, which
+      expands an inline optional text field ("What are you doing instead?") with
+      Save/Cancel; blank saves as plain "overridden". A decided card replaces
+      the buttons with its marker — green-tinted "✓ Adopted" or muted
+      "↪ Overridden — *note*" — plus a small "change" affordance that reopens
+      the buttons (decisions are changeable; the server keeps every press and
+      the newest wins). The state rides `action.decision` on the timeline, so
+      it survives reloads; a **re-fired** action is a new card and asks fresh.
 
    An empty timeline is a calm empty state, never a warning — it is the normal
    early-session condition. `aria-live="polite"` announces new advice.
@@ -534,6 +543,7 @@ checks PASS (lightness band, chroma, CVD ΔE worst adjacent 8.4, normal-vision
 | detail-page period labels, trend arrow, coverage chip | `GET /api/metrics/windows` | 60 s poll |
 | insight chip on an Overview panel | `GET /api/insights?device&limit=5` (device-scoped) | 30 s poll (`POLL_INSIGHTS_MS`) |
 | Insights tab (the advice timeline) | `GET /api/insights/timeline` **+** `GET /api/insights?device&limit=100` (evidence join on `(rule_id, created_at)`) | 10 s poll (`POLL_ADVICE_MS`) |
+| Adopt/Override buttons on a card | `POST /api/insights/decisions`, then invalidate the timeline query | on press |
 | rename | `PATCH /api/devices/:id` | on action |
 | auth | `POST /api/auth/login|logout`, `GET /api/auth/me` | on action |
 

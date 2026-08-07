@@ -21,8 +21,16 @@
 // key is exact: both routes format timestamps through the same _iso(). The join
 // only recovers evidence; it never re-orders, re-filters or re-groups anything.
 
-import { useQuery } from '@tanstack/react-query'
-import { fetchAdviceTimeline, fetchInsights, type AdviceAction, type Insight } from '../lib/api'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { Check, CornerUpRight } from 'lucide-react'
+import { useState } from 'react'
+import {
+  fetchAdviceTimeline,
+  fetchInsights,
+  postInsightDecision,
+  type AdviceAction,
+  type Insight,
+} from '../lib/api'
 import { POLL_ADVICE_MS } from '../lib/config'
 import { evidenceEntries, evidenceLabel, formatEvidence } from '../lib/evidence'
 import { timeAgo, windowLabel } from '../lib/format'
@@ -45,12 +53,129 @@ function ageFade(bucketIdx: number, bucketCount: number): number {
 /** Event-log rows are the only source of `context` + the long `rationale`. */
 const joinKey = (ruleId: string, createdAt: string) => `${ruleId}|${createdAt}`
 
+/** Adopt / Override footer (migration 004). A decided card shows its state
+ *  with a small "change" affordance — decisions are changeable, the server
+ *  keeps every press and the timeline surfaces the newest one per card. */
+function DecideRow({ device, action }: { device: string; action: AdviceAction }) {
+  const queryClient = useQueryClient()
+  const [overriding, setOverriding] = useState(false)
+  const [note, setNote] = useState('')
+  const [changing, setChanging] = useState(false)
+
+  const decide = useMutation({
+    mutationFn: (d: { decision: 'adopted' | 'overridden'; note?: string }) =>
+      postInsightDecision({
+        device_id: device,
+        action_id: action.action_id,
+        action_updated_at: action.updated_at,
+        decision: d.decision,
+        note: d.note,
+      }),
+    onSuccess: () => {
+      setOverriding(false)
+      setChanging(false)
+      setNote('')
+      void queryClient.invalidateQueries({ queryKey: ['advice-timeline', device] })
+    },
+  })
+
+  const decision = action.decision
+  if (decision && !changing) {
+    return (
+      <div className="insight-decided">
+        {decision.decision === 'adopted' ? (
+          <span className="insight-decided-label decided-adopted">
+            <Check aria-hidden /> Adopted
+          </span>
+        ) : (
+          <span className="insight-decided-label decided-overridden">
+            <CornerUpRight aria-hidden /> Overridden
+            {decision.note ? <> — {decision.note}</> : null}
+          </span>
+        )}
+        <button
+          className="insight-decide-change"
+          onClick={() => setChanging(true)}
+          title={`Decided ${timeAgo(decision.decided_at)}${decision.decided_by ? ` by ${decision.decided_by}` : ''} — change it`}
+        >
+          change
+        </button>
+      </div>
+    )
+  }
+
+  if (overriding) {
+    return (
+      <form
+        className="insight-override"
+        onSubmit={(e) => {
+          e.preventDefault()
+          decide.mutate({ decision: 'overridden', note: note.trim() || undefined })
+        }}
+      >
+        <input
+          type="text"
+          value={note}
+          onChange={(e) => setNote(e.target.value)}
+          placeholder="What are you doing instead? (optional)"
+          maxLength={500}
+          autoFocus
+        />
+        <button type="submit" disabled={decide.isPending}>
+          Save
+        </button>
+        <button
+          type="button"
+          className="insight-decide-cancel"
+          onClick={() => {
+            setOverriding(false)
+            setNote('')
+          }}
+        >
+          Cancel
+        </button>
+      </form>
+    )
+  }
+
+  return (
+    <div className="insight-decide">
+      <button
+        onClick={() => decide.mutate({ decision: 'adopted' })}
+        disabled={decide.isPending}
+        title="Record that this advice was used"
+      >
+        <Check aria-hidden /> Adopt
+      </button>
+      <button
+        className="insight-decide-override"
+        onClick={() => setOverriding(true)}
+        disabled={decide.isPending}
+        title="Record that you did something else instead"
+      >
+        <CornerUpRight aria-hidden /> Override
+      </button>
+      {changing && (
+        <button
+          type="button"
+          className="insight-decide-cancel"
+          onClick={() => setChanging(false)}
+        >
+          Cancel
+        </button>
+      )}
+    </div>
+  )
+}
+
 function AdviceCard({
+  device,
   action,
   events,
   ageLabel,
   fadePct,
 }: {
+  device: string
   action: AdviceAction
   events: Map<string, Insight>
   /** the card's time base: "live" or "past 5m" etc. — shown top right */
@@ -128,6 +253,8 @@ function AdviceCard({
           ))}
         </details>
       )}
+
+      <DecideRow device={device} action={action} />
     </article>
   )
 }
@@ -187,6 +314,7 @@ export default function InsightsPanel({ device }: { device: string }) {
       {cards.map((c) => (
         <AdviceCard
           key={c.key}
+          device={device}
           action={c.action}
           events={events}
           ageLabel={c.ageLabel}

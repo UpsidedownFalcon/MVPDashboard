@@ -750,6 +750,71 @@ async def test_timeline_buckets_follow_past_windows(scratch_app) -> None:
     assert all(b["actions"] == [] for b in empty["buckets"])
 
 
+async def test_decisions_store_and_ride_the_timeline(scratch_app) -> None:
+    """Adopt/Override (migration 004): every press is stored append-only, the
+    newest decision per card rides the timeline, notes are kept only for
+    overrides (blank -> NULL = "overridden", nothing more)."""
+    settings, conn, pool, client = scratch_app
+    await conn.execute(
+        "INSERT INTO devices (device_id, display_name) VALUES ('30','A')"
+    )
+    await _plant_insight(conn, 60, "composite_high", "ease_off", "warning")
+    await _plant_insight(conn, 700, "movement_quality", "flag_review", "info")
+
+    tl = (await client.get("/api/insights/timeline",
+                           params={"device": "30"})).json()
+    live_card = tl["buckets"][0]["actions"][0]
+    old_card = next(b for b in tl["buckets"] if b["window"] == "30m")["actions"][0]
+    assert live_card["decision"] is None and old_card["decision"] is None
+
+    # adopt the live card; note must be discarded for adoptions
+    r = await client.post("/api/insights/decisions", json={
+        "device_id": "30", "action_id": live_card["action_id"],
+        "action_updated_at": live_card["updated_at"],
+        "decision": "adopted", "note": "ignored for adopt",
+    })
+    assert r.status_code == 201 and r.json()["note"] is None
+
+    # override the old card with a blank note -> just "overridden"
+    r = await client.post("/api/insights/decisions", json={
+        "device_id": "30", "action_id": old_card["action_id"],
+        "action_updated_at": old_card["updated_at"],
+        "decision": "overridden", "note": "   ",
+    })
+    assert r.status_code == 201 and r.json()["note"] is None
+
+    tl = (await client.get("/api/insights/timeline",
+                           params={"device": "30"})).json()
+    live_card = tl["buckets"][0]["actions"][0]
+    old_card = next(b for b in tl["buckets"] if b["window"] == "30m")["actions"][0]
+    assert live_card["decision"]["decision"] == "adopted"
+    assert old_card["decision"] == {"decision": "overridden", "note": None,
+                                    "decided_by": None,
+                                    "decided_at": old_card["decision"]["decided_at"]}
+
+    # decisions are CHANGEABLE: a newer press wins, the old row survives
+    r = await client.post("/api/insights/decisions", json={
+        "device_id": "30", "action_id": live_card["action_id"],
+        "action_updated_at": live_card["updated_at"],
+        "decision": "overridden", "note": "hill sprints instead",
+    })
+    assert r.status_code == 201
+    tl = (await client.get("/api/insights/timeline",
+                           params={"device": "30"})).json()
+    live_card = tl["buckets"][0]["actions"][0]
+    assert live_card["decision"]["decision"] == "overridden"
+    assert live_card["decision"]["note"] == "hill sprints instead"
+    n_rows = await conn.fetchval("SELECT count(*) FROM insight_decisions")
+    assert n_rows == 3, "append-only: changing a decision must not overwrite"
+
+    # a rejected decision value is a validation error, not a row
+    r = await client.post("/api/insights/decisions", json={
+        "device_id": "30", "action_id": "ease_off",
+        "action_updated_at": live_card["updated_at"], "decision": "ignored",
+    })
+    assert r.status_code == 422
+
+
 async def test_cooldown_lets_severity_escalate_but_not_regress(scratch_app) -> None:
     """A warning must NOT swallow a genuine alert.
 

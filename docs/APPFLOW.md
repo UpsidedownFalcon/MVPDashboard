@@ -41,7 +41,12 @@ from REST or a WS close with code 4401 → redirect `/login`.
          │                                                  insights bucketed over PAST_WINDOWS,
          │                                                  ≤3 actions per bucket, poll 10s.
          │                                                  Survives page reloads; /current
-         │                                                  remains as the pure live view)
+         │                                                  remains as the pure live view.
+         │                                                  Each action carries its newest
+         │                                                  Adopt/Override `decision`)
+         ├─ POST /api/insights/decisions                   (Adopt/Override press on one card
+         │                                                  — 2026-08-07, migration 004; then
+         │                                                  the timeline query is invalidated)
          └─ GET /api/insights?device=:id&limit=100         (evidence join for those cards,
                                                             same 10s. The Overview chip uses
                                                             the same route at limit=5 / 30s)

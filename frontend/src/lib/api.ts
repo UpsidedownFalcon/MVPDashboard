@@ -114,6 +114,8 @@ export interface AdviceAction {
   updated_at: string
   unvalidated: boolean
   reasons: AdviceReason[]
+  /** timeline only: the newest decision on this card, null when undecided */
+  decision?: InsightDecision | null
 }
 
 /** GET /api/insights/current — the STATE view: the advice standing right now.
@@ -126,6 +128,16 @@ export interface CurrentAdvice {
   hold_s: number
   max_actions: number
   actions: AdviceAction[]
+}
+
+/** The newest Adopt/Override decision on one advice card (migration 004).
+ *  Decisions are changeable — the server keeps every press, newest wins. */
+export interface InsightDecision {
+  decision: 'adopted' | 'overridden'
+  /** override only: what the trainer did instead; null = no comment */
+  note: string | null
+  decided_by: string | null
+  decided_at: string
 }
 
 /** One age bucket of the advice timeline. `window` is "live" or a PAST_WINDOWS
@@ -219,6 +231,13 @@ export const fetchCurrentAdvice = (dev: string) =>
   request<CurrentAdvice>(`/api/insights/current?device=${dev}`)
 export const fetchAdviceTimeline = (dev: string) =>
   request<AdviceTimeline>(`/api/insights/timeline?device=${dev}`)
+export const postInsightDecision = (body: {
+  device_id: string
+  action_id: string
+  action_updated_at: string
+  decision: 'adopted' | 'overridden'
+  note?: string
+}) => post<InsightDecision>('/api/insights/decisions', body)
 export const fetchRecent = (dev: string, seconds: number) =>
   request<Recent>(`/api/metrics/recent?device=${dev}&seconds=${seconds}`)
 

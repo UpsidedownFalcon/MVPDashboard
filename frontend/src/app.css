@@ -1446,3 +1446,96 @@
     align-items: flex-start;
   }
 }
+
+/* --- Adopt / Override on advice cards (migration 004, 2026-08-07) ---------- */
+
+.insight-decide,
+.insight-decided,
+.insight-override {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.insight-decide button,
+.insight-override button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink-1);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 5px 12px;
+  cursor: pointer;
+}
+
+.insight-decide button svg,
+.insight-decided-label svg {
+  width: 13px;
+  height: 13px;
+}
+
+.insight-decide button:hover,
+.insight-override button:hover {
+  border-color: var(--border-hover);
+}
+
+.insight-decide button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.insight-decide-cancel,
+.insight-decide-change {
+  font: inherit;
+  font-size: 12px;
+  color: var(--ink-3);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 4px 6px;
+}
+
+.insight-decide-cancel:hover,
+.insight-decide-change:hover {
+  color: var(--ink-1);
+}
+
+.insight-override input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--ink-1);
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 5px 10px;
+}
+
+.insight-override input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.insight-decided-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12.5px;
+  font-weight: 600;
+  min-width: 0;
+}
+
+.decided-adopted {
+  color: var(--status-good);
+}
+
+.decided-overridden {
+  color: var(--ink-2);
+}
