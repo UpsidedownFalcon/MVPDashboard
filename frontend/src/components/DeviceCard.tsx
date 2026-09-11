@@ -13,9 +13,10 @@ import { COMPOSITE, SEVERITY_RANK } from '../lib/metrics'
 import { useLive } from '../lib/ws'
 import Battery from './Battery'
 import CalibrationBadge, { useCalibrationState } from './CalibrationBadge'
-import { FlagChips, QualityMeter, RenameInline, SensorDots, SeverityChip, StatusBadge } from './bits'
+import { FlagChips, RenameInline, SeverityChip, StatusBadge } from './bits'
 import LiveChart from './LiveChart'
 import RiskStat from './RiskStat'
+import SensorSummary from './SensorSummary'
 
 function topInsight(insights: Insight[] | undefined): Insight | null {
   // Demo posture (2026-08-05): sensor/hardware findings never surface as the
@@ -73,8 +74,7 @@ export default function DeviceCard({ device }: { device: LiveDevice }) {
         <RenameInline device={device} />
         <StatusBadge online={device.online} />
         <CalibrationBadge state={calibration} />
-        <QualityMeter quality={live?.q ?? device.quality} />
-        <SensorDots sensors={device.sensors} />
+        <SensorSummary device={device} quality={live?.q ?? device.quality} />
         {/* battery sits top-right, phone-style */}
         <span className="device-card-battery">
           <Battery soc={device.soc} />

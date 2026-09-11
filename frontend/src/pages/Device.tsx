@@ -7,13 +7,7 @@ import { useQuery } from '@tanstack/react-query'
 import { ArrowLeft } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import {
-  FlagChips,
-  QualityMeter,
-  RenameInline,
-  SensorDots,
-  StatusBadge,
-} from '../components/bits'
+import { FlagChips, RenameInline, StatusBadge } from '../components/bits'
 import Battery from '../components/Battery'
 import CalibrationBadge, { useCalibrationState } from '../components/CalibrationBadge'
 import ForecastChart from '../components/ForecastChart'
@@ -22,6 +16,7 @@ import HumanoidFigure, { type LimbState } from '../components/HumanoidFigure'
 import InsightsPanel from '../components/InsightsPanel'
 import LiveChart from '../components/LiveChart'
 import RiskStat from '../components/RiskStat'
+import SensorSummary from '../components/SensorSummary'
 import Tabs from '../components/Tabs'
 import { fetchWindows } from '../lib/api'
 import { POLL_HISTORY_MS } from '../lib/config'
@@ -117,8 +112,8 @@ export default function Device() {
         <RenameInline device={device} />
         <StatusBadge online={device.online} />
         <CalibrationBadge state={calibration} />
-        <QualityMeter quality={live?.q ?? device.quality} />
-        <SensorDots sensors={device.sensors} detailed />
+        {/* key={id}: remount per soldier so the toggle always opens collapsed (STAGE4 R1) */}
+        <SensorSummary key={id} device={device} quality={live?.q ?? device.quality} expandable />
         <FlagChips flags={live?.flags ?? []} />
         {/* battery, top-right */}
         <span className="device-head-battery">

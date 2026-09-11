@@ -1539,3 +1539,27 @@
 .decided-overridden {
   color: var(--ink-2);
 }
+
+/* --- sensor summary (STAGE4 R1) ------------------------------------------ */
+
+.sensor-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.sensor-summary-toggle {
+  display: inline-flex;
+  align-items: center;
+  color: var(--ink-3);
+  padding: 3px;
+  border-radius: var(--radius-s);
+}
+
+.sensor-summary-toggle:hover {
+  color: var(--ink);
+  background: var(--surface-2);
+}

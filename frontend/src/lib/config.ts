@@ -38,3 +38,8 @@ export const WS_CLOSE_UNAUTHORIZED = 4401
  *  window comes from lib/format's evenBucketCount() so spans divide the
  *  window exactly (no density artifacts, no label drift). */
 export const HISTORY_MAX_BUCKETS = 30
+
+/** Static sensor line shown in place of the quality meter + per-sensor rates
+ *  (STAGE4 R1, user decision 2026-09-12). Deliberately a LITERAL: it is not
+ *  computed from the device and does not change with sensor count or rate. */
+export const SENSOR_SUMMARY_TEXT = '4 sensors | 6400Hz logging'
