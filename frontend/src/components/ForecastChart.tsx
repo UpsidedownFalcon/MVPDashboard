@@ -51,11 +51,11 @@ export default function ForecastChart({
     enabled: windows.length > 0,
   })
 
-  if (forecasts.isLoading) return <p className="notice">Loading projections…</p>
+  if (forecasts.isLoading) return <p className="notice">Loading projections...</p>
   if (!forecasts.data) {
     // Bootstrapped forecasts arrive in ~2.5-3.5 min, not the old 15-20, so the
     // wait is short enough to name.
-    return <p className="notice">First projection in a couple of minutes…</p>
+    return <p className="notice">First projection in a couple of minutes...</p>
   }
 
   const fc = forecasts.data
@@ -171,7 +171,7 @@ export default function ForecastChart({
             size={i === 0 ? 'big' : 'small'}
             sub={
               p.ci_low != null && p.ci_high != null
-                ? `${bandLabel} ${metricValue(p.ci_low)}–${metricValue(p.ci_high)}`
+                ? `${bandLabel} ${metricValue(p.ci_low)}-${metricValue(p.ci_high)}`
                 : undefined
             }
           />
@@ -207,8 +207,8 @@ export default function ForecastChart({
                   <td>{metricValue(p.pred, 1)}</td>
                   <td>
                     {p.ci_low != null && p.ci_high != null
-                      ? `${metricValue(p.ci_low, 1)}–${metricValue(p.ci_high, 1)}`
-                      : '—'}
+                      ? `${metricValue(p.ci_low, 1)}-${metricValue(p.ci_high, 1)}`
+                      : '--'}
                   </td>
                 </tr>
               ))}
@@ -218,7 +218,7 @@ export default function ForecastChart({
       )}
 
       <p className="forecast-note">
-        {bandNote} Made {timeAgo(fc.made_at)} · {fc.model_version}
+        {bandNote} Made {timeAgo(fc.made_at)} | {fc.model_version}
       </p>
     </div>
   )

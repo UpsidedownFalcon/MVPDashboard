@@ -44,7 +44,7 @@ export const METRICS: MetricMeta[] = [
     label: 'Movement Control',
     short: 'CTRL',
     // Tremor index since 2026-08-03 (SPEC §5.4) — no longer shock transmission.
-    tooltip: 'Movement tremor vs. this athlete when fresh — rises as control degrades',
+    tooltip: 'Movement tremor vs. this soldier when fresh - rises as control degrades',
     cssVar: '--series-m4',
     color: '#C98500',
   },
@@ -54,7 +54,7 @@ export const METRICS: MetricMeta[] = [
     short: 'BAL',
     // SIGNED −100..+100 (SPEC §5.5): magnitude is the value, sign is the side.
     // Deliberately neutral wording — never "weaker", never cross-session.
-    tooltip: 'How evenly load is shared left/right in this session — magnitude, with the side carrying more',
+    tooltip: 'How evenly load is shared left/right in this session - magnitude, with the side carrying more',
     cssVar: '--series-m5',
     color: '#D55181',
   },
@@ -147,19 +147,19 @@ export const FLAG_META: Record<string, { weight: FlagWeight; label: string; hint
   cal_failed: {
     weight: 'alert',
     label: 'calibration failed',
-    hint: 'A sensor is motionless but disagrees with gravity — hardware fault',
+    hint: 'A sensor is motionless but disagrees with gravity - hardware fault',
   },
   degraded_sensors: {
     weight: 'alert',
     label: 'sensors missing',
-    hint: 'Fewer sensors than mapped — the affected metric is not coming',
+    hint: 'Fewer sensors than mapped - the affected metric is not coming',
   },
   saturated: {
     weight: 'alert',
     label: 'saturated',
     // Since 2026-08-03 m1/m2 are still reported under saturation, as LOWER
     // BOUNDS (BACKEND_SCHEMA §2, SPEC §3.7) — the UI renders them "≥ x".
-    hint: 'Sensor range clipped — Impact and Loading Rate are minimums, not exact values',
+    hint: 'Sensor range clipped - Impact and Loading Rate are minimums, not exact values',
   },
   uncalibrated: {
     weight: 'warning',
@@ -185,7 +185,7 @@ export const FLAG_META: Record<string, { weight: FlagWeight; label: string; hint
     weight: 'muted',
     label: 'warming up',
     // m4 also re-warms whenever a new movement-intensity band appears (SPEC §5.4)
-    hint: 'Movement Control / L-R Balance are learning this athlete’s baseline — a value is coming',
+    hint: 'Movement Control / L-R Balance are learning this soldier’s baseline - a value is coming',
   },
 }
 

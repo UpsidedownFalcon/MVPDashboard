@@ -44,7 +44,7 @@ export function evidenceLabel(key: string): string {
 }
 
 export function formatEvidence(key: string, v: unknown): string {
-  if (v == null) return '—'
+  if (v == null) return '--'
   switch (key) {
     case 'z': {
       const z = Number(v)

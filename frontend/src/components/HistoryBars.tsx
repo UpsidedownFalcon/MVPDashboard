@@ -34,7 +34,7 @@ function chartOption(
   metricIdx: number | 'composite',
 ): EChartsOption {
   const signed = meta.id !== 'composite' && isSignedMetric(meta.id)
-  const labels = history.buckets.map((b) => (b ? shortClock(b.t) : '·'))
+  const labels = history.buckets.map((b) => (b ? shortClock(b.t) : '-'))
   const values = history.buckets.map((b) => {
     if (!b) return null
     return metricIdx === 'composite' ? b.composite.avg : b.m[metricIdx]
@@ -82,15 +82,15 @@ function chartOption(
         const v = metricIdx === 'composite' ? b.composite.avg : b.m[metricIdx]
         const extra =
           metricIdx === 'composite' && b.composite.min != null
-            ? `<br/>range ${metricValue(b.composite.min)}–${metricValue(b.composite.max)}`
+            ? `<br/>range ${metricValue(b.composite.min)}-${metricValue(b.composite.max)}`
             : ''
         const shown = signed
           ? `${metricValue(Math.abs(v ?? 0), 1)}${
-              m5SideLabel(v ?? null) ? ` · ${m5SideLabel(v ?? null)}` : ''
+              m5SideLabel(v ?? null) ? ` | ${m5SideLabel(v ?? null)}` : ''
             }`
           : metricValue(v, 1)
         return `${shortClock(b.t)}<br/><b>${shown}</b>${extra}<br/>quality ${
-          b.quality != null ? Math.round(b.quality * 100) + '%' : '—'
+          b.quality != null ? Math.round(b.quality * 100) + '%' : '--'
         }`
       },
     },
@@ -179,9 +179,9 @@ export default function HistoryBars({
         {coverage != null && coverage < LOW_COVERAGE && (
           <span
             className="chip flag flag-warning"
-            title={`Only ${pct(coverage)} of ${windowLabel(window)} has data — these averages are not comparable to a fully covered window`}
+            title={`Only ${pct(coverage)} of ${windowLabel(window)} has data - these averages are not comparable to a fully covered window`}
           >
-            <AlertTriangle aria-hidden /> partial · {pct(coverage)} of window
+            <AlertTriangle aria-hidden /> partial | {pct(coverage)} of window
           </span>
         )}
         <button
@@ -194,11 +194,11 @@ export default function HistoryBars({
         </button>
       </div>
 
-      {query.isLoading && <p className="notice">Loading history…</p>}
-      {query.isError && <p className="notice">Couldn't load history — retrying…</p>}
+      {query.isLoading && <p className="notice">Loading history...</p>}
+      {query.isError && <p className="notice">Couldn't load history - retrying...</p>}
 
       {history && nonEmpty === 0 && (
-        <p className="notice">collecting… no data yet in {windowLabel(window)}</p>
+        <p className="notice">collecting... no data yet in {windowLabel(window)}</p>
       )}
 
       {history && nonEmpty > 0 && !showTable && (
@@ -266,7 +266,7 @@ export default function HistoryBars({
                           </td>
                         )
                       })}
-                      <td>{b.quality != null ? `${Math.round(b.quality * 100)}%` : '—'}</td>
+                      <td>{b.quality != null ? `${Math.round(b.quality * 100)}%` : '--'}</td>
                     </tr>
                   ),
               )}

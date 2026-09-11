@@ -31,7 +31,7 @@ export function shortClock(iso: string): string {
 
 /** 0–100 metric value for display; null-safe. */
 export function metricValue(v: number | null | undefined, digits = 0): string {
-  return v == null ? '—' : v.toFixed(digits)
+  return v == null ? '--' : v.toFixed(digits)
 }
 
 /** Impact / Loading Rate under the `saturated` flag are LOWER BOUNDS, not
@@ -57,7 +57,7 @@ export function boundedMetricValue(
 }
 
 export function pct(v: number | null | undefined): string {
-  return v == null ? '—' : `${Math.round(v * 100)}%`
+  return v == null ? '--' : `${Math.round(v * 100)}%`
 }
 
 // --- forecast band labelling (REQUIRED — biomech SPEC §2) ---------------------

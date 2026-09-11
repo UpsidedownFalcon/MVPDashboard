@@ -90,13 +90,13 @@ function DecideRow({ device, action }: { device: string; action: AdviceAction })
         ) : (
           <span className="insight-decided-label decided-overridden">
             <CornerUpRight aria-hidden /> Overridden
-            {decision.note ? <> — {decision.note}</> : null}
+            {decision.note ? <> - {decision.note}</> : null}
           </span>
         )}
         <button
           className="insight-decide-change"
           onClick={() => setChanging(true)}
-          title={`Decided ${timeAgo(decision.decided_at)}${decision.decided_by ? ` by ${decision.decided_by}` : ''} — change it`}
+          title={`Decided ${timeAgo(decision.decided_at)}${decision.decided_by ? ` by ${decision.decided_by}` : ''} - change it`}
         >
           change
         </button>
@@ -209,7 +209,7 @@ function AdviceCard({
         <time
           className="insight-time"
           dateTime={action.updated_at}
-          title={`${action.updated_at} — updated ${timeAgo(action.updated_at)}`}
+          title={`${action.updated_at} - updated ${timeAgo(action.updated_at)}`}
         >
           {ageLabel}
         </time>
@@ -227,7 +227,7 @@ function AdviceCard({
 
       {action.tip && (
         <div className="insight-tip">
-          <span className="insight-tip-label">Coaching cue</span>
+          <span className="insight-tip-label">PTI cue</span>
           <p>{action.tip}</p>
         </div>
       )}
@@ -276,8 +276,8 @@ export default function InsightsPanel({ device }: { device: string }) {
     placeholderData: (prev) => prev,
   })
 
-  if (advice.isLoading) return <p className="notice">Loading insights…</p>
-  if (advice.isError) return <p className="notice">Couldn't load insights — retrying…</p>
+  if (advice.isLoading) return <p className="notice">Loading insights...</p>
+  if (advice.isError) return <p className="notice">Couldn't load insights - retrying...</p>
 
   const buckets = advice.data?.buckets ?? []
   const events = new Map<string, Insight>()

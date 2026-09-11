@@ -117,11 +117,11 @@ export default function CalibrationBadge({ state }: { state: CalibrationState })
     return (
       <span
         className="chip calibrating"
-        title="Calibrating — keep the athlete standing still for the countdown."
+        title="Calibrating - keep the soldier standing still for the countdown."
         aria-live="polite"
       >
         <span className="calibrating-dot" aria-hidden />
-        Stand still · {state.secondsLeft}s
+        Stand still | {state.secondsLeft}s
       </span>
     )
   }
@@ -130,7 +130,7 @@ export default function CalibrationBadge({ state }: { state: CalibrationState })
     return (
       <span
         className="chip flag flag-alert"
-        title="A sensor held still but its reading disagrees with gravity, so the correction was refused and last-known-good values stand. That points at the hardware, not the athlete."
+        title="A sensor held still but its reading disagrees with gravity, so the correction was refused and last-known-good values stand. That points at the hardware, not the soldier."
       >
         <TriangleAlert aria-hidden /> Calibration failed
       </span>
@@ -138,7 +138,7 @@ export default function CalibrationBadge({ state }: { state: CalibrationState })
   }
 
   return (
-    <span className="chip calibrated" title="Calibrated on this athlete, this session.">
+    <span className="chip calibrated" title="Calibrated on this soldier, this session.">
       <CheckCircle2 aria-hidden /> Calibrated
     </span>
   )

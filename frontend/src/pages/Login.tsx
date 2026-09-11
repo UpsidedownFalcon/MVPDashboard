@@ -27,7 +27,7 @@ export default function Login() {
       navigate('/', { replace: true })
     } catch (err) {
       if (err instanceof ApiError && err.status === 429) {
-        setError('Too many attempts — wait a minute and try again.')
+        setError('Too many attempts - wait a minute and try again.')
       } else {
         setError('Invalid username or password')
       }
@@ -71,7 +71,7 @@ export default function Login() {
           </div>
         )}
         <button className="login-submit" type="submit" disabled={busy}>
-          {busy ? 'Signing in…' : 'Sign in'}
+          {busy ? 'Signing in...' : 'Sign in'}
         </button>
       </form>
     </div>

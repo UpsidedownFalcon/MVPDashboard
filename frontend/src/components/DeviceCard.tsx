@@ -85,7 +85,7 @@ export default function DeviceCard({ device }: { device: LiveDevice }) {
         <div className="device-card-projection">
           <RiskStat
             value={closest.pred}
-            label={`Projected risk · ${horizonLabel(closest.horizon)}`}
+            label={`Projected risk | ${horizonLabel(closest.horizon)}`}
             size="hero"
             sub={forecasts.data ? `made ${timeAgo(forecasts.data.made_at)}` : undefined}
             title={COMPOSITE.tooltip}
@@ -107,9 +107,9 @@ export default function DeviceCard({ device }: { device: LiveDevice }) {
         <div className="device-card-projection">
           <RiskStat
             value={live?.c ?? null}
-            label="Injury risk · now"
+            label="Injury risk | now"
             size="hero"
-            sub="waiting for the first projection…"
+            sub="waiting for the first projection..."
             title={COMPOSITE.tooltip}
           />
         </div>

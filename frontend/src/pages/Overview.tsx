@@ -104,27 +104,27 @@ function Hero({
       </div>
       <div className="hero-stats">
         <div className="hero-stat">
-          <div className="hero-stat-label">Athletes online</div>
+          <div className="hero-stat-label">Soldiers online</div>
           <div className="hero-stat-value">{onlineCount}</div>
         </div>
         <div className="hero-stat">
           <div className="hero-stat-label">
             {topProjected?.horizon
-              ? `Highest projected · ${horizonLabel(topProjected.horizon)}`
+              ? `Highest projected | ${horizonLabel(topProjected.horizon)}`
               : 'Highest risk now'}
           </div>
           <div
             className="hero-stat-value"
             style={band ? { color: `var(${band.cssVar})` } : undefined}
           >
-            {topProjected ? metricValue(topProjected.value) : '—'}
+            {topProjected ? metricValue(topProjected.value) : '--'}
           </div>
           {topProjected && (
             <div className="hero-stat-sub">{names[topProjected.dev] ?? topProjected.dev}</div>
           )}
         </div>
         <div className="hero-stat">
-          <div className="hero-stat-label">Alerts · 30 min</div>
+          <div className="hero-stat-label">Alerts | 30 min</div>
           <div
             className="hero-stat-value"
             style={recentAlerts ? { color: 'var(--status-critical)' } : undefined}
@@ -165,15 +165,15 @@ export default function Overview() {
         )}
       </section>
 
-      {isError && <p className="notice">Failed to load devices — retrying…</p>}
-      {isLoading && <p className="notice">Loading devices…</p>}
+      {isError && <p className="notice">Failed to load soldiers - retrying...</p>}
+      {isLoading && visible.length === 0 && <p className="notice">Loading soldiers...</p>}
 
       {/* Offline devices stay on the grid with their stored data (2026-08-06);
           this empty state now means "nothing has ever registered". */}
       {!isLoading && visible.length === 0 && (
         <div className="card empty-state">
           <p>
-            <b>Waiting for devices…</b> point wearables at this server's UDP port.
+            <b>Waiting for soldiers...</b> point wearables at this server's UDP port.
           </p>
         </div>
       )}

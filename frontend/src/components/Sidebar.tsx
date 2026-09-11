@@ -25,15 +25,15 @@ export default function Sidebar() {
       </NavLink>
 
       <nav className="sb-nav">
-        <div className="eyebrow sb-sec">Dashboard</div>
+        <div className="eyebrow sb-sec">Command</div>
         <NavLink to="/" end className="sb-item">
           <LayoutGrid size={15} aria-hidden />
-          Overview
+          Unit overview
         </NavLink>
 
         {/* Offline athletes stay listed (2026-08-06) — muted dot, em-dash risk */}
-        <div className="eyebrow sb-sec">Athletes</div>
-        {visible.length === 0 && <div className="sb-empty">none registered</div>}
+        <div className="eyebrow sb-sec">Soldiers</div>
+        {visible.length === 0 && <div className="sb-empty">no soldiers registered</div>}
         {visible.map((d) => {
           const c = latest[d.device_id]?.c
           const band = c != null ? RISK_BAND_META[riskBand(c)] : null
@@ -64,7 +64,7 @@ export default function Sidebar() {
             role="img"
             aria-label={conn === 'connected' ? 'live connection ok' : 'reconnecting'}
           />
-          {conn === 'connected' ? 'live' : 'reconnecting…'}
+          {conn === 'connected' ? 'live' : 'reconnecting...'}
         </div>
         <div className="sb-user">
           <span className="sb-username">{user?.username}</span>

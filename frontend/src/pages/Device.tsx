@@ -89,13 +89,13 @@ export default function Device() {
     id, device?.online ?? false, live?.flags, device?.lastSignalMs ?? null, live?.cal,
   )
 
-  if (isLoading) return <p className="notice">Loading…</p>
+  if (isLoading) return <p className="notice">Loading...</p>
   if (!device) {
     return (
       <div className="card empty-state">
-        <p>Unknown device.</p>
+        <p>Unknown soldier.</p>
         <Link to="/" className="segment">
-          <ArrowLeft size={14} aria-hidden /> Back to overview
+          <ArrowLeft size={14} aria-hidden /> Back to unit overview
         </Link>
       </div>
     )
@@ -111,7 +111,7 @@ export default function Device() {
   return (
     <div className="device-page">
       <header className="device-head">
-        <Link to="/" className="back" aria-label="Back to overview">
+        <Link to="/" className="back" aria-label="Back to unit overview">
           <ArrowLeft size={15} aria-hidden />
         </Link>
         <RenameInline device={device} />
@@ -132,7 +132,7 @@ export default function Device() {
             <div className="offline-overlay">
               <div>
                 <b>offline</b>
-                {device.last_seen && <> — last seen {clockTime(device.last_seen)}</>}
+                {device.last_seen && <> - last seen {clockTime(device.last_seen)}</>}
               </div>
             </div>
           )}
@@ -149,7 +149,7 @@ export default function Device() {
             <div className="device-live-risk">
               <RiskStat
                 value={live?.c ?? null}
-                label="Injury risk · now"
+                label="Injury risk | now"
                 size="hero"
                 trend={shortestTrend}
                 title={COMPOSITE.tooltip}
@@ -220,7 +220,7 @@ export default function Device() {
 
         <section className="device-side" aria-label="Insights, history and projections">
           <Tabs
-            label="Device analysis"
+            label="Soldier analysis"
             active={tab}
             onChange={setTab}
             tabs={[
@@ -236,7 +236,7 @@ export default function Device() {
                   windowsQuery.data && windowsQuery.data.windows.length > 0 ? (
                     <HistoryBars device={id} windows={windowsQuery.data.windows} />
                   ) : (
-                    <p className="notice">Loading…</p>
+                    <p className="notice">Loading...</p>
                   ),
               },
               {

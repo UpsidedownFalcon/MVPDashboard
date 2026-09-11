@@ -400,7 +400,7 @@ export default function HumanoidFigure({ variant, limbs, active = true, emphasis
     <div
       className={`figure figure-${variant} ${active ? 'is-active' : 'is-idle'}`}
       role="img"
-      aria-label="Athlete wearing four leg sensors streaming live motion data"
+      aria-label="Soldier wearing four leg sensors streaming live motion data"
     >
       {hero && <div className="figure-glow" aria-hidden />}
       {hero && <div className="figure-ring" aria-hidden />}

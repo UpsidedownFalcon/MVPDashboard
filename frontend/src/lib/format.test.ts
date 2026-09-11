@@ -11,9 +11,9 @@ import {
 
 describe('format placeholders', () => {
   it('renders a missing metric value as the placeholder', () => {
-    expect(metricValue(null)).toBe('—')
-    expect(metricValue(undefined)).toBe('—')
-    expect(pct(null)).toBe('—')
+    expect(metricValue(null)).toBe('--')
+    expect(metricValue(undefined)).toBe('--')
+    expect(pct(null)).toBe('--')
   })
 
   it('formats present values', () => {

@@ -31,7 +31,7 @@ const QUALITY_VAR = {
 
 export function QualityMeter({ quality }: { quality: number | null }) {
   if (quality == null) {
-    return <span className="quality quality-none">quality —</span>
+    return <span className="quality quality-none">quality --</span>
   }
   const band = qualityBand(quality)
   const color = `var(${QUALITY_VAR[band]})`
@@ -39,7 +39,7 @@ export function QualityMeter({ quality }: { quality: number | null }) {
   return (
     <span
       className="quality"
-      title={`Data quality ${pct(quality)} — share of expected sensor samples arriving`}
+      title={`Data quality ${pct(quality)} - share of expected sensor samples arriving`}
     >
       <span className="quality-bars" aria-hidden>
         {[0, 1, 2, 3, 4].map((i) => (
@@ -77,7 +77,7 @@ export function SensorDots({
           <span
             key={`${s.source_id}:${s.sensor_id}`}
             className="sensor"
-            title={`${label} · ${s.rate_hz.toFixed(0)} Hz · ${
+            title={`${label} | ${s.rate_hz.toFixed(0)} Hz | ${
               s.last_seen ? `seen ${Math.round(seen / 1000)}s ago` : 'never streamed'
             }`}
           >
@@ -192,7 +192,7 @@ export function RenameInline({ device }: { device: Device }) {
         onBlur={commit}
         onKeyDown={onKey}
         onClick={(e) => e.stopPropagation()}
-        aria-label="Athlete name"
+        aria-label="Soldier name"
       />
     )
   }
