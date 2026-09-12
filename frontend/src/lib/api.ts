@@ -2,6 +2,18 @@
 // redirects to /login (APPFLOW §1.1) — the httpOnly session cookie rides along
 // automatically on same-origin requests.
 
+import {
+  demoAdviceTimeline,
+  demoCurrentAdvice,
+  demoDecision,
+  demoDevices,
+  demoForecasts,
+  demoHistory,
+  demoInsights,
+  demoRecent,
+  demoWindows,
+} from './demo/api'
+import { isDemoId } from './demo/ids'
 import type { Severity } from './metrics'
 
 export interface Sensor {
@@ -213,40 +225,80 @@ const post = <T,>(url: string, body?: unknown): Promise<T> =>
     body: body === undefined ? undefined : JSON.stringify(body),
   })
 
+// Demo soldiers (STAGE4 D4): every per-device helper answers a `demo-` id
+// from lib/demo without a request, so the same components serve real and
+// synthetic devices and the network never learns a soldier exists.
 export const fetchDevices = () => request<Device[]>('/api/devices')
 export const fetchWindows = (dev: string) =>
-  request<{ windows: WindowEntry[] }>(`/api/metrics/windows?device=${dev}`)
+  isDemoId(dev)
+    ? Promise.resolve(demoWindows(dev, Date.now()))
+    : request<{ windows: WindowEntry[] }>(`/api/metrics/windows?device=${dev}`)
 export const fetchHistory = (dev: string, window: string, buckets: number) =>
-  request<History>(
-    `/api/metrics/history?device=${dev}&window=${encodeURIComponent(window)}&buckets=${buckets}`,
-  )
+  isDemoId(dev)
+    ? Promise.resolve(demoHistory(dev, window, buckets, Date.now()))
+    : request<History>(
+        `/api/metrics/history?device=${dev}&window=${encodeURIComponent(window)}&buckets=${buckets}`,
+      )
 export const fetchForecasts = (dev: string) =>
-  request<Forecasts>(`/api/forecasts/latest?device=${dev}`)
-export const fetchInsights = (dev?: string, limit = 20) =>
-  request<Insight[]>(
-    dev ? `/api/insights?device=${dev}&limit=${limit}` : `/api/insights?limit=${limit}`,
-  )
-/** device is REQUIRED — advice is per athlete. */
+  isDemoId(dev)
+    ? Promise.resolve(demoForecasts(dev, Date.now()))
+    : request<Forecasts>(`/api/forecasts/latest?device=${dev}`)
+export const fetchInsights = async (dev?: string, limit = 20): Promise<Insight[]> => {
+  const now = Date.now()
+  if (dev !== undefined) {
+    return isDemoId(dev)
+      ? demoInsights(dev, limit, now)
+      : request<Insight[]>(`/api/insights?device=${dev}&limit=${limit}`)
+  }
+  // Squad-wide feed (hero alert count): real rows merged with the soldiers'.
+  // A failed real fetch must not hide the soldiers' alerts; a 401 still
+  // redirects to /login inside request() before we get here.
+  const real = await request<Insight[]>(`/api/insights?limit=${limit}`).catch((e: unknown) => {
+    if (e instanceof ApiError && e.status === 401) throw e
+    return [] as Insight[]
+  })
+  return [...real, ...demoInsights(undefined, limit, now)]
+    .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))
+    .slice(0, limit)
+}
+/** device is REQUIRED - advice is per soldier. */
 export const fetchCurrentAdvice = (dev: string) =>
-  request<CurrentAdvice>(`/api/insights/current?device=${dev}`)
+  isDemoId(dev)
+    ? Promise.resolve(demoCurrentAdvice(dev, Date.now()))
+    : request<CurrentAdvice>(`/api/insights/current?device=${dev}`)
 export const fetchAdviceTimeline = (dev: string) =>
-  request<AdviceTimeline>(`/api/insights/timeline?device=${dev}`)
+  isDemoId(dev)
+    ? Promise.resolve(demoAdviceTimeline(dev, Date.now()))
+    : request<AdviceTimeline>(`/api/insights/timeline?device=${dev}`)
 export const postInsightDecision = (body: {
   device_id: string
   action_id: string
   action_updated_at: string
   decision: 'adopted' | 'overridden'
   note?: string
-}) => post<InsightDecision>('/api/insights/decisions', body)
+}) =>
+  isDemoId(body.device_id)
+    ? Promise.resolve(demoDecision(body, Date.now()))
+    : post<InsightDecision>('/api/insights/decisions', body)
 export const fetchRecent = (dev: string, seconds: number) =>
-  request<Recent>(`/api/metrics/recent?device=${dev}&seconds=${seconds}`)
+  isDemoId(dev)
+    ? Promise.resolve(demoRecent(dev, seconds, Date.now()))
+    : request<Recent>(`/api/metrics/recent?device=${dev}&seconds=${seconds}`)
 
-export const renameDevice = (dev: string, display_name: string) =>
-  request<Device>(`/api/devices/${dev}`, {
+export const renameDevice = (dev: string, display_name: string) => {
+  if (isDemoId(dev)) {
+    // a soldier keeps its name (STAGE4 R2); RenameInline never reaches here
+    const device = demoDevices(Date.now()).find((d) => d.device_id === dev)
+    return device
+      ? Promise.resolve(device)
+      : Promise.reject(new ApiError(404, `unknown device ${dev}`))
+  }
+  return request<Device>(`/api/devices/${dev}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ display_name }),
   })
+}
 
 export const login = (username: string, password: string) =>
   post<Me>('/api/auth/login', { username, password })
