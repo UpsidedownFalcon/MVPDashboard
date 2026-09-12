@@ -129,3 +129,17 @@ export function slopePerMin(profile: DemoProfile, s: number, spanS = 300): numbe
   const before = envelopeAt(profile.envelopes.c, s - spanS)
   return (now - before) / (spanS / 60)
 }
+
+/** Composite trend of the window ending at `s` against the preceding equal
+ *  window, with the backend's dead band max(2, 0.5 * pooled sd)
+ *  (backend/api/queries.py _trend). Shared by the windows route and the
+ *  rule engine so a trend arrow and a "still trending up" reason agree. */
+export function windowTrend(profile: DemoProfile, s: number, windowS: number): 'up' | 'down' | 'flat' {
+  const cur = bucketStats(profile, s - windowS, s, 30)
+  const prev = bucketStats(profile, s - 2 * windowS, s - windowS, 30)
+  if (!cur || !prev) return 'flat'
+  const delta = cur.composite.avg - prev.composite.avg
+  const pooled = Math.sqrt((cur.composite.sd ** 2 + prev.composite.sd ** 2) / 2)
+  const band = Math.max(2, 0.5 * pooled)
+  return delta > band ? 'up' : delta < -band ? 'down' : 'flat'
+}

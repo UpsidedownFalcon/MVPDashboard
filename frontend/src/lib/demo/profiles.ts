@@ -106,7 +106,9 @@ export const DEMO_PROFILES: readonly DemoProfile[] = [
       c: kf([0, 25], [3600, 40], [6300, 70], [6900, 86], [7500, 89], [9000, 90]),
       m1: kf([0, 30], [3600, 45], [6300, 62], [7500, 68], [9000, 70]),
       m2: kf([0, 28], [3600, 42], [6300, 60], [7500, 66], [9000, 68]),
-      m3: kf([0, 4], [5400, 10], [6000, 18], [6600, 40], [7080, 66], [7500, 82], [9000, 86]),
+      // an early bump widens the 2 h spread, so the alert phase starts only
+      // ~7 min ago rather than the whole last half hour
+      m3: kf([0, 4], [2400, 18], [3900, 12], [5400, 14], [6300, 22], [6780, 32], [7080, 52], [7500, 82], [9000, 86]),
       m4: kf([0, 8], [6000, 14], [7500, 26], [9000, 30]),
       m5: kf([0, 4], [7500, 9], [9000, 10]),
     },
@@ -186,12 +188,13 @@ export const DEMO_PROFILES: readonly DemoProfile[] = [
       m2: kf([0, 33], [6000, 58], [7500, 40], [9000, 38]),
       m3: kf([0, 4], [4200, 20], [6000, 48], [7500, 44], [9000, 40]),
       m4: kf([0, 12], [6000, 22], [7500, 16], [9000, 15]),
-      m5: kf([0, -6], [6000, -20], [7500, -18], [9000, -17]),
+      // a two-minute right-side excursion 3-5 min ago fires movement_quality
+      m5: kf([0, -6], [6000, -20], [7140, -18], [7200, -34], [7320, -34], [7380, -19], [7500, -18], [9000, -17]),
     },
     texture: HARD_TEXTURE,
     episodes: [
       { rule_id: 'load_spike', from_s: 5400, to_s: 6000 },
-      { rule_id: 'movement_quality', metric: 'm5', from_s: 7020, to_s: 7140 },
+      { rule_id: 'movement_quality', metric: 'm5', from_s: 7200, to_s: 7320 },
     ],
   },
   {

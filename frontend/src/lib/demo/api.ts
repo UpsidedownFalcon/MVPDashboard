@@ -4,13 +4,10 @@
 // always a parameter: only the lib/api.ts boundary reads the clock.
 
 import type {
-  AdviceTimeline,
-  CurrentAdvice,
   Device,
   Forecasts,
   History,
   HistoryBucket,
-  Insight,
   InsightDecision,
   Recent,
   Sensor,
@@ -20,7 +17,6 @@ import { HISTORY_MAX_BUCKETS } from '../config'
 import { durationToSeconds, evenBucketCount } from '../format'
 import { valueNoise } from './noise'
 import {
-  DEMO_HORIZONS,
   DEMO_MODEL_VERSION,
   DEMO_PROFILES,
   DEMO_WINDOWS,
@@ -28,7 +24,12 @@ import {
   sessionSeconds,
   type DemoProfile,
 } from './profiles'
-import { bucketStats, envelopeAt, qualityAt, sampleAt, slopePerMin } from './signal'
+import { forecastPoints } from './forecast'
+import { bucketStats, qualityAt, sampleAt, windowTrend } from './signal'
+import { iso } from './time'
+
+export { iso }
+export { demoAdviceTimeline, demoCurrentAdvice, demoInsights, DEMO_HOLD_S, DEMO_MAX_ACTIONS } from './insights'
 
 /** Same layout as the backend's default LIMB_MAP (TRD §3). */
 const LIMBS: readonly [number, number, string][] = [
@@ -38,20 +39,9 @@ const LIMBS: readonly [number, number, string][] = [
   [1, 2, 'right_shin'],
 ]
 
-/** Mirrors the backend's INSIGHT_HOLD_S / INSIGHT_MAX_ACTIONS (.env.example). */
-export const DEMO_HOLD_S = 150
-export const DEMO_MAX_ACTIONS = 3
-
-/** Millisecond ISO with a Z suffix: byte-identical to the backend's _iso(). */
-export function iso(ms: number): string {
-  return new Date(ms).toISOString()
-}
-
 function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v
 }
-
-const r2 = (v: number) => Math.round(v * 100) / 100
 
 // --- devices ------------------------------------------------------------------
 
@@ -108,14 +98,7 @@ export function demoWindows(id: string, nowMs: number): { windows: WindowEntry[]
         quality: null, coverage: 0, trend: 'flat',
       }
     }
-    const prev = bucketStats(p, sNow - 2 * W, sNow - W, 30)
-    let trend: WindowEntry['trend'] = 'flat'
-    if (prev) {
-      const delta = cur.composite.avg - prev.composite.avg
-      const pooled = Math.sqrt((cur.composite.sd ** 2 + prev.composite.sd ** 2) / 2)
-      const band = Math.max(2, 0.5 * pooled)
-      trend = delta > band ? 'up' : delta < -band ? 'down' : 'flat'
-    }
+    const trend = windowTrend(p, sNow, W)
     const covered = sNow - Math.max(0, sNow - W)
     return {
       window: label,
@@ -171,22 +154,7 @@ export function demoForecasts(id: string, nowMs: number): Forecasts {
   const p = profileFor(id)
   const madeAtMs = Math.floor(nowMs / 60_000) * 60_000
   if (!p) return { made_at: iso(madeAtMs), model_version: DEMO_MODEL_VERSION, provisional: false, points: [] }
-  const sMade = sessionSeconds(madeAtMs)
-  const base = envelopeAt(p.envelopes.c, sMade)
-  const slope = slopePerMin(p, sMade)
-  const points = DEMO_HORIZONS.map((horizon) => {
-    const hs = durationToSeconds(horizon)
-    const pred = clamp(base + (slope * hs) / 60, 0, 100)
-    const half = 3 + 2.2 * Math.sqrt(hs / 600)
-    return {
-      horizon,
-      target_time: iso(madeAtMs + hs * 1000),
-      pred: r2(pred),
-      ci_low: r2(clamp(pred - half, 0, 100)),
-      ci_high: r2(clamp(pred + half, 0, 100)),
-    }
-  })
-  return { made_at: iso(madeAtMs), model_version: DEMO_MODEL_VERSION, provisional: false, points }
+  return { made_at: iso(madeAtMs), model_version: DEMO_MODEL_VERSION, provisional: false, points: forecastPoints(p, madeAtMs) }
 }
 
 // --- recent ---------------------------------------------------------------------
@@ -206,33 +174,6 @@ export function demoRecent(id: string, seconds: number, nowMs: number): Recent {
     rows.push([Math.round(offsetMs), ...m, c, qualityAt(p, s)])
   }
   return { device_id: id, t0: iso(t0Ms), rows }
-}
-
-// --- insights (STAGE4 phase 6 fills these in) -------------------------------------
-
-export function demoInsights(_id: string | undefined, _limit: number, _nowMs: number): Insight[] {
-  return []
-}
-
-export function demoAdviceTimeline(id: string, nowMs: number): AdviceTimeline {
-  return {
-    device_id: id,
-    generated_at: iso(nowMs),
-    hold_s: DEMO_HOLD_S,
-    max_actions: DEMO_MAX_ACTIONS,
-    windows: ['live', ...DEMO_WINDOWS],
-    buckets: [],
-  }
-}
-
-export function demoCurrentAdvice(id: string, nowMs: number): CurrentAdvice {
-  return {
-    device_id: id,
-    generated_at: iso(nowMs),
-    hold_s: DEMO_HOLD_S,
-    max_actions: DEMO_MAX_ACTIONS,
-    actions: [],
-  }
 }
 
 /** POST /api/insights/decisions on a soldier: echo the shape, store nothing

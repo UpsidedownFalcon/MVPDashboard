@@ -11,6 +11,7 @@ import {
 } from 'lucide-react'
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
 import { renameDevice, type Device, type Sensor } from '../lib/api'
+import { isDemoId } from '../lib/demo/ids'
 import { pct } from '../lib/format'
 import { FLAG_META, HIDDEN_FLAGS, qualityBand, type Severity } from '../lib/metrics'
 
@@ -169,6 +170,12 @@ export function RenameInline({ device }: { device: Device }) {
   const commit = () => {
     const trimmed = name.trim()
     setEditing(false)
+    if (isDemoId(device.device_id)) {
+      // A soldier keeps its name (STAGE4 R2): the control works, nothing
+      // changes, and neither the optimistic cache write nor the API runs.
+      setName(device.display_name)
+      return
+    }
     if (trimmed && trimmed !== device.display_name) rename.mutate(trimmed)
     else setName(device.display_name)
   }
