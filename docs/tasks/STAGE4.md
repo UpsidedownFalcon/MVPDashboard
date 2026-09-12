@@ -365,3 +365,57 @@ Paragraph:
 | demo-5 | SPC Ramirez | 12 until 7200, then rising to 30 by 7500; m1/m2 jump | `warming_up` | 58%, -6/h | `load_spike` (warning, from 7460, open) -> **ease_off** live |
 
 Rank/surname strings, envelopes and episode timings are data in `profiles.ts`; changing a story is a table edit, not a code change.
+
+---
+
+## As built (2026-09-12)
+
+Branch `feat/demo-frontend`, seven commits on top of `main`, nothing pushed. Deviations from
+the plan above, per task:
+
+- **S4-T00** - vitest pinned to the 3.x line (`^3.2.7`): vitest 5 requires Vite 6.4+ and the
+  project is on Vite 5.4. `npm ci`, then `npm install -D vitest@^3`, updated `package-lock.json`.
+- **S4-T01** - the 66 Appendix A replacements were applied by a script that asserted each
+  "before" string occurred exactly the expected number of times; the hero copy waited for T07.
+  The `Loading soldiers...` notice now renders only while the visible list is empty.
+- **S4-T02** - as planned; the explicit focus-ring rule was dropped because `theme.css` already
+  styles `:is(a, button, input, [role='tab']):focus-visible`.
+- **S4-T03** - as planned, plus `windowTrend()` in `signal.ts` (added in T06 so the windows route
+  and the rule engine share one trend definition).
+- **S4-T04** - the live buffer trims by count rather than by a float cutoff; the cutoff kept the
+  boundary sample and left 3601 rows after a resume.
+- **S4-T05** - `iso()` lives in `lib/demo/time.ts` and the forecast points in `lib/demo/forecast.ts`
+  so the REST layer and the rule engine share them without an import cycle. Forecasts extrapolate
+  the current trend with decay toward a plateau (tau 20 min) instead of a straight line, which had
+  projected an easing soldier to 0 at +30m and +1h.
+- **S4-T06** - episodes carry no severity override: a row is emitted only when the rule's own
+  precondition holds on the charted signal and severity follows the backend z thresholds. Two
+  envelopes were reshaped from the Appendix C sketch so the stories emerge from the rules rather
+  than being asserted: SGT Alvarez's m3 got an early bump (the alert phase now starts about 7 min
+  ago, 8 alert rows in the last 30 min instead of 14) and SSG Brooks's m5 excursion moved to
+  3-5 min ago so its card lands in "past 5m". Brooks carries no `residual_load` (that rule needs
+  ci_low >= 85, which only Alvarez reaches); Alvarez's `residual_load` + `rising_risk` group into
+  one `plan_recovery` card with two reasons, which shows the grouping. PFC Okafor's 85-minute-old
+  technique row also surfaces as his card's top insight, exactly as the real
+  `/api/insights?limit=5` would.
+- **S4-T07** - APPFLOW.md and PRD.md name none of the changed labels, so only UIUX.md changed
+  (23 in-place edits plus the new §14).
+
+Verification performed:
+
+- `npm run build` and `npm test` green after every phase; final state 9 test files, 66 tests.
+- Forbidden-character and wording greps over `frontend/src` and `index.html`: only code comments
+  and the guard regex in `text.test.ts` remain.
+- Docker Desktop was not running and this checkout has no `.env`, so the compose-stack steps of
+  the checklist (3, 6, 8) were replaced by a scratch mock api (cookie auth, an empty or one-device
+  registry, 404 forecasts, empty insights, and `/ws/live` streaming 60 Hz ticks for device "100")
+  behind the Vite dev proxy, driven by headless Chromium. The harness is not committed. Results:
+  40/40 checks with no real device (mock log: zero API/WS requests carrying a demo id); 42/43 with
+  a real device streaming, the one miss being the browser's console line for the real device's
+  expected 404 "no forecast yet", filtered afterwards. Rename on a soldier sent no PATCH and
+  Adopt/Override sent no POST; the real device sorted first, its summary expanded to the real
+  readout, its rename did PATCH `/api/devices/100`, and its backfill did GET
+  `/api/metrics/recent?device=100`. Screenshots were reviewed for the overview (five and six
+  cards), the expanded detail header, the insights stack, history and projections.
+- Still to run by hand against the real stack: the offline-summary behaviour on a real wearable
+  (checklist 6) and the Caddy image rebuild (checklist 8).

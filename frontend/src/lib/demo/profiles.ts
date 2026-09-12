@@ -103,7 +103,7 @@ export const DEMO_PROFILES: readonly DemoProfile[] = [
     soc0: 75,
     socDrainPerHour: 6,
     envelopes: {
-      c: kf([0, 25], [3600, 40], [6300, 70], [6900, 86], [7500, 89], [9000, 90]),
+      c: kf([0, 25], [3600, 40], [6300, 70], [6900, 86], [7500, 91], [9000, 93]),
       m1: kf([0, 30], [3600, 45], [6300, 62], [7500, 68], [9000, 70]),
       m2: kf([0, 28], [3600, 42], [6300, 60], [7500, 66], [9000, 68]),
       // an early bump widens the 2 h spread, so the alert phase starts only

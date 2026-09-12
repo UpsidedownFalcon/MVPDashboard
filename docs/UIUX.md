@@ -16,11 +16,12 @@
 **Navigation is a left sidebar** (224px, `--surface` on `--bg`, hairline right border):
 1. HIPPOS logo — the `<LogoFull />` inline SVG component (paths taken from
    `mockup/visual_guidelines/Logo/svg/`; see §10 for why it must be inline), links `/`.
-2. "Overview" nav item.
-3. **Athletes** section (2026-08-06; was "Athletes online"): one row per **registered**
+2. "Unit overview" nav item under a "Command" section eyebrow (military theme 2026-09-12, STAGE4 R3).
+3. **Soldiers** section (2026-09-12; was "Athletes", and "Athletes online" before 2026-08-06): one row per **registered**
    device, online first then by name — display name, status dot (muted when offline),
-   current composite as a small number tinted by risk band (em-dash when offline).
-   Offline athletes stay listed with their stored data reachable. Click →
+   current composite as a small number tinted by risk band ("--" when offline).
+   Offline soldiers stay listed with their stored data reachable; the empty state reads
+   "no soldiers registered". Click →
    `/device/:id`. Active route gets a 2px `--accent` left rail + 5% accent wash
    (old-mockup pattern, kept).
 4. Bottom block: WS connection dot (§6) + username + logout.
@@ -64,12 +65,14 @@ low-opacity cyan glow that breathes (no brand mark behind the card; static under
   nodes (thigh/shin × L/R) with staggered sonar pings, data particles travelling
   down each instrumented bone (there is no baseline/ground element). This is the
   product's "live data" signature.
-- Middle: eyebrow + headline + short paragraph in plain language (§11 copy rules),
+- Middle: eyebrow + headline + short paragraph in plain language (§11 copy rules; since
+  2026-09-12 the commander-readiness copy of STAGE4 Appendix B, which says "Built for units
+  like the 1st Cavalry Division", never "used by"),
   then a 6-metric mini-legend: color swatch + display name + one-clause tooltip each
   (from `lib/metrics.ts`, SPEC §9 names).
-- Right: live squad stats as stat tiles — "Athletes online", highest projected risk
+- Right: live squad stats as stat tiles — "Soldiers online", highest projected risk
   (name + value, risk-band tinted; falls back to a "Highest risk now" tile when no
-  forecasts exist yet), and "Alerts · 30 min" (alert-severity insights squad-wide
+  forecasts exist yet), and "Alerts | 30 min" (alert-severity insights squad-wide
   in the last 30 minutes).
 - **Collapsible**: an "About this data" toggle collapses the hero to a single slim
   row; state persists in `localStorage`. Daily users get density, first-time
@@ -78,7 +81,7 @@ low-opacity cyan glow that breathes (no brand mark behind the card; static under
 **Device panels** — one per **registered** device, online first (2026-08-06;
 reverses the 2026-08-02 "silent >10 s disappears" rule). An offline device keeps
 its card: offline badge, frozen sparkline, and its stored projections and top
-insight stay browsable; the "Athletes online" hero stat counts only the online
+insight stay browsable; the "Soldiers online" hero stat counts only the online
 ones. New devices appear on first packet. Grid: 1–4 columns
 responsive (auto-fill, 330px min), cards `--surface` radius 16, hover raises border to `--border-hover`;
 the whole card is one click target → `/device/:id` (rename control excepted).
@@ -86,10 +89,12 @@ the whole card is one click target → `/device/:id` (rename control excepted).
 Panel contents, top to bottom:
 1. Header row: editable name (✏ inline: click → input, Enter saves via
    `PATCH /api/devices/:id`, Esc cancels, optimistic + rollback), online badge,
-   **calibration badge** (§6a) while settling, quality meter (§6), four sensor
-   micro-dots (§6) in sorted-limb order, and the **battery** (§6b) top-right.
+   **calibration badge** (§6a) while settling, the static **sensor summary** line
+   "4 sensors | 6400Hz logging" (STAGE4 R1, 2026-09-12: it replaces the quality meter and the
+   four sensor micro-dots on the card, which are not reachable from the overview at all;
+   hidden while the device is offline), and the **battery** (§6b) top-right.
 2. **Projected Injury Risk block — the panel's headline.** Closest configured
-   horizon rendered as the stat-tile hero: label "Projected risk · +10m" (label
+   horizon rendered as the stat-tile hero: label "Projected risk | +10m" (label
    text from `FUTURE_HORIZONS` config, never hardcoded), value ≥48px semibold
    sans (proportional figures), tinted by risk band (§6), band word beside it
    ("elevated"). Remaining horizons as a smaller inline stack: "+30m 55 · +1h 47".
@@ -101,7 +106,7 @@ Panel contents, top to bottom:
    2026-08-05). One line, ellipsized.
 5. Active biomech flag chips (§6), if any.
 - No forecast yet → the "now" value is promoted to the headline slot with
-  "waiting for the first projection…" beneath. **No minute estimate**: the client is never
+  "waiting for the first projection..." beneath. **No minute estimate**: the client is never
   told `PREDICT_INTERVAL_S`, and inventing a number would be a guess.
 
 ## 4. Device detail — SET
@@ -121,10 +126,15 @@ Panel contents, top to bottom:
 Two columns, `2fr 1fr` (stacks to one column ≤1180px, live first).
 
 **Header:** back link, name (inline rename as §3), online badge, calibration badge (§6a)
-while settling, quality meter + %, **per-limb sensor row**: for each mapped limb (sorted
-order) — limb label, live rate ("641Hz"), liveness dot (§6). A limb that has never streamed
-shows its dot in critical — "never streamed" lives in the dot's tooltip, not in visible
-text. Active flag chips, then the **battery** (§6b) top-right.
+while settling, then the **sensor summary** (STAGE4 R1, 2026-09-12): a "»" toggle followed by
+the static line "4 sensors | 6400Hz logging" (a deliberate literal, `SENSOR_SUMMARY_TEXT` in
+`lib/config.ts`). Clicking the toggle swaps the static line, in place, for the quality meter + %
+and the **per-limb sensor row** (for each mapped limb in sorted order — limb label, live rate
+("641Hz"), liveness dot (§6); a limb that has never streamed shows its dot in critical, with
+"never streamed" in the dot's tooltip), and the toggle flips to "«". The state is never
+persisted: every detail-page mount opens collapsed (the page remounts it per `:id`), and the
+whole summary is hidden while the device is offline. Active flag chips, then the **battery**
+(§6b) top-right.
 
 **Left column — LIVE:**
 - Top row: the humanoid figure (compact variant, §10) **driven by real data**:
@@ -203,7 +213,8 @@ arrow-key navigation):
       divide between two things rather than one card);
    4. the rationale as ordinary sentences, one paragraph per supporting reason,
       falling back to the short `reason` text when the join misses;
-   5. the **static coaching cue** (`tip`), under a **"Coaching cue"** label
+   5. the **static coaching cue** (`tip`), under a **"PTI cue"** label (military theme
+      2026-09-12; was "Coaching cue")
       (demo posture; was "General cue — not measured") — it is catalogue text,
       identical every firing;
    6. the **Evidence expander** (`<details>`) over the joined `context`;
@@ -246,10 +257,10 @@ arrow-key navigation):
    Below: one ECharts chart — recent actuals (solid 2px composite line, from the
    shortest configured history window) continuing into per-horizon forecast
    points (≥8px markers with 2px surface ring) with a CI band (composite hue at
-   10% opacity); "Made <relative time> · <model_version from the response>" stamp in muted
+   10% opacity); "Made <relative time> | <model_version from the response>" stamp in muted
    ink — **never a hardcoded version string**. Crosshair +
    tooltip; table-view toggle (horizon, prediction, CI). Empty: "First
-   projection in a couple of minutes…" (§7).
+   projection in a couple of minutes..." (§7).
 
 Offline device: live charts freeze with "offline — last seen HH:MM:SS" overlay;
 after 10 s the sidebar/overview entries hide (§3) but a directly-open detail page
@@ -276,7 +287,7 @@ stays, frozen, with the overlay (deep links must not go blank).
 | alert | chip: ⛔ icon + "alert", `--status-critical` |
 | online / offline | dot `--status-good` / `--ink-3`; offline >10 s hidden (§3) |
 | connection (WS) | dot: `--status-good` connected / `--status-warning` reconnecting |
-| quality | % + 5-bar meter: fill `--status-good` ≥90, `--status-warning` 60–90, `--status-critical` <60; track = same hue at 20% opacity |
+| quality | % + 5-bar meter (since 2026-09-12 only inside the expanded sensor summary, §4): fill `--status-good` ≥90, `--status-warning` 60–90, `--status-critical` <60; track = same hue at 20% opacity |
 | sensor liveness | micro-dot: fresh `--status-good`; stale (no packets ≤10 s) `--status-warning`; never-streamed/dead `--status-critical`; tooltip "limb · rate · last seen" |
 | **risk bands (0–10 / 10–25 / 25–45 / 45–100)** | low `--status-good` · moderate `--ink-2` (neutral) · elevated `--status-warning` · high `--status-critical`; band word always accompanies the color |
 
@@ -297,10 +308,10 @@ Chips always pair icon + label — color never carries meaning alone.
 
 ### 6a. Calibration badge — SET
 
-A **"Stand still · Ns" countdown** chip appears on the overview card and the detail header
+A **"Stand still | Ns" countdown** chip appears on the overview card and the detail header
 while a device is calibrating, then a brief verdict — **"Calibrated"** (the icon supplies
 the tick; there is no ✓ character in the label) or **"Calibration failed"** — for ~8 s. Its
-whole job is to tell the athlete *how much longer to stand still*, and whether it worked.
+whole job is to tell the soldier *how much longer to stand still*, and whether it worked.
 
 It is driven **only** by the tick's `cal` field (BACKEND_SCHEMA §2) and `cal_failed` — but
 **bounded** (user decision 2026-08-04): when the device appears and `cal` first arrives, the
@@ -370,16 +381,16 @@ athlete (SPEC §3.8).
 ## 7. Empty & error states — SET
 
 - No devices **registered** (offline ones stay on the grid since 2026-08-06):
-  hero stays; panel area shows "Waiting for devices… point wearables at this
+  hero stays; panel area shows "Waiting for soldiers... point wearables at this
   server's UDP port."
 - No insights: "Nothing to flag right now" + "Advice appears here within about a
   minute of something worth acting on."
-- History without enough data: "collecting… no data yet in past X"; partial coverage shows a
-  "partial · N% of window" chip beside the period selector.
-- Projections tab before the first run: "First projection in a couple of minutes…"
+- History without enough data: "collecting... no data yet in past X"; partial coverage shows a
+  "partial | N% of window" chip beside the period selector.
+- Projections tab before the first run: "First projection in a couple of minutes..."
   — the tab may hint at scale; the **overview card** still shows no minute
   estimate (the client is never told `PREDICT_INTERVAL_S`).
-- API errors: inline per-panel "…retrying…" notices — no toast exists, and there
+- API errors: inline per-panel "...retrying..." notices — no toast exists, and there
   is no reduced-opacity treatment; the advice panel holds its previous data via
   `placeholderData`. Auth failures → `/login`.
 
@@ -512,6 +523,12 @@ checks PASS (lightness band, chroma, CVD ΔE worst adjacent 8.4, normal-vision
   "Computed live from every impact and stride." (restore the SPEC §2 hedge
   "A monitoring aid, not a prediction." when the demo posture ends; keep
   consistent with §4). Plain language everywhere; the trainer is not technical.
+- **Military vocabulary and plain ASCII punctuation** (2026-09-12, STAGE4 R3/R4): every
+  user-facing string says "soldier", never "athlete"; the advice tip label is "PTI cue"; no em
+  dash, en dash, ellipsis or middle dot reaches the UI — a spaced hyphen joins clauses, "--"
+  marks a missing value and " | " is the separator ("Injury risk | now", "Alerts | 30 min").
+  The backend's own advice text is deliberately untouched, so a real device's cards keep the
+  backend wording; demo soldiers (§14) are worded on the frontend.
 
 ## 12. Accessibility & responsive — SET
 
@@ -558,3 +575,39 @@ calibration badge's re-arm threshold — it hides nothing), `POLL_ADVICE_MS = 10
 `RENDER_DELAY_S`), the WS set (`WS_BACKOFF_MIN_MS`/`MAX_MS`, `WS_CLOSE_UNAUTHORIZED`), poll intervals
 above, metric map (`lib/metrics.ts` — SPEC §9 names/tooltips + §8 colors). Window
 and horizon labels are always generated from config strings — never hardcoded.
+
+## 14. Demo soldiers — SET (2026-09-12, STAGE4 R2)
+
+Five synthetic soldiers are **always** present alongside any real devices, including when
+nothing has ever registered (so the "Waiting for soldiers" empty state is unreachable in
+practice). They are indistinguishable from real devices in every view — no chip, tooltip or
+label marks them (user decision 2026-09-12, risk accepted) — except that their ids are visibly
+synthetic in the address bar: `/device/demo-1` … `/device/demo-5`.
+
+- **Roster and stories** are data in `frontend/src/lib/demo/profiles.ts`: US Army rank +
+  surname (SGT Alvarez, CPL Nguyen, PFC Okafor, SSG Brooks, SPC Ramirez), per-series
+  keyframe envelopes over session seconds, battery start/drain, scripted flag chips
+  (`carried_over` on CPL Nguyen, `warming_up` on SPC Ramirez) and advice *episodes*.
+  Changing a story is a table edit. The session start is captured once per page load as
+  "2 h 05 min ago", so every reload shows the same picture and a tab left open never jumps.
+- **Injection seams, never components**: `useMergedDevices` appends them after the real
+  registry and `useVisibleDevices` sorts real devices first; `LiveProvider` feeds their
+  60 Hz ring buffers from a wall-clock generator in a separate ref (immune to the
+  reconnect/tab-return wipe and the REST backfill) and folds them into the 250 ms snapshot;
+  every `lib/api.ts` helper answers a `demo-` id from `lib/demo` without a request. The
+  network never learns a soldier exists.
+- **Everything a live device has**: all six live series (m4/m5 never blank), sidebar risk,
+  hero stats (they count as online, can be the named "Highest projected", and their alerts
+  feed "Alerts | 30 min"), card projection + top insight, History (`5m,30m,2h` hard-coded),
+  Projections (`10m,30m,1h`, "Made … | trend-ols-1"), and the Insights timeline across
+  live / past 5m / 30m / 2h with reasons, PTI cue and Evidence. Advice comes from a
+  TypeScript port of the backend rule catalogue and `group_actions()`
+  (`lib/demo/insights.ts`): episodes only say when a rule is evaluated, a row is emitted only
+  when the rule's precondition holds on the same signal the charts draw, so evidence numbers,
+  reason sentences and severity always agree with the screen.
+- **Controls look live, change nothing**: rename snaps back to the scripted name (no cache
+  write, no PATCH); Adopt / Override close their form and the card stays undecided (no POST).
+  No calibration badge ever arms (`cal` is always null).
+- Unit tests (`npm test`, vitest) pin determinism, ranges, exact buffer windows, the
+  timeline/event-log join, backend parity of the grouping, the scripted stories, and zero
+  fetch calls for demo ids. See `docs/tasks/STAGE4.md` for the plan and as-built notes.

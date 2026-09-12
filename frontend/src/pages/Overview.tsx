@@ -79,19 +79,25 @@ function Hero({
         <HumanoidFigure variant="hero" />
       </div>
       <div className="hero-copy">
-        <div className="eyebrow">Bilateral · 4 sensors · live</div>
+        {/* Commander-readiness copy (STAGE4 Appendix B, 2026-09-12). "Built for
+            units like" is deliberate: it names the intended user without
+            asserting adoption. */}
+        <div className="eyebrow">Lower-limb telemetry | 4 sensors | live</div>
         <h1>
-          Every impact, every stride —<br />
-          <span className="hero-accent">turned into injury-risk insight.</span>
+          Every stride under load -<br />
+          <span className="hero-accent">turned into readiness a commander can act on.</span>
         </h1>
         <p>
-          Sensors on each thigh and shin stream motion hundreds of times a second.
-          We distill it into six scores — how hard impacts land, how abruptly load
-          is applied, how much has accumulated, how steady the movement stays and
-          how evenly left and right share the work — combined into one{' '}
-          <b>Injury Risk</b> trend that rises when the same work starts costing
-          more than it should — flagging who needs attention now, and where
-          they&rsquo;re heading in the coming session.
+          Four sensors on each soldier's thighs and shins stream motion hundreds of
+          times a second, under load, on the march and in training. We distill it
+          into six scores: how hard each footfall lands, how abruptly load is
+          applied, how much has accumulated, how steady the movement stays and how
+          evenly left and right share the work, combined into one{' '}
+          <b>Injury Risk</b> trend that rises when the same task starts costing
+          more than it should. Built for units like the 1st Cavalry Division, it
+          shows a commander who is fit to task now, who needs a rest day before an
+          injury takes them off strength, and where each soldier is heading over
+          the coming session.
         </p>
         <ul className="hero-legend" aria-label="Metric legend">
           {[COMPOSITE, ...METRICS].map((m) => (
