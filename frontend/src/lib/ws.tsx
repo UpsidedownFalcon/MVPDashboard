@@ -22,6 +22,8 @@ import {
   WS_BACKOFF_MIN_MS,
   WS_CLOSE_UNAUTHORIZED,
 } from './config'
+import { isDemoId } from './demo/ids'
+import { demoLatestMeta, startDemoFeed } from './demo/live'
 
 /** uPlot AlignedData layout: [t, m1..m5, composite]. */
 export type LiveData = [number[], ...(number | null)[][]]
@@ -86,14 +88,20 @@ export function LiveProvider({ children }: { children: ReactNode }) {
   const calLeft = useRef<Record<string, number | null>>({})
   const backfilled = useRef<Set<string>>(new Set())
   const paused = useRef(false)
+  // Demo soldiers (STAGE4 D2): their buffers live in a SEPARATE map so the
+  // reconnect / tab-return wipe of `buffers.current` and the REST backfill
+  // path never touch them. Fed by a wall-clock generator, not the socket.
+  const demoBuffers = useRef<Record<string, LiveData>>({})
   const [conn, setConn] = useState<ConnState>('reconnecting')
   const [latest, setLatest] = useState<Record<string, DeviceLatest>>({})
   const [status, setStatus] = useState<Record<string, StatusEvent>>({})
 
   const getBuffer = useMemo(
-    () => (dev: string) => buffers.current[dev],
+    () => (dev: string) => (isDemoId(dev) ? demoBuffers.current[dev] : buffers.current[dev]),
     [],
   )
+
+  useEffect(() => startDemoFeed(demoBuffers.current), [])
 
   useEffect(() => {
     let ws: WebSocket | null = null
@@ -207,6 +215,18 @@ export function LiveProvider({ children }: { children: ReactNode }) {
           q: quality.current[dev] ?? 1,
           flags: flags.current[dev] ?? [],
           cal: calLeft.current[dev] ?? null,
+        }
+      }
+      const nowMs = Date.now()
+      for (const [dev, buf] of Object.entries(demoBuffers.current)) {
+        const n = buf[0].length
+        const meta = demoLatestMeta(dev, nowMs)
+        if (!n || !meta) continue
+        snap[dev] = {
+          t: buf[0][n - 1],
+          m: [1, 2, 3, 4, 5].map((i) => (buf[i] as (number | null)[])[n - 1]),
+          c: (buf[6] as number[])[n - 1],
+          ...meta,
         }
       }
       setLatest(snap)

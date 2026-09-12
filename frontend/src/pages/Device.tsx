@@ -20,6 +20,7 @@ import SensorSummary from '../components/SensorSummary'
 import Tabs from '../components/Tabs'
 import { fetchWindows } from '../lib/api'
 import { POLL_HISTORY_MS } from '../lib/config'
+import { isDemoId } from '../lib/demo/ids'
 import { useMergedDevices } from '../lib/devices'
 import { boundedMetricValue, clockTime, metricValue } from '../lib/format'
 import {
@@ -84,7 +85,8 @@ export default function Device() {
     id, device?.online ?? false, live?.flags, device?.lastSignalMs ?? null, live?.cal,
   )
 
-  if (isLoading) return <p className="notice">Loading...</p>
+  // a demo soldier never waits on the registry (STAGE4 R2)
+  if (isLoading && !isDemoId(id)) return <p className="notice">Loading...</p>
   if (!device) {
     return (
       <div className="card empty-state">

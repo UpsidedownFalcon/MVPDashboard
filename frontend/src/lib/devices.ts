@@ -11,6 +11,8 @@
 import { useQuery } from '@tanstack/react-query'
 import { fetchDevices, type Device } from './api'
 import { POLL_DEVICES_MS } from './config'
+import { demoDevices } from './demo/api'
+import { demoRank } from './demo/ids'
 import { useLive } from './ws'
 
 export interface LiveDevice extends Device {
@@ -57,14 +59,19 @@ export function useMergedDevices(): MergedDevices {
       (tickT != null && now - tickT * 1000 <= 2_500) || (evt ? evt.online : d.online)
     return { ...d, online, lastSignalMs }
   })
-  return { devices, isLoading: query.isLoading, isError: query.isError }
+  // Demo soldiers (STAGE4 R2): always present, after the real registry, seen
+  // "now" so nothing downstream ever treats them as stale.
+  const demo: LiveDevice[] = demoDevices(now).map((d) => ({ ...d, lastSignalMs: now }))
+  return { devices: [...devices, ...demo], isLoading: query.isLoading, isError: query.isError }
 }
 
-/** Every registered device, sorted for display: online first, then by name. */
+/** Every registered device, sorted for display: real devices first (demo
+ *  soldiers follow in their scripted order), then online first, then by name. */
 export function useVisibleDevices(): VisibleDevices {
   const { devices, isLoading, isError } = useMergedDevices()
   const visible = [...devices].sort(
     (a, b) =>
+      demoRank(a.device_id) - demoRank(b.device_id) ||
       Number(b.online) - Number(a.online) ||
       a.display_name.localeCompare(b.display_name),
   )
