@@ -9,6 +9,7 @@ import {
   fetchHistory,
   fetchInsights,
   fetchRecent,
+  fetchUdpTarget,
   fetchUnits,
   fetchWindows,
   pairUnit,
@@ -77,7 +78,8 @@ describe('demo ids short-circuit the fetch layer', () => {
       'network down',
     )
     await expect(unpairUnit('u31-0')).rejects.toThrow('network down')
-    expect(fetchSpy).toHaveBeenCalledTimes(5)
+    await expect(fetchUdpTarget()).rejects.toThrow('network down')
+    expect(fetchSpy).toHaveBeenCalledTimes(6)
   })
 
   it('still fetches real devices', async () => {

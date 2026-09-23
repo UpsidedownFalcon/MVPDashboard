@@ -60,12 +60,14 @@ def _bilateral_batch(device_id: int, source_id: int, sensor_id: int, n: int = 3)
 
 # --- the cache ----------------------------------------------------------------
 
-def test_unknown_sleeve_defaults_to_its_own_rig_with_no_side() -> None:
+def test_unknown_sleeve_defaults_to_its_own_rig_with_the_wire_side() -> None:
+    # PLAN_msd_management decision H: source 0 = left, 1 = right by default
     cache = UnitConfigCache(*SLEEVE_FS)
     cfg = cache.get("u30-0")
-    assert cfg.rig_id == "u30-0" and cfg.side is None and not cfg.paired
+    assert cfg.rig_id == "u30-0" and cfg.side == "left" and not cfg.paired
     assert (cfg.accel_fs_g, cfg.gyro_fs_dps) == SLEEVE_FS
     assert [c.unit_id for c in cache.members("u30-0")] == ["u30-0"]
+    assert cache.get("u30-1").side == "right"
 
 
 def test_members_lists_the_host_first_even_before_it_is_configured() -> None:
@@ -74,25 +76,39 @@ def test_members_lists_the_host_first_even_before_it_is_configured() -> None:
 
 
 def test_setting_an_identical_config_reports_no_change() -> None:
-    cfg = UnitConfig("u30-0", "u30-0", "left", 32, 4000)
     cache = UnitConfigCache(*SLEEVE_FS)
-    assert cache.set(cfg) is not None      # side changed from None
+    # the registered default (left, decision H) is what ingest already runs
+    assert cache.set(UnitConfig("u30-0", "u30-0", "left", 32, 4000)) is None
+    cfg = UnitConfig("u30-0", "u30-0", "right", 32, 4000)
+    assert cache.set(cfg) is not None      # side changed from the wire default
     assert cache.set(cfg) is None          # idempotent
 
 
 # --- rig construction ---------------------------------------------------------
 
-def test_an_unpaired_sleeve_is_its_own_rig_with_side_less_limbs() -> None:
+def test_an_unpaired_sleeve_is_its_own_rig_on_its_wire_side() -> None:
+    # decision H: an unconfigured source-0 sleeve streams left limbs
     reg = _registry()
     reg.route(_sleeve_batch(30, 0, 1), recv_time=1000.0)
     reg.route(_sleeve_batch(30, 0, 2), recv_time=1000.0)
 
     assert list(reg.devices) == ["u30-0"]
     rig = reg.devices["u30-0"]
-    assert rig.limb_map == {(0, 1): "thigh", (0, 2): "shin"}
+    assert rig.limb_map == {(0, 1): "left_thigh", (0, 2): "left_shin"}
     assert rig.expected_limbs == 2
     assert rig.units == ("u30-0",)
     assert sorted(rig.sensors) == [(0, 1), (0, 2)]
+
+
+def test_a_sleeve_with_a_cleared_side_streams_side_less_limbs() -> None:
+    cache = _cache(host=UnitConfig("u30-0", "u30-0", None, 32, 4000))
+    reg = _registry(cache)
+    reg.route(_sleeve_batch(30, 0, 1), recv_time=1000.0)
+    reg.route(_sleeve_batch(30, 0, 2), recv_time=1000.0)
+
+    rig = reg.devices["u30-0"]
+    assert rig.limb_map == {(0, 1): "thigh", (0, 2): "shin"}
+    assert rig.expected_limbs == 2 and rig.units == ("u30-0",)
 
 
 def test_a_sleeve_and_a_bilateral_device_sharing_a_byte_never_merge() -> None:
@@ -104,7 +120,7 @@ def test_a_sleeve_and_a_bilateral_device_sharing_a_byte_never_merge() -> None:
 
     assert sorted(reg.devices) == ["30", "u30-0"]
     assert reg.devices["30"].limb_map[(0, 1)] == "left_shin"
-    assert reg.devices["u30-0"].limb_map[(0, 1)] == "thigh"
+    assert reg.devices["u30-0"].limb_map[(0, 1)] == "left_thigh"
 
 
 def test_a_side_puts_the_sleeve_on_its_virtual_source() -> None:
@@ -143,7 +159,12 @@ def test_a_paired_rig_is_built_before_the_second_sleeve_streams() -> None:
 def test_two_side_less_members_do_not_build_a_colliding_map() -> None:
     """Duplicate limb names rebuild the biomech session 60 times a second. The
     api refuses to create this; if it appears anyway, drop the member."""
-    cache = _cache(joiner=UnitConfig("u31-0", "u30-0", None, 32, 4000))
+    # both explicitly cleared: since decision H the host would otherwise
+    # default to "left" and there would be nothing to collide with
+    cache = _cache(
+        host=UnitConfig("u30-0", "u30-0", None, 32, 4000),
+        joiner=UnitConfig("u31-0", "u30-0", None, 32, 4000),
+    )
     reg = _registry(cache)
     reg.route(_sleeve_batch(30, 0, 1), recv_time=1000.0)
 

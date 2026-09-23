@@ -1633,3 +1633,370 @@
   margin: 0;
   color: var(--status-critical);
 }
+
+/* --- Sleeve storage (/storage, PLAN_msd_management 4.1) -------------------
+   Cards, a two-column field grid with labels above inputs, help text in
+   --ink-3, notices, the segmented toggles, the log table on .data-table and
+   the run bar in --accent. Only --ink / --ink-2 / --ink-3 exist as ink. */
+
+.storage-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 960px;
+}
+
+.storage-title {
+  font-size: 22px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  margin: 0;
+}
+
+.storage-card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.storage-h2 {
+  font-size: 15px;
+  font-weight: 650;
+  margin: 0;
+}
+
+.storage-intro {
+  margin: 0;
+  color: var(--ink-2);
+  font-size: 13.5px;
+  max-width: 640px;
+}
+
+.storage-unsupported {
+  color: var(--status-warning);
+}
+
+.storage-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.storage-primary {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+.storage-primary:disabled {
+  color: var(--ink-3);
+  border-color: var(--border);
+}
+
+.storage-drive-name {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ink-2);
+}
+
+.storage-identity {
+  margin: 0;
+  font-size: 13.5px;
+  color: var(--ink-2);
+}
+
+.storage-identity b {
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+
+/* field grid */
+.storage-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px 20px;
+  border: none;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
+
+.storage-fieldset:disabled {
+  opacity: 0.55;
+}
+
+.storage-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.storage-field-wide {
+  grid-column: 1 / -1;
+}
+
+.storage-label {
+  font-size: 12px;
+  color: var(--ink-2);
+}
+
+.storage-field input[type='text'],
+.storage-field input[type='password'],
+.storage-field input[type='number'] {
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-s);
+  color: var(--ink);
+  padding: 8px 11px;
+  font-size: 14px;
+  font-family: inherit;
+  width: 100%;
+  min-width: 0;
+}
+
+.storage-field input:focus {
+  border-color: var(--accent);
+}
+
+.storage-field input[aria-invalid='true'] {
+  border-color: var(--status-critical);
+}
+
+.storage-field input:disabled {
+  opacity: 0.6;
+}
+
+.storage-password {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.storage-password input {
+  flex: 1;
+}
+
+.storage-help {
+  margin: 0;
+  font-size: 13px;
+  color: var(--ink-3);
+}
+
+.storage-warn {
+  margin: 0;
+  font-size: 13px;
+  color: var(--status-warning);
+}
+
+.storage-problem {
+  margin: 0;
+  font-size: 13px;
+  color: var(--status-critical);
+}
+
+.storage-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  font-size: 13.5px;
+  color: var(--ink-2);
+  cursor: pointer;
+}
+
+.storage-check input {
+  margin: 4px 0 0;
+  accent-color: var(--accent);
+}
+
+/* existing-file notices (BOM, duplicates, octal, over-long lines) */
+.storage-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 13px;
+  color: var(--status-warning);
+  padding: 8px 12px;
+  border: 1px solid color-mix(in srgb, var(--status-warning) 35%, transparent);
+  border-radius: var(--radius-s);
+  background: color-mix(in srgb, var(--status-warning) 8%, transparent);
+}
+
+.storage-notice svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+
+/* UDP target row (decision G) */
+.storage-udp {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 13.5px;
+  color: var(--ink-2);
+}
+
+.storage-udp-suffix {
+  color: var(--ink-3);
+}
+
+.storage-udp-suffix.is-ok {
+  color: var(--status-good);
+}
+
+.storage-udp-suffix.is-other {
+  color: var(--status-warning);
+}
+
+/* Advanced (decision E) */
+.storage-advanced {
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+
+.storage-advanced-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.storage-advanced-toggle:hover {
+  color: var(--ink);
+}
+
+.storage-advanced-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: 12px;
+}
+
+.storage-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0;
+  font-size: 13px;
+  color: var(--status-warning);
+}
+
+.storage-warning svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  margin-top: 2px;
+}
+
+/* saved panel */
+.storage-saved {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--status-good) 35%, transparent);
+  border-radius: var(--radius-m);
+  background: color-mix(in srgb, var(--status-good) 8%, transparent);
+  font-size: 13.5px;
+  color: var(--ink-2);
+}
+
+.storage-saved p {
+  margin: 0;
+}
+
+.storage-saved-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.storage-saved-title svg {
+  color: var(--status-good);
+}
+
+/* log table */
+.storage-mono {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.storage-table tr.is-unselected td {
+  color: var(--ink-3);
+}
+
+.storage-table input[type='checkbox'] {
+  accent-color: var(--accent);
+}
+
+.storage-status {
+  white-space: nowrap;
+}
+
+/* run progress */
+.storage-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.storage-bar {
+  width: 100%;
+  height: 8px;
+  border: none;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--surface-3);
+  accent-color: var(--accent);
+}
+
+.storage-bar::-webkit-progress-bar {
+  background: var(--surface-3);
+  border-radius: 999px;
+}
+
+.storage-bar::-webkit-progress-value {
+  background: var(--accent);
+  border-radius: 999px;
+}
+
+.storage-bar::-moz-progress-bar {
+  background: var(--accent);
+  border-radius: 999px;
+}
+
+.storage-run {
+  margin: 0;
+  font-size: 13px;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.storage-summary {
+  margin: 0;
+  font-size: 13.5px;
+  color: var(--ink);
+}
+
+/* theme.css covers a, button and input; select and textarea were missed */
+:is(select, textarea):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@media (max-width: 680px) {
+  .storage-fields {
+    grid-template-columns: 1fr;
+  }
+  .storage-password {
+    flex-wrap: wrap;
+  }
+}

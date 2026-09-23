@@ -15,8 +15,8 @@ Two pieces:
     per-unit defaults. No I/O, so the routing hot path never awaits.
   * UnitConfigSubscriber -- loads the whole keyspace once at start, then follows
     the channel. Redis being unavailable means every sleeve runs on defaults
-    (its own rig, no side, the configured default full-scale), which is exactly
-    what a brand-new sleeve does anyway.
+    (its own rig, the side its wire source_id implies, the configured default
+    full-scale), which is exactly what a brand-new sleeve does anyway.
 """
 
 from __future__ import annotations
@@ -48,7 +48,8 @@ class UnitConfigCache:
         self.default_gyro_fs_dps = gyro_fs_dps
 
     def default(self, unit_id: str) -> UnitConfig:
-        """An unconfigured sleeve: its own rig, no side, the default scale."""
+        """An unconfigured sleeve: its own rig, the side of its wire source_id
+        (0 left, 1 right; PLAN_msd_management decision H), the default scale."""
         return UnitConfig.default(unit_id, self.default_accel_fs_g,
                                   self.default_gyro_fs_dps)
 

@@ -22,6 +22,11 @@ export type Side = 'left' | 'right'
 
 export const SIDES: readonly Side[] = ['left', 'right']
 
+/** Per-rig caches that a pairing, side or full-scale change invalidates: the
+ *  backend resets the biomech session, so every stored view of it is stale.
+ *  Shared by RigControls and the Sleeve storage save (PLAN_msd decision I). */
+export const RIG_QUERY_KEYS = ['windows', 'history', 'forecasts', 'insights', 'advice-timeline'] as const
+
 export const RIG_COPY = {
   /** bilateral and unknown-kind rigs keep the STAGE4 R1 literal verbatim */
   summaryBilateral: SENSOR_SUMMARY_TEXT,

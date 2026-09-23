@@ -16,6 +16,7 @@
 --              as neither left nor right. Two side-less members in ONE rig
 --              would collide on those names, so the API refuses to clear the
 --              side of a paired unit.
+--              Since 2026-09-23 registration seeds it from the wire source_id (0 left, 1 right; PLAN_msd_management decision H) -- NULL now means an operator cleared it. Comment only, no DDL change.
 --   accel_fs_g / gyro_fs_dps
 --              the unit's IMU full-scale, which the datagram does NOT carry
 --              (decision B). Seeded per unit from UNILATERAL_ACCEL_FS_G /

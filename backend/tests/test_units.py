@@ -107,18 +107,22 @@ async def test_register_from_stats_mirrors_defaults(units_app) -> None:
     rows = {r["unit_id"]: r for r in await conn.fetch(
         "SELECT * FROM sleeve_units ORDER BY unit_id")}
     assert set(rows) == {"u30-0", "u31-1"}
-    # unpaired, side-less (decision G), Settings full-scale (decision B)
+    # unpaired, side from the wire source_id (PLAN_msd_management decision H,
+    # amending decision G), Settings full-scale (decision B)
     assert rows["u30-0"]["rig_id"] == "u30-0"
-    assert rows["u30-0"]["side"] is None
+    assert rows["u30-0"]["side"] == "left"
+    assert rows["u31-1"]["side"] == "right"
     assert rows["u30-0"]["accel_fs_g"] == settings.unilateral_accel_fs_g
     assert rows["u30-0"]["gyro_fs_dps"] == settings.unilateral_gyro_fs_dps
     # the wire identity behind the id
     assert (rows["u31-1"]["wire_device_id"], rows["u31-1"]["wire_source_id"]) == (31, 1)
 
-    # the mirror ingest reads: one JSON doc per unit, NO TTL, plus a publish
-    assert _cfg(app, "u30-0") == UnitConfig.default(
-        "u30-0", settings.unilateral_accel_fs_g, settings.unilateral_gyro_fs_dps
-    ).to_json()
+    # the mirror ingest reads: one JSON doc per unit, NO TTL, plus a publish --
+    # and it equals the default ingest already runs, so nothing is reset
+    for unit in ("u30-0", "u31-1"):
+        assert _cfg(app, unit) == UnitConfig.default(
+            unit, settings.unilateral_accel_fs_g, settings.unilateral_gyro_fs_dps
+        ).to_json()
     assert app.state.redis.published == [
         (redis_keys.UNIT_CFG_CHANNEL, "u30-0"),
         (redis_keys.UNIT_CFG_CHANNEL, "u31-1"),
@@ -147,6 +151,25 @@ async def test_mirror_all_self_heals_after_redis_restart(units_app) -> None:
     ]
 
 
+async def test_register_side_follows_wire_source(units_app) -> None:
+    """Decision H: source_id 0 registers as left, 1 as right; the operator can
+    still clear it (PATCH side null) because NULL stays allowed."""
+    app, client, conn = units_app
+    assert await _seen(app, "u5-0", "u5-1") == ["u5-0", "u5-1"]
+
+    sides = {r["unit_id"]: r["side"] for r in await conn.fetch(
+        "SELECT unit_id, side FROM sleeve_units ORDER BY unit_id")}
+    assert sides == {"u5-0": "left", "u5-1": "right"}
+    assert _cfg(app, "u5-0")["side"] == "left"
+    assert _cfg(app, "u5-1")["side"] == "right"
+
+    resp = await client.patch("/api/units/u5-0", json={"side": None})
+    assert resp.status_code == 200 and resp.json()["side"] is None
+    assert _cfg(app, "u5-0")["side"] is None
+    assert await conn.fetchval(
+        "SELECT side FROM sleeve_units WHERE unit_id='u5-0'") is None
+
+
 # --- GET /api/units -----------------------------------------------------------
 
 async def test_list_units_merges_live_state(units_app) -> None:
@@ -161,7 +184,7 @@ async def test_list_units_merges_live_state(units_app) -> None:
     unit = body[0]
     assert unit["rig_id"] == "u30-0" and unit["paired"] is False
     assert unit["rig_display_name"] == "Ash"
-    assert unit["side"] is None
+    assert unit["side"] == "left"          # wire source 0 (decision H)
     assert unit["online"] is False and unit["last_seen"] is None and unit["soc"] is None
 
     now_ms = (await app.state.pool.fetchval(
@@ -180,9 +203,11 @@ async def test_patch_side_and_full_scale(units_app) -> None:
     await _seen(app, "u30-0")
     app.state.redis.published.clear()
 
-    resp = await client.patch("/api/units/u30-0", json={"side": "left"})
-    assert resp.status_code == 200 and resp.json()["side"] == "left"
-    assert _cfg(app, "u30-0")["side"] == "left"
+    # "right" is a real change: u30-0 registers as left (decision H), so the
+    # operator override is what this exercises
+    resp = await client.patch("/api/units/u30-0", json={"side": "right"})
+    assert resp.status_code == 200 and resp.json()["side"] == "right"
+    assert _cfg(app, "u30-0")["side"] == "right"
     assert app.state.redis.published == [(redis_keys.UNIT_CFG_CHANNEL, "u30-0")]
 
     # full-scale is per sleeve (decision F) and only the sent fields change
@@ -190,8 +215,8 @@ async def test_patch_side_and_full_scale(units_app) -> None:
                               json={"accel_fs_g": 8, "gyro_fs_dps": 1000})
     assert resp.status_code == 200
     assert (resp.json()["accel_fs_g"], resp.json()["gyro_fs_dps"]) == (8, 1000)
-    assert resp.json()["side"] == "left"
-    assert _cfg(app, "u30-0") == {"unit": "u30-0", "rig": "u30-0", "side": "left",
+    assert resp.json()["side"] == "right"
+    assert _cfg(app, "u30-0") == {"unit": "u30-0", "rig": "u30-0", "side": "right",
                                   "accel_fs_g": 8, "gyro_fs_dps": 1000, "v": 1}
     assert await conn.fetchval(
         "SELECT accel_fs_g FROM sleeve_units WHERE unit_id='u30-0'") == 8
@@ -250,6 +275,10 @@ async def test_side_clash_and_paired_side_clear_are_409(units_app) -> None:
 async def test_pair_requires_a_host_side(units_app) -> None:
     app, client, _conn = units_app
     await _seen(app, "u30-0", "u30-1")
+    # the host registers with a side (decision H); clear it to reach the
+    # "no side yet" path, which still exists for a unit an operator cleared
+    assert (await client.patch("/api/units/u30-0",
+                               json={"side": None})).status_code == 200
 
     resp = await client.post("/api/units/u30-0/pair",
                              json={"unit_id": "u30-1", "side": "right"})
@@ -309,13 +338,18 @@ async def test_paired_member_is_hidden_but_still_readable(units_app) -> None:
     assert listed == ["30", "u30-0", "u30-1"]
 
     app.state.redis.published.clear()
+    # Swap both legs: u30-0 registered left and u30-1 right (decision H), so
+    # this is the case where BOTH rows change. A host whose side already
+    # matches host_side is left alone and NOT re-mirrored (no session reset).
     resp = await client.post(
         "/api/units/u30-0/pair",
-        json={"unit_id": "u30-1", "side": "right", "host_side": "left"})
+        json={"unit_id": "u30-1", "side": "left", "host_side": "right"})
     assert resp.status_code == 200
     rig = resp.json()
     assert rig["device_id"] == "u30-0" and rig["kind"] == "unilateral"
     assert [u["unit_id"] for u in rig["units"]] == ["u30-0", "u30-1"]
+    assert {u["unit_id"]: u["side"] for u in rig["units"]} == {
+        "u30-0": "right", "u30-1": "left"}
     # both changed units were mirrored for ingest
     assert sorted(app.state.redis.published) == [
         (redis_keys.UNIT_CFG_CHANNEL, "u30-0"),

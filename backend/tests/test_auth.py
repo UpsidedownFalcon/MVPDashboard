@@ -21,6 +21,7 @@ import api.routes.auth as auth_routes
 from api.auth import JWT_ALGORITHM, LoginRateLimiter, mint_token
 from api.deps import WS_CLOSE_UNAUTHORIZED, require_user, ws_user
 from api.routes.auth import router as auth_router
+from api.routes.config import router as config_router
 from api.routes.devices import router as devices_router
 from api.routes.health import router as health_router
 from api.seed_users import seed
@@ -36,6 +37,7 @@ def _build_app(settings, pool) -> FastAPI:
     app.include_router(auth_router)
     guard = [Depends(require_user)]
     app.include_router(devices_router, dependencies=guard)
+    app.include_router(config_router, dependencies=guard)
     app.include_router(health_router)
     app.state.settings = settings
     app.state.pool = pool
@@ -109,6 +111,8 @@ async def test_guarded_routes_401_without_cookie(auth_app) -> None:
     assert (await client.get("/api/devices")).status_code == 401
     assert (await client.get("/api/auth/me")).status_code == 401
     assert (await client.get("/api/health")).status_code == 401
+    # deployment facts (where sleeves stream to) are behind the cookie too
+    assert (await client.get("/api/config/udp-target")).status_code == 401
     # liveness stays open
     assert (await client.get("/api/health/live")).status_code == 200
 

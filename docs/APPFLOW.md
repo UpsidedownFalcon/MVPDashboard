@@ -70,17 +70,23 @@ wearable returns ─▶ online again (same identity, same name)
 ### 1.4 Knee sleeves: set the leg, set the full scale, pair (2026-09-23)
 
 A knee sleeve is one MCU on one leg (TRD §3). It registers like any wearable, but three things
-about it cannot be learned from the wire, so an operator sets them in the dashboard. Every one
-of them **hard-resets that soldier's biomech session** — dose, baselines, calibration.
+about it are dashboard-owned rather than measured: its pairing, its leg and its IMU full scale.
+Since 2026-09-23 (PLAN_msd_management decision H) the leg is **seeded from the sleeve's own
+`source_id`** (0 = left, 1 = right — what the person fitting it wrote on the card, or set in
+Sleeve storage, §1.5) and the full scale from `.env`; an operator may still change either here.
+Every one of them **hard-resets that soldier's biomech session** — dose, baselines, calibration.
 
 ```
 sleeve powers on ─▶ first 0xA6 packet ─▶ ingest routes it to its own rig "u31-0"
   ─▶ ingest publishes unit:{u31-0}:rig into ingest:stats
-  ─▶ api (unit mirror, every 2 s) INSERTs the unpaired, side-less row into sleeve_units
-     and mirrors it to Redis  ─▶ the soldier appears, summary "2 sensors | side not set"
+  ─▶ api (unit mirror, every 2 s) INSERTs the unpaired row into sleeve_units with
+     side = its wire source_id (0 left, 1 right — decision H, 2026-09-23; ingest's own
+     default for a new unit is the same row, so the mirror publish resets nothing)
+  ─▶ the soldier appears, summary "2 sensors | one leg"
+     (a NULL side now means an operator CLEARED it: "2 sensors | side not set")
 
 /device/u31-0 ─▶ sleeve controls in the header (sleeve rigs only)
-   ├─ pick a leg ───────▶ PATCH /api/units/u31-0 {side}
+   ├─ change or clear the leg ─▶ PATCH /api/units/u31-0 {side}   (null = cleared)
    ├─ open Full scale ──▶ PATCH /api/units/u31-0 {accel_fs_g | gyro_fs_dps}
    ├─ "Pair with..." ───▶ GET /api/units (unpaired sleeves) ─▶ pick one + a leg each
    │                   ─▶ POST /api/units/u31-0/pair {unit_id, side, host_side?}
@@ -106,6 +112,73 @@ was worn on.
 A rig with one leg instrumented carries the `one_leg` flag: `m1`..`m4` run normally and only
 `m5` (L/R balance) reads blank with "one leg" as its reason. It is never reported as missing
 sensors.
+
+### 1.5 Sleeve storage: edit CONFIG.TXT, transfer logs (2026-09-23)
+
+A sleeve plugged into the operator's PC exposes its SD card as the **HIPPOSDATA** USB drive
+(`CONFIG.TXT`, `LOG_NNNN.BIN`, `LOG_NNNN.TXT`). The dashboard's `/storage` page (UIUX §15,
+plan of record `PLAN_msd_management.md`) opens it in **Chrome or Edge on https or localhost**
+through the File System Access API — nothing is uploaded, there is no helper app. While the
+card is mounted the sleeve neither logs nor streams, and a host **eject does not end its
+session**: only unplugging does, about 2 s after which it re-reads `CONFIG.TXT`.
+
+```
+/storage ─▶ isSupported()? ──no──▶ "Sleeve storage needs Chrome or Edge on a secure (https) address"
+   │yes
+   ├─ GET /api/config/udp-target   (where sleeves should stream: UDP_PUBLIC_IP, else DOMAIN
+   │                                resolved server-side; null when unresolvable; re-fetched
+   │                                when older than 60 s)
+   ├─ GET /api/units + the device registry   (soldier name for the sleeve, duplicate-id warning)
+   └─ handles remembered in IndexedDB ─▶ permission still granted? ─yes─▶ drive opens itself
+                                                                     ─no──▶ "Reconnect sleeve drive"
+
+EDIT CONFIG.TXT
+"Open sleeve drive" ─▶ showDirectoryPicker ─▶ folder holds CONFIG.TXT? ──no──▶ "Pick the HIPPOSDATA
+   │yes                                                                          drive itself"
+   ▼
+read CONFIG.TXT ─▶ interpretAsFirmware (what the sleeve will actually read: whole-line comments
+   only, last duplicate wins, base-0 integers, 159-byte fgets pieces, BOM) ─▶ notices + fields
+   ├─ Basic: WiFi network / password, sleeve number, Left/Right leg (source_id), diag log, streaming
+   ├─ "Streams to ip:port (this dashboard | not this dashboard)" + "Point at this dashboard"
+   └─ Advanced (warning + "I understand", once per page session): udp_ip/udp_port, low_batt_mv,
+      accel/gyro full scale, wifi_tx_power_dbm, batt_cal_*_mv
+"Save to sleeve" ─▶ applyEdits (only the changed value spans; missing keys appended with CRLF;
+   never a BOM or an inline comment; integers plain decimal)
+   ─▶ createWritable (CONFIG.TXT.crswap beside it) ─▶ close ─▶ re-read ─▶ verifyReadback
+        │mismatch ─▶ "The file read back differently from what was written; nothing else was changed"
+        ▼ok
+   "Saved. Now eject the HIPPOSDATA drive, then unplug the cable."
+     + "also switch the sleeve off and on again"      when wifi_ssid / wifi_password changed
+     + "will now appear as a new soldier (u<new>)"     when device_id / source_id changed
+   ─▶ accel_fs_g / gyro_fs_dps changed AND u<dev>-<src> is known? ─▶ PATCH /api/units/u<dev>-<src>
+        ─▶ "Dashboard full scale for u<dev>-<src> updated to match"  (decision I; resets that rig,
+            invalidates devices, units and the rig's windows/history/forecasts/insights caches)
+eject ─▶ unplug ─▶ ~2 s ─▶ the sleeve re-reads CONFIG.TXT and starts a new session
+
+TRANSFER LOGS
+listing = LOG_NNNN.BIN / LOG_NNNN.TXT only
+   (CONFIG.TXT never; *.crswap, System Volume Information, $RECYCLE.BIN and dotfiles hidden)
+   each BIN's 512 B header ─▶ firmware, sleeve u<dev>-<src>, full scale, session
+"Choose destination folder" (remembered) ─▶ [ ] Keep copies on the sleeve ─▶ "Transfer selected"
+   per file, in order:
+   probe    dest/sleeve-u<dev>-<src>/raw/  (identity from the file's own header, else the TXT's
+            "# cfg:" line, else CONFIG.TXT); a same-name file already there is sized + CRC32'd
+   copy     card ─4 MiB slices, each awaited─▶ dest, running CRC32 + whole-file block scan;
+            close() must succeed
+   verify   re-read the LOCAL copy: length, CRC32 and an identical block scan; every block the
+            scan called bad is re-read from the card and compared byte for byte; a TXT is
+            byte-compared whole
+            │mismatch ─▶ local copy removed, card untouched, "Failed: the copy did not match ..."
+   dedupe   same size + CRC32 as the pre-existing file ─▶ fresh copy dropped, "Already transferred"
+            (different content ─▶ kept as LOG_NNNN-2.BIN)
+   delete   from the sleeve ONLY now — copy + verify passed, Keep copies off, not cancelled
+"Do not unplug the sleeve while a transfer is running" ─▶ progress | rate | ETA  (~1 MB/s USB)
+cancel or unplug mid-copy ─▶ writable aborted (no partial copy), card as it was, "N not started"
+done ─▶ "Done: N copied, N already transferred, N failed, N removed from the sleeve" ─▶ re-list
+```
+
+Change-set 2 — a CSV plus a plain-text summary per transferred log, produced in a Web Worker
+next to `raw/` — is **planned, not built** (`PLAN_msd_management.md` §5).
 
 ## 2. Data flows
 
@@ -181,7 +254,7 @@ api:    watches last_seen keys → WS event {type:"status", dev, online, last_se
 | DB slow/down | api write buffer caps (~60s) then drops oldest + counts; window/forecast queries error visibly | live WS stream, ingest |
 | api down | no dashboard; ticks published meanwhile are lost (gap visible later) | ingest keeps processing |
 | ingest down | devices' data lost while down; dashboard shows all offline | history browsing, api |
-| Redis down | live+status stop until back (compose restarts it). Sleeve configs (`unit:cfg:*`) are lost with the keyspace but the DB still has them: the api re-mirrors every row at start and every 60 s, so pairings, sides and full scales self-heal within a minute. Until they do, each sleeve runs on defaults (its own rig, no side, the `.env` full scale) | DB contents |
+| Redis down | live+status stop until back (compose restarts it). Sleeve configs (`unit:cfg:*`) are lost with the keyspace but the DB still has them: the api re-mirrors every row at start and every 60 s, so pairings, sides and full scales self-heal within a minute. Until they do, each sleeve runs on defaults (its own rig, the leg its wire `source_id` implies, the `.env` full scale) | DB contents |
 | browser tab slow | that client's queue drops oldest | other clients, server |
 | packet loss/reorder | quality % drops; jitter buffer reorders within 50ms | tick cadence (holds last) |
 
