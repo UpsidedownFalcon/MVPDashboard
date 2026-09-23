@@ -2,6 +2,8 @@
 // ellipsis or middle dot may reach the UI through the exported string tables.
 import { describe, expect, it } from 'vitest'
 import { COMPOSITE, FLAG_META, METRICS, RISK_BAND_META } from './metrics'
+import { RIG_COPY } from './rig'
+import { STORAGE_COPY } from './storage/copy'
 
 const FORBIDDEN = /[—–…·]/
 
@@ -20,13 +22,17 @@ describe('user-facing string tables', () => {
     ['COMPOSITE', COMPOSITE],
     ['FLAG_META', FLAG_META],
     ['RISK_BAND_META', RISK_BAND_META],
+    ['RIG_COPY', RIG_COPY],
+    ['STORAGE_COPY', STORAGE_COPY],
   ])('%s carries no em/en dash, ellipsis or middle dot', (_name, table) => {
     const offenders = strings(table).filter(([, s]) => FORBIDDEN.test(s))
     expect(offenders).toEqual([])
   })
 
   it('uses soldier wording, never athlete', () => {
-    const offenders = strings([METRICS, COMPOSITE, FLAG_META]).filter(([, s]) => /athlete/i.test(s))
+    const offenders = strings([METRICS, COMPOSITE, FLAG_META, RIG_COPY, STORAGE_COPY]).filter(([, s]) =>
+      /athlete/i.test(s),
+    )
     expect(offenders).toEqual([])
   })
 })

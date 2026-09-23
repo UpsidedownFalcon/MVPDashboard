@@ -14,7 +14,7 @@ from typing import Any
 import asyncpg
 import redis.asyncio as aioredis
 
-from common import redis_keys
+from common import kinds, redis_keys
 from common.config import Settings
 
 # Windows AT OR BELOW this read the raw hypertable. The comparison used to be
@@ -321,7 +321,39 @@ async def history(
     }
 
 
+# --- rig visibility -----------------------------------------------------------
+
+def visible_rig_predicate(column: str = "device_id") -> str:
+    """SQL fragment: true while `column` names a rig the fleet should show.
+
+    Pairing two sleeves keeps the HOST's id and history and folds the joiner
+    into it (decision H): from that moment ingest tickers, biomech and ticks are
+    keyed by the host rig only, so the joiner's own rig row would sit in the
+    device list forever offline, with no sensors and a frozen composite. It is
+    therefore hidden for exactly as long as the pairing lasts -- its `devices`
+    row and all its history stay untouched and come back on unpair.
+
+    The single definition of "paired away": the rig's OWN unit row exists and
+    points at a different rig. Bilateral rigs never match (no sleeve_units row),
+    and an unpaired sleeve has rig_id = unit_id, so both stay visible. Shared by
+    `devices()`, the squad-wide insight feed, `InsightJob` and `PredictJob` so
+    the fleet, the advice and the forecasts can never disagree about who exists.
+
+    `device_one()` deliberately BYPASSES it: a hidden member must still be
+    readable and renamable, and the pair route answers with the host rig object.
+    """
+    return (
+        "NOT EXISTS (SELECT 1 FROM sleeve_units su "
+        f"WHERE su.unit_id = {column} AND su.rig_id <> {column})"
+    )
+
+
 # --- devices ------------------------------------------------------------------
+
+# The dashboard-owned columns of one sleeve; the wire ids and timestamps are
+# never part of a response (BACKEND_SCHEMA §3).
+UNIT_COLUMNS = "unit_id, rig_id, side, accel_fs_g, gyro_fs_dps"
+
 
 def _d(value: Any) -> str | None:
     if value is None:
@@ -329,17 +361,57 @@ def _d(value: Any) -> str | None:
     return value.decode() if isinstance(value, (bytes, bytearray)) else str(value)
 
 
-async def devices(
+async def _stats(redis: aioredis.Redis) -> dict[str, str]:
+    raw = await redis.hgetall(redis_keys.INGEST_STATS)
+    return {_d(k): _d(v) for k, v in raw.items()}
+
+
+def _unit_vsrc(side: str | None) -> int:
+    """Virtual source_id of a unit inside its rig (kinds.UnitConfig.vsrc)."""
+    return 1 if side == "right" else 0
+
+
+def _live(stats: dict[str, str], prefix: str, now_ms: float,
+          threshold_ms: float) -> dict:
+    """online / last_seen / soc for one unit, from the ingest stats hash.
+
+    `unit:{id}:last_seen` and `unit:{id}:soc` are published per UNIT even when
+    the unit is paired into another rig's ticker, which is the whole point: a
+    member's battery and link must stay visible after it stops being its own
+    rig (publish.py, PLAN section 5).
+    """
+    last_seen_raw = stats.get(f"{prefix}:last_seen")
+    last_seen_ms = float(last_seen_raw) if last_seen_raw else None
+    soc_raw = stats.get(f"{prefix}:soc")
+    return {
+        "online": (last_seen_ms is not None
+                   and (now_ms - last_seen_ms) <= threshold_ms),
+        "last_seen": _iso_ms(last_seen_ms) if last_seen_ms is not None else None,
+        "soc": int(soc_raw) if soc_raw is not None else None,
+    }
+
+
+async def _device_rows(
     pool: asyncpg.Pool, redis: aioredis.Redis, settings: Settings,
+    rows: list[asyncpg.Record],
 ) -> list[dict]:
-    """Registry rows merged with Redis liveness + per-sensor stats."""
-    rows = await pool.fetch(
-        "SELECT device_id, display_name FROM devices ORDER BY device_id"
-    )
-    raw_stats = await redis.hgetall(redis_keys.INGEST_STATS)
-    stats = {_d(k): _d(v) for k, v in raw_stats.items()}
+    """Registry rows merged with Redis liveness, per-sensor stats and units."""
+    stats = await _stats(redis)
     now_ms = datetime.now(tz=timezone.utc).timestamp() * 1000.0
     threshold_ms = settings.offline_after_s * 1000.0
+
+    sleeve_rigs = [r["device_id"] for r in rows
+                   if kinds.rig_kind(r["device_id"]) == "unilateral"]
+    unit_rows: list[asyncpg.Record] = []
+    if sleeve_rigs:
+        unit_rows = await pool.fetch(
+            f"""SELECT {UNIT_COLUMNS} FROM sleeve_units
+                WHERE rig_id = ANY($1::text[]) ORDER BY unit_id""",
+            sleeve_rigs,
+        )
+    units_by_rig: dict[str, list[asyncpg.Record]] = {}
+    for u in unit_rows:
+        units_by_rig.setdefault(u["rig_id"], []).append(u)
 
     out = []
     for row in rows:
@@ -347,6 +419,14 @@ async def devices(
         last_seen_raw = _d(await redis.get(redis_keys.last_seen_dev(dev)))
         last_seen_ms = float(last_seen_raw) if last_seen_raw else None
         quality = stats.get(f"dev:{dev}:quality")
+
+        # Members of this rig, and the virtual source each one occupies. A
+        # side-less unit and a left one both sit on source 0 -- which is why the
+        # API refuses to leave two members of one rig side-less.
+        rig_units = units_by_rig.get(dev, [])
+        unit_by_vsrc: dict[int, str] = {}
+        for u in rig_units:
+            unit_by_vsrc.setdefault(_unit_vsrc(u["side"]), u["unit_id"])
 
         sensors = []
         prefix = f"sensor:{dev}:"
@@ -358,10 +438,16 @@ async def devices(
         for src, sen in pairs:
             sensor_seen_raw = _d(await redis.get(redis_keys.last_seen_sensor(dev, src, sen)))
             rate = stats.get(f"sensor:{dev}:{src}:{sen}:rate_hz")
+            # Ingest knows the rig's real limb map (a sleeve's depends on its
+            # side and on UNILATERAL_SENSOR_MAP, neither of which is LIMB_MAP),
+            # so it publishes the name it actually used. The static map is the
+            # fallback for a bilateral rig streaming through an older ingest.
+            limb = stats.get(f"sensor:{dev}:{src}:{sen}:limb")
             sensors.append({
                 "source_id": src,
                 "sensor_id": sen,
-                "limb": settings.limb_map.get((src, sen), f"{src},{sen}"),
+                "limb": limb or settings.limb_map.get((src, sen), f"{src},{sen}"),
+                "unit_id": unit_by_vsrc.get(src),
                 "rate_hz": float(rate) if rate is not None else 0.0,
                 "last_seen": _iso_ms(float(sensor_seen_raw)) if sensor_seen_raw else None,
             })
@@ -373,6 +459,7 @@ async def devices(
         out.append({
             "device_id": dev,
             "display_name": row["display_name"],
+            "kind": kinds.rig_kind(dev),
             "soc": int(soc_raw) if soc_raw is not None else None,
             "online": (
                 last_seen_ms is not None and (now_ms - last_seen_ms) <= threshold_ms
@@ -380,14 +467,88 @@ async def devices(
             "last_seen": _iso_ms(last_seen_ms) if last_seen_ms is not None else None,
             "quality": float(quality) if quality is not None else None,
             "sensors": sensors,
+            # Empty for a bilateral rig: it has no units, it IS the unit.
+            "units": [
+                {
+                    "unit_id": u["unit_id"],
+                    "side": u["side"],
+                    "accel_fs_g": u["accel_fs_g"],
+                    "gyro_fs_dps": u["gyro_fs_dps"],
+                    **_live(stats, f"unit:{u['unit_id']}", now_ms, threshold_ms),
+                }
+                for u in rig_units
+            ],
         })
     return out
+
+
+async def devices(
+    pool: asyncpg.Pool, redis: aioredis.Redis, settings: Settings,
+) -> list[dict]:
+    """The visible fleet: registry rows minus rigs paired away (decision H)."""
+    rows = await pool.fetch(
+        f"""SELECT device_id, display_name FROM devices
+            WHERE {visible_rig_predicate()}
+            ORDER BY device_id"""
+    )
+    return await _device_rows(pool, redis, settings, list(rows))
 
 
 async def device_one(
     pool: asyncpg.Pool, redis: aioredis.Redis, settings: Settings, device_id: str,
 ) -> dict | None:
-    for dev in await devices(pool, redis, settings):
-        if dev["device_id"] == device_id:
-            return dev
-    return None
+    """One rig by id, visible or not - renaming a paired member must still work."""
+    row = await pool.fetchrow(
+        "SELECT device_id, display_name FROM devices WHERE device_id = $1", device_id
+    )
+    if row is None:
+        return None
+    return (await _device_rows(pool, redis, settings, [row]))[0]
+
+
+# --- units --------------------------------------------------------------------
+
+async def units(
+    pool: asyncpg.Pool, redis: aioredis.Redis, settings: Settings,
+    unit_ids: list[str] | None = None,
+) -> list[dict]:
+    """Every registered sleeve (or just `unit_ids`) for the pair picker.
+
+    Units are listed whether or not their rig has a `devices` row yet: a sleeve
+    is registered the moment ingest reports it, while the rig row appears with
+    its first tick.
+    """
+    where = "" if unit_ids is None else "WHERE su.unit_id = ANY($1::text[])"
+    args = [] if unit_ids is None else [unit_ids]
+    rows = await pool.fetch(
+        f"""SELECT su.unit_id, su.rig_id, su.side, su.accel_fs_g, su.gyro_fs_dps,
+                   d.display_name AS rig_display_name
+            FROM sleeve_units su
+            LEFT JOIN devices d ON d.device_id = su.rig_id
+            {where}
+            ORDER BY su.unit_id""",
+        *args,
+    )
+    stats = await _stats(redis)
+    now_ms = datetime.now(tz=timezone.utc).timestamp() * 1000.0
+    threshold_ms = settings.offline_after_s * 1000.0
+    return [
+        {
+            "unit_id": r["unit_id"],
+            "rig_id": r["rig_id"],
+            "rig_display_name": r["rig_display_name"],
+            "side": r["side"],
+            "accel_fs_g": r["accel_fs_g"],
+            "gyro_fs_dps": r["gyro_fs_dps"],
+            "paired": r["rig_id"] != r["unit_id"],
+            **_live(stats, f"unit:{r['unit_id']}", now_ms, threshold_ms),
+        }
+        for r in rows
+    ]
+
+
+async def unit_one(
+    pool: asyncpg.Pool, redis: aioredis.Redis, settings: Settings, unit_id: str,
+) -> dict | None:
+    found = await units(pool, redis, settings, [unit_id])
+    return found[0] if found else None

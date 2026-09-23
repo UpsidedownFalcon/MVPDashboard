@@ -19,6 +19,27 @@ Everything favors simplicity, stubs with stable interfaces, and configuration ov
 > plan of record, now history rather than forecast — the real biomech, the VPS deployment with
 > persistence/forecasts/insights, and the designed product frontend with login are all live.
 > The only remaining stage-3 item is the S3-T08 acceptance run.
+>
+> **Since then**, work is tracked per change-set rather than as new stages, each with its own
+> plan of record:
+> - **2026-09-12 — demo frontend, military theme, plain dashes**: [tasks/STAGE4.md](tasks/STAGE4.md).
+> - **2026-09-23 — unilateral knee sleeves**:
+>   [`../PLAN_unilateral_devices.md`](../PLAN_unilateral_devices.md). A **second wearable kind**
+>   on the same UDP port — one MCU on one leg, sync byte 0xA6 — with dashboard-driven pairing,
+>   side and per-sleeve IMU full scale. It introduces the **rig** as the thing everything
+>   downstream is keyed by (TRD §4), the first api → ingest Redis key (BACKEND_SCHEMA §4),
+>   migration 005, four `/api/units*` routes and the `one_leg` flag. The "confirmed facts" below
+>   describe the **bilateral** wearable and still hold for it; TRD §3 carries both kinds.
+> - **2026-09-23 — sleeve storage (CURRENT)**:
+>   [`../PLAN_msd_management.md`](../PLAN_msd_management.md). A **"Sleeve storage" page**
+>   (`/storage`, UIUX §15) that opens a plugged-in sleeve's HIPPOSDATA USB drive in Chrome/Edge
+>   through the File System Access API: it edits the sleeve's `CONFIG.TXT` exactly as the
+>   firmware parses it and transfers its `LOG_NNNN` files to the PC, deleting each from the
+>   sleeve only after its copy verified. Change-set 1 shipped 2026-09-23 together with
+>   migration 006, `GET /api/config/udp-target` and the registration default that seeds a
+>   sleeve's side from its own `source_id` (decision H, amending the unilateral plan's G).
+>   Change-set 2 (a CSV plus a plain-text summary per log, in a Web Worker) is **planned, not
+>   built** (that plan's §5).
 
 **Build order (revised 2026-08-02 — user-mandated stages):**
 1. **Stage 1 — local only:** real biomech model (5 primitives + 1 composite) on live
@@ -38,6 +59,9 @@ Everything favors simplicity, stubs with stable interfaces, and configuration ov
   `device_id u8 | source_id u8 | wire[19] | soc u8` where
   wire = `sync 0xA5 | header(sensor_id bits0-1, version bits2-7) | timestamp_us u32 LE
   (wraps ~71.6 min) | ax,ay,az,gx,gy,gz i16 LE raw | crc8 (poly 0x07, init 0x00, over wire[1..17])`.
+  **Amended 2026-09-23:** the layout is unchanged, but `sync` is now `0xA5` **or** `0xA6` — the
+  unilateral knee sleeve uses `0xA6` and the same CRC (which never covered the sync byte).
+  TRD §3 carries both kinds.
 - **Rate:** UDP streams **~640Hz** per sensor — measured on the real device, superseding
   the ~600 estimate (decimated from the ~6.6kHz SD-log rate).
   4 sensors/device → ~2,560 pkt/s/device, ~12.8k pkt/s at 5 devices. Ingest is written
@@ -117,7 +141,9 @@ each with dependencies, files, step-by-step instructions, and a done-check:
 reading order, no-assumption rule, and always run the task's done-check.
 
 Stable interfaces so real algorithms drop in later with no rework:
-`biomech.compute(frames, state, times) -> Metrics(m1..m5 nullable, composite, flags, raw) @60Hz` and
+`biomech.compute(frames, state, times, *, expected_limbs=4, limb_scale=None) -> Metrics(m1..m5
+nullable, composite, flags, raw) @60Hz` (the two keyword-only arguments were added 2026-09-23 for
+knee sleeves; the positional signature is unchanged — BACKEND_SCHEMA §5) and
 `predict.fit(history, horizons) -> dict[horizon, Forecast]`.
 
 ## To be decided later (separate planning sessions)

@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 from api.deps import _user_from_cookie
 from api.auth import COOKIE_NAME
 from api.jobs.insights import group_actions
-from api.queries import _iso
+from api.queries import _iso, visible_rig_predicate
 
 router = APIRouter()
 
@@ -249,9 +249,12 @@ async def list_insights(
             device, limit,
         )
     else:
+        # Squad-wide feed: a rig paired away is not a soldier any more, so its
+        # (still stored) advice must not surface next to the live fleet's.
         rows = await pool.fetch(
             f"""SELECT {_CURRENT_COLUMNS}
                 FROM insights
+                WHERE {visible_rig_predicate()}
                 ORDER BY created_at DESC, insight_id DESC LIMIT $1""",
             limit,
         )

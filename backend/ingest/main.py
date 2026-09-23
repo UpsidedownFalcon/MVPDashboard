@@ -21,10 +21,12 @@ from collections import deque
 
 from common import packet
 from common.config import get_settings
+from common.kinds import SYNC_BILATERAL, SYNC_UNILATERAL
 from ingest import biomech
 from ingest.publish import Publisher
 from ingest.state import Registry
 from ingest.ticker import TickerManager, TickInput
+from ingest.unit_config import UnitConfigCache, UnitConfigSubscriber
 from ingest.udp import RAW_BUF_MAXLEN, UdpCounters, drain_loop, start_udp_server
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -69,7 +71,7 @@ class BiomechRestorer:
     """
 
     def __init__(self, settings, limbs: tuple[str, ...], client=None) -> None:
-        self._limbs = limbs
+        self._limbs = limbs   # fallback for rigs that carry no map of their own
         self._session_gap_s = settings.session_gap_s
         if client is None:
             import redis.asyncio as aioredis  # noqa: PLC0415
@@ -81,21 +83,37 @@ class BiomechRestorer:
 
     def device_added(self, device) -> None:
         """Registry callback (synchronous): kick off the fetch, never block."""
+        if getattr(device, "skip_restore", False):
+            # The rig was just rebuilt because an operator changed a sleeve's
+            # pairing, side or full-scale. Its stored session describes the old
+            # rig, so restoring it would carry dose and baselines across a
+            # change that makes them incomparable (user decision N).
+            log.info("device %s: reconfigured — starting a fresh session",
+                     device.device_id)
+            return
         task = asyncio.create_task(self._restore(device),
                                    name=f"restore-dev{device.device_id}")
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
+
+    def _limbs_for(self, device) -> tuple[str, ...]:
+        """The rig's own limb set; snapshots are keyed by limb NAME (SPEC §7.4)."""
+        limb_map = getattr(device, "limb_map", None)
+        if limb_map:
+            return tuple(sorted(limb_map.values()))
+        return self._limbs
 
     async def _restore(self, device) -> None:
         import orjson  # noqa: PLC0415
 
         from common import redis_keys  # noqa: PLC0415
         dev = device.device_id
+        limbs = self._limbs_for(device)
         try:
             cal_raw, state_raw = await self._client.mget(
                 redis_keys.biomech_cal(dev), redis_keys.biomech_state(dev))
         except Exception as exc:  # noqa: BLE001
-            log.warning("device %d: snapshot fetch failed (%s) — fresh session",
+            log.warning("device %s: snapshot fetch failed (%s) — fresh session",
                         dev, exc)
             return
         # Calibration first, so the session starts on last-known-good values
@@ -106,16 +124,16 @@ class BiomechRestorer:
         # on an uncorrected gain mismatch.
         if cal_raw:
             n = biomech.apply_carried_calibration(
-                device.user_state, orjson.loads(cal_raw), self._limbs)
+                device.user_state, orjson.loads(cal_raw), limbs)
             if n:
                 self.carried += 1
-                log.info("device %d: carried over calibration for %d sensor(s)",
+                log.info("device %s: carried over calibration for %d sensor(s)",
                          dev, n)
         if state_raw and biomech.restore(device.user_state, orjson.loads(state_raw),
-                                         self._limbs, time.time(),
+                                         limbs, time.time(),
                                          self._session_gap_s):
             self.restored += 1
-            log.info("device %d: biomech session restored from snapshot", dev)
+            log.info("device %s: biomech session restored from snapshot", dev)
 
     async def close(self) -> None:
         for task in list(self._tasks):
@@ -124,7 +142,7 @@ class BiomechRestorer:
         await self._client.aclose()
 
 
-_reject_state = {"bad_len": 0, "warned": False}
+_reject_state = {"bad_len": 0, "bad_sync": 0, "warned": False}
 
 
 def _warn_if_all_rejected(registry: Registry) -> None:
@@ -135,16 +153,26 @@ def _warn_if_all_rejected(registry: Registry) -> None:
     /api/health that nobody was watching, so the symptom read as "device not
     connected". Malformed traffic that produces no devices is a configuration
     error, not a data-quality statistic — it belongs in the log.
+
+    Both rejection modes are watched, because they look identical from outside:
+    a wrong-length frame and an unrecognised sync byte both produce a silent,
+    device-less stream. Sync is how the two wearable kinds are told apart
+    (common/kinds.py), so a firmware that moves to a third value would land
+    here rather than looking like an unplugged device.
     """
-    delta = registry.bad_len - _reject_state["bad_len"]
+    bad_len = registry.bad_len - _reject_state["bad_len"]
+    bad_sync = registry.bad_sync - _reject_state["bad_sync"]
     _reject_state["bad_len"] = registry.bad_len
-    if delta and not registry.devices:
+    _reject_state["bad_sync"] = registry.bad_sync
+    if (bad_len or bad_sync) and not registry.devices:
         if not _reject_state["warned"]:
             log.error(
-                "receiving UDP but decoding NOTHING: %d datagrams rejected as "
-                "wrong-length in the last interval (expected %d bytes). Check the "
+                "receiving UDP but decoding NOTHING in the last interval: %d "
+                "wrong-length (expected %d bytes), %d unrecognised sync byte "
+                "(expected 0x%02X bilateral or 0x%02X unilateral). Check the "
                 "sender's frame format against common/packet.py.",
-                delta, packet.DGRAM_SIZE,
+                bad_len, packet.DGRAM_SIZE, bad_sync,
+                SYNC_BILATERAL, SYNC_UNILATERAL,
             )
             _reject_state["warned"] = True
     elif registry.devices:
@@ -173,9 +201,21 @@ async def amain() -> None:
 
     buf: deque[bytes] = deque(maxlen=RAW_BUF_MAXLEN)
     udp_counters = UdpCounters()
-    registry = Registry(max_devices=settings.max_devices)
+    # Knee-sleeve pairing, side and full-scale come from the dashboard, mirrored
+    # into Redis by the api (ingest/unit_config.py). The cache is in-memory, so
+    # routing never awaits; the subscriber keeps it current.
+    unit_cfg = UnitConfigCache(settings.unilateral_accel_fs_g,
+                               settings.unilateral_gyro_fs_dps)
+    registry = Registry(
+        max_devices=settings.max_devices,
+        limb_map=settings.limb_map,
+        unilateral_sensor_map=settings.unilateral_sensor_map,
+        unit_cfg=unit_cfg,
+    )
     registry.offline_after_s = settings.offline_after_s
     publisher = Publisher(settings, registry)
+    registry.on_rig_reset = publisher.rig_reset
+    unit_subscriber = UnitConfigSubscriber(settings, unit_cfg, registry)
 
     # Warm-restart snapshots (biomech SPEC §7.4), fetched per device as each
     # one appears — including on reconnect, not only at process start.
@@ -187,12 +227,16 @@ async def amain() -> None:
         if device is None:
             return
         try:
-            tick.metrics = biomech.compute(tick.frames, device.user_state, tick.times)
+            tick.metrics = biomech.compute(
+                tick.frames, device.user_state, tick.times,
+                expected_limbs=device.expected_limbs,
+                limb_scale=device.limb_scale,
+            )
         except Exception:  # noqa: BLE001
             # This runs inside the device's ticker task; an escaping exception
             # would kill that task permanently and the device would silently go
             # dark. Degrade to a held tick instead and keep the stream alive.
-            log.exception("device %d: biomech.compute failed — emitting held tick",
+            log.exception("device %s: biomech.compute failed — emitting held tick",
                           tick.device_id)
             tick.metrics = device.last_metrics or biomech.HELD_ZERO
         device.last_metrics = tick.metrics
@@ -211,7 +255,12 @@ async def amain() -> None:
     registry.on_new_device = on_new_device
     registry.on_device_removed = ticker_manager.device_removed
 
+    # Bind first (the deque buffers whatever arrives), then load the sleeve
+    # configs, and only then start draining: a sleeve routed before its config
+    # lands would be built as its own rig at the default full-scale and have to
+    # be torn down again a moment later.
     transport = await start_udp_server(settings.udp_port, buf, udp_counters)
+    await unit_subscriber.load_or_default()
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -226,6 +275,7 @@ async def amain() -> None:
                        evict_after_s=settings.session_gap_s),
             name="stats"),
         asyncio.create_task(publisher.stats_loop(), name="redis-stats"),
+        asyncio.create_task(unit_subscriber.run(), name="unit-config"),
     ]
     try:
         await stop.wait()
@@ -237,6 +287,7 @@ async def amain() -> None:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         await restorer.close()
+        await unit_subscriber.close()
         await publisher.close()
 
 

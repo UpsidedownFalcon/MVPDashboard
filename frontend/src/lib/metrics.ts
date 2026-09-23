@@ -1,6 +1,8 @@
 // Metric registry — display names/tooltips fixed by biomech SPEC §9, colors by
 // UIUX §8 (validated palette). Text never wears these colors; marks do.
 
+import { PersonStanding, type LucideIcon } from 'lucide-react'
+
 export type MetricId = 'm1' | 'm2' | 'm3' | 'm4' | 'm5' | 'composite'
 
 export interface MetricMeta {
@@ -143,7 +145,16 @@ export const RISK_BAND_META: Record<RiskBand, { label: string; cssVar: string; c
  *  "data coming" states must never look alike. */
 export type FlagWeight = 'alert' | 'warning' | 'info' | 'muted'
 
-export const FLAG_META: Record<string, { weight: FlagWeight; label: string; hint: string }> = {
+export interface FlagMeta {
+  weight: FlagWeight
+  label: string
+  hint: string
+  /** Chip icon for flags the weight-driven alert/warning icons don't cover
+   *  (bits.tsx FlagChips): a chip never carries meaning in colour alone. */
+  Icon?: LucideIcon
+}
+
+export const FLAG_META: Record<string, FlagMeta> = {
   cal_failed: {
     weight: 'alert',
     label: 'calibration failed',
@@ -180,6 +191,14 @@ export const FLAG_META: Record<string, { weight: FlagWeight; label: string; hint
     weight: 'info',
     label: 'carried calibration',
     hint: 'Calibrated from a previous session',
+  },
+  one_leg: {
+    weight: 'muted',
+    label: 'one leg',
+    // Honest, never directional (SPEC §5.5): m5 is not "unavailable because a
+    // leg is weak", it is unavailable because only one leg is instrumented.
+    hint: 'One leg instrumented - balance needs both legs',
+    Icon: PersonStanding,
   },
   warming_up: {
     weight: 'muted',

@@ -7,6 +7,8 @@ never touched.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import asyncio
 import uuid
 
@@ -14,6 +16,7 @@ import asyncpg
 import pytest
 
 from common.config import Settings
+from migrations import migrate as migrate_mod
 from migrations.migrate import apply_migrations, dsn, pg_interval
 
 HOST = "127.0.0.1"
@@ -60,7 +63,9 @@ async def test_migrate_idempotent_and_cagg(scratch_db) -> None:
     applied = await apply_migrations(conn, settings)
     assert applied == ["001_init.sql", "002_insight_actions.sql",
                        "003_insight_action_grouping.sql",
-                       "004_insight_decisions.sql"]
+                       "004_insight_decisions.sql",
+                       "005_sleeve_units.sql",
+                       "006_sleeve_side_backfill.sql"]
 
     # 002: action-first insight columns exist (nullable TEXT)
     # 003: action_id groups rules onto one imperative; reason is the short bullet
@@ -73,13 +78,14 @@ async def test_migrate_idempotent_and_cagg(scratch_db) -> None:
     }
     assert {"action", "rationale", "action_id", "reason"} <= insight_cols
 
-    # all tables exist (insight_decisions: migration 004, Adopt/Override)
+    # all tables exist (insight_decisions: migration 004, Adopt/Override;
+    # sleeve_units: migration 005, unilateral knee sleeves)
     tables = {
         r["tablename"]
         for r in await conn.fetch("SELECT tablename FROM pg_tables WHERE schemaname='public'")
     }
     assert {"users", "devices", "metrics", "forecasts", "insights",
-            "insight_decisions", "schema_migrations"} <= tables
+            "insight_decisions", "sleeve_units", "schema_migrations"} <= tables
 
     # metrics is a hypertable with a retention policy from METRICS_RETENTION
     hyper = await conn.fetchrow(
@@ -108,3 +114,25 @@ async def test_migrate_idempotent_and_cagg(scratch_db) -> None:
     assert row["composite"] == pytest.approx(42.5)
     assert row["m4"] is None          # avg() skips NULLs / all-NULL -> NULL
     assert row["n"] == 1
+
+
+async def test_006_seeds_the_side_of_legacy_unpaired_sleeves(scratch_db) -> None:
+    """Rows registered before decision H (side NULL = "not set yet") get the
+    side their wire source_id implies; explicit and paired sides are kept."""
+    conn, settings = scratch_db
+    await apply_migrations(conn, settings)
+    await conn.execute(
+        """INSERT INTO sleeve_units
+               (unit_id, wire_device_id, wire_source_id, rig_id, side, accel_fs_g, gyro_fs_dps)
+           VALUES ('u7-0', 7, 0, 'u7-0', NULL,    32, 4000),
+                  ('u7-1', 7, 1, 'u7-1', NULL,    32, 4000),
+                  ('u8-0', 8, 0, 'u8-0', 'right', 32, 4000),
+                  ('u9-0', 9, 0, 'u9-0', 'left',  32, 4000),
+                  ('u9-1', 9, 1, 'u9-0', 'right', 32, 4000)"""
+    )
+    sql = (Path(migrate_mod.__file__).parent / "006_sleeve_side_backfill.sql").read_text()
+    await conn.execute(sql)
+    rows = {r["unit_id"]: r["side"] for r in await conn.fetch(
+        "SELECT unit_id, side FROM sleeve_units ORDER BY unit_id")}
+    assert rows == {"u7-0": "left", "u7-1": "right", "u8-0": "right",
+                    "u9-0": "left", "u9-1": "right"}

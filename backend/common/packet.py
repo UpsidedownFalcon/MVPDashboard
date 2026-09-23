@@ -9,7 +9,7 @@ point of this module:
     [0]      device_id  (u8)
     [1]      source_id  (u8)  — leg MCU, 0 or 1
     [2..20]  19 wire bytes:
-        [0]      sync          = 0xA5
+        [0]      sync          = 0xA5 bilateral unit | 0xA6 unilateral sleeve
         [1]      header        bits[1:0]=sensor_id (1|2), bits[7:2]=version (=1)
         [2..5]   timestamp_us  u32 LE (wraps ~71.6 min, monotonic per source)
         [6..17]  ax ay az gx gy gz  (6 × i16 LE, raw counts)
@@ -37,6 +37,14 @@ treat "no datagram seen yet" as unknown rather than as a flat battery.
 
 decode() reads UDP datagrams; decode_log() reads SD-log records; encode() is the
 exact inverse of decode() — all kept in this file so they cannot drift.
+
+TWO WEARABLE KINDS (2026-09-23) share this layout and differ only in the sync
+byte: 0xA5 is the bilateral unit, 0xA6 the unilateral knee sleeve
+(common/kinds.py). Both are accepted; each record's `kind` is kept in the Batch
+so the router can tell them apart. The CRC covers wire[1..17] and never the
+sync byte, so a sleeve datagram is validated by exactly the same check. Any
+other sync value is still counted as bad_sync and dropped. Because _decode() is
+shared, decode_log() accepts both as well (the SD golden capture is all 0xA5).
 """
 
 from __future__ import annotations
@@ -46,12 +54,20 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from common.kinds import (
+    KIND_BILATERAL,
+    KIND_INVALID,
+    KIND_UNILATERAL,
+    SYNC_BILATERAL,
+    SYNC_LUT,
+)
+
 DGRAM_SIZE = 22  # UDP datagram: log record + trailing soc byte
 LOG_REC_SIZE = 21  # SD-log record (example/squats.bin)
 SOC_OFF = 21
 WIRE_OFF = 2
 WIRE_LEN = 19
-SYNC = 0xA5
+SYNC = SYNC_BILATERAL  # alias for existing importers; both syncs live in common.kinds
 CRC_POLY = 0x07
 CRC_FIRST, CRC_LAST = 1, 17  # wire byte range covered by the CRC, inclusive
 VERSION = 1
@@ -102,6 +118,9 @@ class Batch:
 
     device_id: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.uint8))
     source_id: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.uint8))
+    # common.kinds.KIND_* per record, derived from the sync byte (never invalid
+    # here: those records were filtered and counted in n_bad_sync)
+    kind: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.uint8))
     sensor_id: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.uint8))
     version: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.uint8))
     ts_us: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.uint32))
@@ -111,6 +130,8 @@ class Batch:
     n_bad_len: int = 0
     n_bad_sync: int = 0
     n_bad_crc: int = 0
+    n_bilateral: int = 0
+    n_unilateral: int = 0
 
     @property
     def n(self) -> int:
@@ -137,15 +158,16 @@ def _decode(payloads: list[bytes], rec_size: int) -> Batch:
     recs = np.frombuffer(b"".join(valid), dtype=np.uint8).reshape(len(valid), rec_size)
     wire = recs[:, WIRE_OFF : WIRE_OFF + WIRE_LEN]
 
-    sync_ok = wire[:, 0] == SYNC
+    kind = SYNC_LUT[wire[:, 0]]
+    sync_ok = kind != KIND_INVALID
     n_bad_sync = int(np.count_nonzero(~sync_ok))
     if n_bad_sync:
-        recs, wire = recs[sync_ok], wire[sync_ok]
+        recs, wire, kind = recs[sync_ok], wire[sync_ok], kind[sync_ok]
 
     crc_ok = compute_crc(wire) == wire[:, 18]
     n_bad_crc = int(np.count_nonzero(~crc_ok))
     if n_bad_crc:
-        recs, wire = recs[crc_ok], wire[crc_ok]
+        recs, wire, kind = recs[crc_ok], wire[crc_ok], kind[crc_ok]
 
     header = wire[:, 1]
     imu = np.column_stack(
@@ -161,6 +183,7 @@ def _decode(payloads: list[bytes], rec_size: int) -> Batch:
     return Batch(
         device_id=recs[:, 0].copy(),
         source_id=recs[:, 1].copy(),
+        kind=kind.copy(),
         soc=soc,
         sensor_id=header & 0x03,
         version=header >> 2,
@@ -170,6 +193,8 @@ def _decode(payloads: list[bytes], rec_size: int) -> Batch:
         n_bad_len=n_bad_len,
         n_bad_sync=n_bad_sync,
         n_bad_crc=n_bad_crc,
+        n_bilateral=int(np.count_nonzero(kind == KIND_BILATERAL)),
+        n_unilateral=int(np.count_nonzero(kind == KIND_UNILATERAL)),
     )
 
 
@@ -180,13 +205,17 @@ def encode(
     ts_us: int,
     imu6,
     soc: int = 0,
+    sync: int = SYNC_BILATERAL,
 ) -> bytes:
-    """Build one valid 22-byte UDP datagram (correct CRC) — inverse of decode()."""
+    """Build one valid 22-byte UDP datagram (correct CRC) — inverse of decode().
+
+    `sync` selects the kind (common.kinds.SYNC_BILATERAL / SYNC_UNILATERAL).
+    """
     header = ((VERSION << 2) | (sensor_id & 0x03)) & 0xFF
     rec = bytearray(DGRAM_SIZE)
     rec[0] = device_id & 0xFF
     rec[1] = source_id & 0xFF
-    rec[2] = SYNC
+    rec[2] = sync & 0xFF
     rec[3] = header
     rec[4:8] = (int(ts_us) & 0xFFFFFFFF).to_bytes(4, "little")
     rec[8:20] = struct.pack("<6h", *(int(v) for v in imu6))

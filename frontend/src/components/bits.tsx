@@ -127,10 +127,13 @@ export function FlagChips({ flags }: { flags: string[] }) {
     <span className="flags">
       {shown.map((f) => {
         const meta = FLAG_META[f] ?? { weight: 'muted' as const, label: f, hint: f }
+        // the flag's own icon wins; otherwise the weight carries it
+        const Icon =
+          meta.Icon ??
+          (meta.weight === 'alert' ? CircleAlert : meta.weight === 'warning' ? AlertTriangle : null)
         return (
           <span key={f} className={`chip flag flag-${meta.weight}`} title={meta.hint}>
-            {meta.weight === 'alert' && <CircleAlert aria-hidden />}
-            {meta.weight === 'warning' && <AlertTriangle aria-hidden />}
+            {Icon && <Icon aria-hidden />}
             {meta.label}
           </span>
         )

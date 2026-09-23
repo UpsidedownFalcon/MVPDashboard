@@ -77,7 +77,7 @@ export default function DeviceCard({ device }: { device: LiveDevice }) {
         <SensorSummary device={device} quality={live?.q ?? device.quality} />
         {/* battery sits top-right, phone-style */}
         <span className="device-card-battery">
-          <Battery soc={device.soc} />
+          <Battery soc={device.soc} device={device} />
         </span>
       </header>
 

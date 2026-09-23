@@ -3,13 +3,14 @@
 // connection dot, user + logout. Collapses to a top bar on tablet widths
 // (app.css).
 
-import { LayoutGrid, LogOut } from 'lucide-react'
+import { HardDrive, LayoutGrid, LogOut } from 'lucide-react'
 import { NavLink } from 'react-router-dom'
 import { LogoFull } from './Logo'
 import { useAuth } from '../lib/auth'
 import { useVisibleDevices } from '../lib/devices'
 import { metricValue } from '../lib/format'
 import { riskBand, RISK_BAND_META } from '../lib/metrics'
+import { STORAGE_COPY } from '../lib/storage/copy'
 import { useLive } from '../lib/ws'
 
 export default function Sidebar() {
@@ -29,6 +30,10 @@ export default function Sidebar() {
         <NavLink to="/" end className="sb-item">
           <LayoutGrid size={15} aria-hidden />
           Unit overview
+        </NavLink>
+        <NavLink to="/storage" className="sb-item">
+          <HardDrive size={15} aria-hidden />
+          {STORAGE_COPY.navItem}
         </NavLink>
 
         {/* Offline athletes stay listed (2026-08-06) — muted dot, em-dash risk */}

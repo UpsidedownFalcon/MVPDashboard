@@ -9,6 +9,10 @@ import numpy as np
 import pytest
 
 from common import packet
+from common.kinds import KIND_BILATERAL, KIND_UNILATERAL, SYNC_UNILATERAL
+
+# Both wearable kinds are accepted (common/kinds.py); anything else is bad_sync.
+ACCEPTED_SYNCS = (packet.SYNC, SYNC_UNILATERAL)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SQUATS_BIN = REPO_ROOT / "example" / "squats.bin"
@@ -46,6 +50,8 @@ def test_round_trip_encode_decode() -> None:
     assert batch.n_in == len(records)
     assert batch.n == len(records)
     assert batch.n_bad_len == batch.n_bad_sync == batch.n_bad_crc == 0
+    assert batch.n_bilateral == len(records) and batch.n_unilateral == 0
+    assert (batch.kind == KIND_BILATERAL).all()
     for i, r in enumerate(records):
         assert batch.device_id[i] == r["device_id"]
         assert batch.source_id[i] == r["source_id"]
@@ -69,10 +75,10 @@ def test_golden_against_example_decode() -> None:
         rows = [next(reader) for _ in range(GOLDEN_N)]
 
     good = [r for r in rows
-            if r["crc_ok"] == "1" and int(r["sync"]) == packet.SYNC]
-    n_bad_sync_csv = sum(1 for r in rows if int(r["sync"]) != packet.SYNC)
+            if r["crc_ok"] == "1" and int(r["sync"]) in ACCEPTED_SYNCS]
+    n_bad_sync_csv = sum(1 for r in rows if int(r["sync"]) not in ACCEPTED_SYNCS)
     n_bad_crc_csv = sum(1 for r in rows
-                        if int(r["sync"]) == packet.SYNC and r["crc_ok"] == "0")
+                        if int(r["sync"]) in ACCEPTED_SYNCS and r["crc_ok"] == "0")
 
     assert batch.n_in == GOLDEN_N
     assert batch.n_bad_len == 0
@@ -126,6 +132,25 @@ def test_bad_sync_counted_and_filtered() -> None:
     assert batch.n_bad_crc == 0
 
 
+def test_unilateral_sync_is_accepted_and_kind_tagged() -> None:
+    """The knee sleeve's 0xA6 (firmware decision D13) decodes exactly like 0xA5
+    and every surviving record carries its kind, aligned through both filters."""
+    bilateral = _valid_payload()
+    sleeve = _valid_payload(device_id=31, sync=SYNC_UNILATERAL)
+    bad_crc_sleeve = bytearray(_valid_payload(device_id=32, sync=SYNC_UNILATERAL))
+    bad_crc_sleeve[20] ^= 0xFF
+    unknown = bytearray(_valid_payload(device_id=33))
+    unknown[2] = 0xA7  # neither kind: still bad_sync, still dropped
+
+    batch = packet.decode([bilateral, sleeve, bytes(bad_crc_sleeve), bytes(unknown)])
+    assert batch.n == 2
+    assert batch.n_bad_sync == 1
+    assert batch.n_bad_crc == 1
+    assert batch.device_id.tolist() == [30, 31]
+    assert batch.kind.tolist() == [KIND_BILATERAL, KIND_UNILATERAL]
+    assert batch.n_bilateral == 1 and batch.n_unilateral == 1
+
+
 def test_wrong_length_never_raises() -> None:
     batch = packet.decode([b"", b"\x01" * 5, b"\x01" * 100, _valid_payload()])
     assert batch.n_in == 4
@@ -167,10 +192,35 @@ def test_real_device_datagram_decodes() -> None:
     assert int(batch.ts_us[0]) == 0x17E4068C
     assert batch.imu[0].tolist() == [801, -445, 1836, 1, 1, 10]
     assert int(batch.soc[0]) == 30
+    assert int(batch.kind[0]) == KIND_BILATERAL
 
     # encode() must reproduce the captured bytes exactly, soc included.
     assert packet.encode(30, 1, 2, 0x17E4068C, [801, -445, 1836, 1, 1, 10],
                          soc=30) == REAL_DATAGRAM
+
+
+def test_real_sleeve_datagram_decodes() -> None:
+    """The sleeve firmware computes crc8 over bytes 3..19 (acquisition.c
+    append_sample_), which excludes the sync byte just like the bilateral unit.
+    So the real capture with byte 2 = 0xA6 is byte-for-byte what a sleeve sends
+    for the same sample: same CRC, same payload, different kind."""
+    sleeve = bytearray(REAL_DATAGRAM)
+    sleeve[2] = SYNC_UNILATERAL
+    sleeve = bytes(sleeve)
+
+    batch = packet.decode([sleeve])
+    assert batch.n == 1
+    assert batch.n_bad_len == batch.n_bad_sync == batch.n_bad_crc == 0
+    assert int(batch.kind[0]) == KIND_UNILATERAL
+    assert int(batch.device_id[0]) == 30
+    assert int(batch.source_id[0]) == 1
+    assert int(batch.sensor_id[0]) == 2
+    assert int(batch.ts_us[0]) == 0x17E4068C
+    assert batch.imu[0].tolist() == [801, -445, 1836, 1, 1, 10]
+    assert int(batch.soc[0]) == 30
+
+    assert packet.encode(30, 1, 2, 0x17E4068C, [801, -445, 1836, 1, 1, 10],
+                         soc=30, sync=SYNC_UNILATERAL) == sleeve
 
 
 def test_log_record_is_the_datagram_without_soc() -> None:

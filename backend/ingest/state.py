@@ -1,8 +1,24 @@
-"""Per-device / per-sensor registry, routing and stats (TRD §4, S1-T06).
+"""Per-rig / per-sensor registry, routing and stats (TRD §4, S1-T06).
 
 The router receives decoded Batches and distributes samples to SensorState
-pending queues, auto-creating device/sensor state on first sight. Downstream
+pending queues, auto-creating rig/sensor state on first sight. Downstream
 stages (align/jitter/ticker, T07-T09) consume the pending chunks.
+
+A RIG is everything downstream is keyed by: one ticker, one biomech session,
+one `devices` row, one card. Two wearable kinds map onto it (common/kinds.py):
+
+  * a bilateral unit is one rig, id = its device_id byte ("30"), sensors keyed
+    by the real (source_id, sensor_id) through LIMB_MAP;
+  * a knee sleeve is a UNIT, id "u<device>-<source>". Unpaired it is its own
+    rig; paired in the dashboard, two sleeves share the host's rig id. Inside a
+    sleeve rig each unit is mapped to a VIRTUAL source (left or side-less -> 0,
+    right -> 1), so a paired rig presents (0,1),(0,2),(1,1),(1,2) exactly like
+    a bilateral unit and every per-source mechanism below -- battery, sensor
+    stats, last_seen keys -- keeps working unchanged.
+
+Because a sleeve's rig membership, side and full-scale come from the dashboard
+rather than the wire, the routing tables are rebuilt whenever a unit's config
+changes (apply_unit_config), which restarts that rig's session by design.
 """
 
 from __future__ import annotations
@@ -14,14 +30,39 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from common.config import (
+    DEFAULT_LIMB_MAP,
+    DEFAULT_UNILATERAL_ACCEL_FS_G,
+    DEFAULT_UNILATERAL_GYRO_FS_DPS,
+    DEFAULT_UNILATERAL_SENSOR_MAP,
+)
+from common.kinds import (
+    BILATERAL_EXPECTED_LIMBS,
+    KIND_BILATERAL,
+    KIND_NAMES,
+    KIND_UNILATERAL,
+    UNIT_LIMBS,
+    UnitConfig,
+    rig_kind,
+    unit_id as make_unit_id,
+)
 from common.packet import Batch
 from common.scaling import SAT_THRESHOLD_COUNTS
+from ingest.unit_config import UnitConfigCache
 
 log = logging.getLogger("ingest.state")
 
 # Cap on buffered-but-unconsumed sample chunks per sensor (~2s at 600Hz comes to
 # ~200 drain chunks; keep headroom, drop-oldest beyond and count).
 PENDING_MAXCHUNKS = 512
+
+# How long after a configuration change a rebuilt rig refuses to restore its
+# Redis snapshot. A config change means the rig is a different shape or its
+# counts mean something different, so the old dose and baselines are not
+# comparable (user decision N). The snapshot is deleted too, but it was written
+# up to a second earlier and the rig rebuilds within ~10 ms, so the restorer
+# would otherwise race the delete and resurrect it.
+RESET_SKIP_RESTORE_S = 2.0
 
 
 @dataclass
@@ -82,8 +123,33 @@ class SensorState:
 
 
 class DeviceState:
-    def __init__(self, device_id: int) -> None:
+    def __init__(
+        self,
+        device_id: str,
+        *,
+        kind: int = KIND_BILATERAL,
+        limb_map: dict[tuple[int, int], str] | None = None,
+        expected_limbs: int = BILATERAL_EXPECTED_LIMBS,
+        limb_scale: dict[str, tuple[float, float]] | None = None,
+        units: tuple[str, ...] = (),
+        skip_restore: bool = False,
+    ) -> None:
         self.device_id = device_id
+        self.kind = kind
+        # Routing tables for THIS rig, resolved once when it is created: the
+        # ticker frames by `limb_map`, biomech judges completeness by
+        # `expected_limbs` and converts counts with `limb_scale`. They are
+        # per-rig rather than global because two rigs of different kinds stream
+        # into the same process (see the module docstring).
+        self.limb_map = limb_map if limb_map is not None else {}
+        self.expected_limbs = expected_limbs
+        self.limb_scale = limb_scale
+        self.units = units                      # sleeve units, host first; () bilateral
+        # Set when this rig was rebuilt right after a configuration change: its
+        # stored session describes a different rig and must not come back.
+        self.skip_restore = skip_restore
+        self.unit_last_seen: dict[str, float] = {}
+        self.unit_soc: dict[str, int] = {}
         self.sensors: dict[tuple[int, int], SensorState] = {}
         self.ticks_out = 0       # advanced by the ticker (T09)
         self.tick_rate: float = 0.0
@@ -104,7 +170,7 @@ class DeviceState:
         state = self.sensors.get(key)
         if state is None:
             state = self.sensors[key] = SensorState(source_id, sensor_id)
-            log.info("device %d: new sensor (source=%d, sensor=%d)",
+            log.info("device %s: new sensor (source=%d, sensor=%d)",
                      self.device_id, source_id, sensor_id)
         return state
 
@@ -112,54 +178,162 @@ class DeviceState:
 class Registry:
     """All device state + global counters; owns batch routing."""
 
-    def __init__(self, max_devices: int | None = None) -> None:
-        self.devices: dict[int, DeviceState] = {}
+    def __init__(
+        self,
+        max_devices: int | None = None,
+        *,
+        limb_map: dict[tuple[int, int], str] | None = None,
+        unilateral_sensor_map: dict[int, str] | None = None,
+        unit_cfg=None,
+    ) -> None:
+        self.devices: dict[str, DeviceState] = {}
         # Bad records lose trustworthy identity, so malformed counters are global.
         self.crc_fail = 0
         self.bad_sync = 0
         self.bad_len = 0
+        self.recv_by_kind: dict[int, int] = {}
         self.max_devices = max_devices
         self.offline_after_s = 2.0   # set from Settings by the caller
         self.dev_dropped = 0         # packets for devices beyond the cap
-        self._capped_logged: set[int] = set()
+        self._capped_logged: set[str] = set()
+        self._collision_logged: set[str] = set()
+        # Defaults keep a bare Registry() usable (tests, tools); ingest passes
+        # the real Settings-derived tables.
+        self.limb_map = dict(DEFAULT_LIMB_MAP if limb_map is None else limb_map)
+        self.unilateral_sensor_map = dict(
+            DEFAULT_UNILATERAL_SENSOR_MAP if unilateral_sensor_map is None
+            else unilateral_sensor_map)
+        self.unit_cfg = unit_cfg if unit_cfg is not None else UnitConfigCache(
+            DEFAULT_UNILATERAL_ACCEL_FS_G, DEFAULT_UNILATERAL_GYRO_FS_DPS)
+        self.reset_at: dict[str, float] = {}
         self.on_new_device = None       # optional callback(device: DeviceState)
-        self.on_device_removed = None   # optional callback(device_id: int)
+        self.on_device_removed = None   # optional callback(device_id: str)
+        self.on_rig_reset = None        # optional callback(rig_id: str)
 
-    def _remove(self, device_id: int, why: str) -> None:
+    def _remove(self, device_id: str, why: str) -> None:
         self.devices.pop(device_id, None)
         self._capped_logged.discard(device_id)
-        log.info("device %d released (%s)", device_id, why)
+        log.info("device %s released (%s)", device_id, why)
         if self.on_device_removed is not None:
             self.on_device_removed(device_id)
 
-    def device(self, device_id: int, now: float | None = None) -> DeviceState | None:
-        """Existing device, or a new one — displacing an OFFLINE one if at cap.
+    # --- rig shape --------------------------------------------------------------
 
-        Returns None only when the cap is reached and every tracked device is
+    def resolve(self, kind: int, device_id: int, source_id: int) -> tuple[str, int, str | None]:
+        """Wire identity -> (rig_id, virtual source_id, unit_id or None).
+
+        A bilateral datagram keeps its device byte and its real source. A sleeve
+        datagram is looked up by unit id, so the dashboard decides which rig it
+        joins and which side (hence which virtual source) it occupies.
+        """
+        if kind == KIND_BILATERAL:
+            return str(device_id), source_id, None
+        unit = make_unit_id(device_id, source_id)
+        cfg: UnitConfig = self.unit_cfg.get(unit)
+        return cfg.rig_id, cfg.vsrc, unit
+
+    def _build_rig(self, rig_id: str, skip_restore: bool) -> DeviceState:
+        """Resolve a rig's limb map, scale and expected size from configuration.
+
+        Built from CONFIG, not from traffic: a paired rig knows both its sleeves
+        before the second one has sent a packet, so its biomech session starts
+        with the full limb set instead of being rebuilt (and zeroed) when the
+        other leg joins.
+        """
+        if rig_kind(rig_id) == KIND_NAMES[KIND_BILATERAL]:
+            return DeviceState(rig_id, kind=KIND_BILATERAL, limb_map=dict(self.limb_map),
+                               expected_limbs=BILATERAL_EXPECTED_LIMBS)
+        limb_map: dict[tuple[int, int], str] = {}
+        limb_scale: dict[str, tuple[float, float]] = {}
+        units: list[str] = []
+        for cfg in self.unit_cfg.members(rig_id):
+            candidate = cfg.limb_map(self.unilateral_sensor_map)
+            # Duplicate limb names would make one sleeve overwrite the other's
+            # frame and rebuild the biomech session 60 times a second (the
+            # hazard common/config.py's uniqueness validator exists for). The
+            # api refuses to create this state; if it appears anyway, drop the
+            # offending member rather than build the broken map.
+            if (candidate.keys() & limb_map.keys()
+                    or set(candidate.values()) & set(limb_map.values())):
+                if rig_id not in self._collision_logged:
+                    self._collision_logged.add(rig_id)
+                    log.error("rig %s: unit %s collides with the rig's existing limbs "
+                              "%s — unit ignored. Set its side in the dashboard.",
+                              rig_id, cfg.unit_id, sorted(limb_map.values()))
+                continue
+            limb_map.update(candidate)
+            for limb in candidate.values():
+                limb_scale[limb] = cfg.limb_scale()
+            units.append(cfg.unit_id)
+        if not limb_map:
+            # Only reachable from an inconsistent configuration (a host that is
+            # itself paired elsewhere). The rig exists so its packets are not
+            # silently attributed to someone else, but it maps nothing.
+            log.error("rig %s: no unit claims it — check its pairing in the "
+                      "dashboard; it will produce no metrics", rig_id)
+        return DeviceState(
+            rig_id,
+            kind=KIND_UNILATERAL,
+            limb_map=limb_map,
+            expected_limbs=UNIT_LIMBS * max(len(units), 1),
+            limb_scale=limb_scale,
+            units=tuple(units),
+            skip_restore=skip_restore,
+        )
+
+    def apply_unit_config(self, cfg: UnitConfig, now: float | None = None) -> bool:
+        """Adopt a sleeve's dashboard settings; returns True if anything changed.
+
+        A change to pairing, side or full-scale changes the rig's shape or the
+        meaning of its counts, so both the rig the unit left and the rig it
+        joined are torn down. They rebuild on the next packet, with a fresh
+        session: dose, learned baselines and calibration measured under the old
+        configuration are not comparable to the new one (user decision N).
+        """
+        previous = self.unit_cfg.set(cfg)
+        if previous is None:
+            return False
+        now = time.time() if now is None else now
+        for rig_id in dict.fromkeys((previous.rig_id, cfg.rig_id)):
+            self.reset_at[rig_id] = now
+            if rig_id in self.devices:
+                self._remove(rig_id, f"unit {cfg.unit_id} reconfigured")
+            if self.on_rig_reset is not None:
+                self.on_rig_reset(rig_id)
+        return True
+
+    def device(self, device_id: str, now: float | None = None) -> DeviceState | None:
+        """Existing rig, or a new one — displacing an OFFLINE one if at cap.
+
+        Returns None only when the cap is reached and every tracked rig is
         still live; those packets are dropped and counted, never silently mixed
-        into another device's stream (biomech SPEC §7.2).
+        into another rig's stream (biomech SPEC §7.2).
 
-        Displacing the longest-silent offline device matters for usability: a
+        Displacing the longest-silent offline rig matters for usability: a
         trainer swapping a wearable would otherwise wait out the whole session
         gap before the replacement could register.
         """
+        device_id = str(device_id)
         state = self.devices.get(device_id)
         if state is not None:
             return state
+        now = time.time() if now is None else now
         if self.max_devices is not None and len(self.devices) >= self.max_devices:
-            now = time.time() if now is None else now
             offline = [(d.last_seen, i) for i, d in self.devices.items()
                        if not d.last_seen or now - d.last_seen > self.offline_after_s]
             if not offline:
                 self.dev_dropped += 1
                 if device_id not in self._capped_logged:
                     self._capped_logged.add(device_id)
-                    log.warning("device %d ignored: MAX_DEVICES=%d, all live",
+                    log.warning("device %s ignored: MAX_DEVICES=%d, all live",
                                 device_id, self.max_devices)
                 return None
             self._remove(min(offline)[1], f"displaced by device {device_id}")
-        state = self.devices[device_id] = DeviceState(device_id)
-        log.info("new device: %d", device_id)
+        reset_at = self.reset_at.get(device_id)
+        skip_restore = reset_at is not None and now - reset_at <= RESET_SKIP_RESTORE_S
+        state = self.devices[device_id] = self._build_rig(device_id, skip_restore)
+        log.info("new device: %s (%s, %d limb(s) mapped)", device_id,
+                 rig_kind(device_id), len(state.limb_map))
         if self.on_new_device is not None:
             self.on_new_device(state)
         return state
@@ -172,8 +346,12 @@ class Registry:
         if batch.n == 0:
             return
 
+        # The kind rides in bits 24+ (free: the other three fields are bytes),
+        # so a bilateral device 30 and a sleeve with device byte 30 sort into
+        # separate groups and can never be merged into one stream.
         key = (
-            batch.device_id.astype(np.int64) << 16
+            batch.kind.astype(np.int64) << 24
+            | batch.device_id.astype(np.int64) << 16
             | batch.source_id.astype(np.int64) << 8
             | batch.sensor_id.astype(np.int64)
         )
@@ -186,18 +364,26 @@ class Registry:
         for s, e in zip(starts, ends):
             idx = order[s:e]
             k = int(sorted_key[s])
-            device_id, source_id, sensor_id = k >> 16, (k >> 8) & 0xFF, k & 0xFF
-            device = self.device(device_id, now=recv_time)
+            kind = k >> 24
+            device_id, source_id, sensor_id = (k >> 16) & 0xFF, (k >> 8) & 0xFF, k & 0xFF
+            self.recv_by_kind[kind] = self.recv_by_kind.get(kind, 0) + len(idx)
+            rig_id, vsrc, unit = self.resolve(kind, device_id, source_id)
+            device = self.device(rig_id, now=recv_time)
             if device is None:
                 continue
             device.last_seen = recv_time
+            if unit is not None:
+                device.unit_last_seen[unit] = recv_time
             # Battery: the newest datagram in this slice wins. Cheap (one
             # array index) and it is the only place the decoded `soc` is still
             # in scope -- SampleChunk deliberately does not carry it, since it
             # is per-device telemetry, not a per-sample signal.
             if len(batch.soc):
-                device.soc[source_id] = int(batch.soc[idx[-1]])
-            sensor = device.sensor(source_id, sensor_id)
+                soc = int(batch.soc[idx[-1]])
+                device.soc[vsrc] = soc
+                if unit is not None:
+                    device.unit_soc[unit] = soc
+            sensor = device.sensor(vsrc, sensor_id)
             imu = batch.imu[idx]
             # Clipping is unrecoverable and a clipped impact still matters, so
             # count it rather than dropping it; once the saturated fraction gets
@@ -213,7 +399,7 @@ class Registry:
                 imu=imu,
             ))
 
-    def evict_stale(self, now: float, max_age_s: float) -> list[int]:
+    def evict_stale(self, now: float, max_age_s: float) -> list[str]:
         """Release devices silent for longer than max_age_s; returns their ids.
 
         Without this, MAX_DEVICES counts devices that went offline hours ago and
@@ -256,7 +442,12 @@ class Registry:
                 f" q={quality} ticks_out={device.ticks_out}"
                 f" late_drop={late} buf_drop={drops}"
             )
+        by_kind = " ".join(
+            f"{KIND_NAMES.get(kind, kind)}={n}"
+            for kind, n in sorted(self.recv_by_kind.items())
+        )
         lines.append(
-            f"global: crc_fail={self.crc_fail} bad_sync={self.bad_sync} bad_len={self.bad_len}"
+            f"global: crc_fail={self.crc_fail} bad_sync={self.bad_sync} "
+            f"bad_len={self.bad_len}" + (f" recv[{by_kind}]" if by_kind else "")
         )
         return lines

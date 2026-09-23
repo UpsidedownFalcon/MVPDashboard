@@ -1287,12 +1287,12 @@ def test_max_devices_cap_drops_extra_live_devices():
     reg.offline_after_s = 2.0
     for i, dev in enumerate(range(30, 35)):
         _route(reg, dev, t=1000.0)
-    assert sorted(reg.devices) == [30, 31, 32, 33, 34]
+    assert sorted(reg.devices) == ["30", "31", "32", "33", "34"]
 
     _route(reg, 40, t=1000.5)               # all five still live
-    assert 40 not in reg.devices
+    assert "40" not in reg.devices
     assert reg.dev_dropped > 0
-    assert sorted(reg.devices) == [30, 31, 32, 33, 34], "cap must not evict a live device"
+    assert sorted(reg.devices) == ["30", "31", "32", "33", "34"], "cap keeps live devices"
 
 
 def test_new_device_displaces_an_offline_one():
@@ -1300,29 +1300,29 @@ def test_new_device_displaces_an_offline_one():
     from ingest.state import Registry
     reg = Registry(max_devices=5)
     reg.offline_after_s = 2.0
-    removed: list[int] = []
+    removed: list[str] = []
     reg.on_device_removed = removed.append
     for dev in range(30, 35):
         _route(reg, dev, t=1000.0)
     _route(reg, 34, t=1010.0)               # keep 34 fresh; 30-33 go silent
 
     _route(reg, 40, t=1010.0)               # 30 is the longest-silent
-    assert 40 in reg.devices
-    assert 30 not in reg.devices and removed == [30]
-    assert 34 in reg.devices, "the freshest device must survive"
+    assert "40" in reg.devices
+    assert "30" not in reg.devices and removed == ["30"]
+    assert "34" in reg.devices, "the freshest device must survive"
 
 
 def test_evict_stale_releases_slots():
     from ingest.state import Registry
     reg = Registry(max_devices=5)
     reg.offline_after_s = 2.0
-    removed: list[int] = []
+    removed: list[str] = []
     reg.on_device_removed = removed.append
     for dev in range(30, 33):
         _route(reg, dev, t=1000.0)
     assert reg.evict_stale(now=1000.0 + 100.0, max_age_s=300.0) == []
     gone = reg.evict_stale(now=1000.0 + 400.0, max_age_s=300.0)
-    assert sorted(gone) == [30, 31, 32] and sorted(removed) == [30, 31, 32]
+    assert sorted(gone) == ["30", "31", "32"] and sorted(removed) == ["30", "31", "32"]
     assert reg.devices == {}
 
 

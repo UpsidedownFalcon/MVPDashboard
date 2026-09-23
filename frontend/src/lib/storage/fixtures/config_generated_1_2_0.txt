@@ -1,0 +1,38 @@
+# NYKnicks knee sleeve data logger configuration
+# Edit over USB (this drive), then unplug — the device re-reads this
+# file and starts a new session. Lines starting with # are comments.
+
+# WiFi (WPA2-Personal). Leave wifi_ssid empty to keep the radio off.
+wifi_ssid=Nirat
+wifi_password=SS93MDrive
+
+# UDP live-stream destination (~640 Hz per sensor when WiFi is up)
+udp_ip=192.168.1.100
+udp_port=5050
+
+# Identity bytes in every UDP packet
+device_id=1
+source_id=0
+
+# 1 = write a diagnostics LOG_NNNN.TXT next to the data file, 0 = don't
+diag_log_enabled=1
+# 1 = UDP streaming allowed (when WiFi connects), 0 = never stream
+stream_enabled=1
+
+# Safe-stop threshold in millivolts (2500–4200)
+low_batt_mv=3100
+
+# IMU full-scale ranges (take effect at the next session start after an edit)
+# accel_fs_g: 2, 4, 8, 16 or 32 (g)
+accel_fs_g=32
+# gyro_fs_dps: 125, 250, 500, 1000, 2000 or 4000 (deg/s)
+gyro_fs_dps=4000
+
+# WiFi transmit power in dBm (2.0-20.0, quarter-dB steps; the radio quantises)
+wifi_tx_power_dbm=8.5
+
+# Optional battery divider calibration: pack voltage measured with a meter
+# (batt_cal_true_mv) and the raw reading printed in the diag log at that moment
+# (batt_cal_raw_mv). 0 = not calibrated (worst-case 5 % resistor margin is used).
+batt_cal_true_mv=0
+batt_cal_raw_mv=0

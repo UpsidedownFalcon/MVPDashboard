@@ -30,7 +30,7 @@ log = logging.getLogger("ingest.ticker")
 
 @dataclass
 class TickInput:
-    device_id: int
+    device_id: str
     t_server: float                 # wall-clock tick time (unix seconds)
     frames: dict[str, np.ndarray]   # limb -> float32[n, 6] raw counts
     times: dict[str, np.ndarray]    # limb -> float64[n] server-mapped sample times
@@ -61,8 +61,12 @@ class DeviceTicker:
         # quality (a 25% data-loss warning on a healthy rig), while a 5+ sensor
         # map clamped at 1.0 and hid real loss. A physically dead sensor still
         # lowers quality, which is the behaviour SPEC §8 relies on.
+        #
+        # Taken from the RIG, not from Settings: a knee sleeve rig maps two
+        # limbs and a bilateral rig four, and scoring a sleeve against the
+        # bilateral map would peg it at a permanent 0.5 (ingest/state.py).
         self._expected_per_tick = (
-            max(len(settings.limb_map), 1) * settings.expected_input_hz
+            max(len(device.limb_map), 1) * settings.expected_input_hz
             / settings.output_hz
         )
         self._aligners: dict[int, SourceAligner] = {}
@@ -108,7 +112,7 @@ class DeviceTicker:
                 if was_reset:
                     self.resets += 1
                     log.warning(
-                        "device %d source %d: clock reset (reboot?) — buffers cleared",
+                        "device %s source %d: clock reset (reboot?) — buffers cleared",
                         self._device.device_id, src,
                     )
                     for (jsrc, jsen), jbuf in self._jitters.items():
@@ -125,7 +129,7 @@ class DeviceTicker:
 
     def _tick(self, t: float) -> TickInput:
         self._process_pending()
-        limb_map = self._settings.limb_map
+        limb_map = self._device.limb_map
         frames: dict[str, np.ndarray] = {
             limb: np.empty((0, 6), dtype=np.float32) for limb in limb_map.values()
         }
@@ -142,7 +146,7 @@ class DeviceTicker:
             if limb is None:
                 if (src, sen) not in self._unknown_keys_logged:
                     self._unknown_keys_logged.add((src, sen))
-                    log.warning("device %d: sensor (%d,%d) not in LIMB_MAP — ignored",
+                    log.warning("device %s: sensor (%d,%d) not in LIMB_MAP — ignored",
                                 self._device.device_id, src, sen)
                 continue
             if released:
@@ -176,7 +180,7 @@ class DeviceTicker:
             jitter.reset()
         if gap_s > self._settings.session_gap_s:
             biomech.reset_session(self._device.user_state)
-            log.info("device %d: gap %.0fs > SESSION_GAP_S — biomech session reset",
+            log.info("device %s: gap %.0fs > SESSION_GAP_S — biomech session reset",
                      self._device.device_id, gap_s)
 
     # --- run loop ---------------------------------------------------------------
@@ -196,7 +200,7 @@ class DeviceTicker:
             if silent_for > offline_after:
                 if not self.suspended:
                     self.suspended = True
-                    log.info("device %d: offline (silent %.1fs) — ticker suspended",
+                    log.info("device %s: offline (silent %.1fs) — ticker suspended",
                              self._device.device_id, silent_for)
                 # idle-poll until traffic returns, then reset state + tick epoch
                 offline_since = self._device.last_seen
@@ -206,7 +210,7 @@ class DeviceTicker:
                 self._reset_pipeline(self._now() - offline_since)
                 start = self._now()
                 k = 0
-                log.info("device %d: back online — ticker resumed (state reset)",
+                log.info("device %s: back online — ticker resumed (state reset)",
                          self._device.device_id)
                 continue
 
@@ -219,8 +223,8 @@ class TickerManager:
     def __init__(self, settings: Settings, callback) -> None:
         self._settings = settings
         self._callback = callback
-        self.tickers: dict[int, DeviceTicker] = {}
-        self._tasks: dict[int, asyncio.Task] = {}
+        self.tickers: dict[str, DeviceTicker] = {}
+        self._tasks: dict[str, asyncio.Task] = {}
 
     def device_added(self, device: DeviceState) -> None:
         ticker = DeviceTicker(device, self._settings, self._callback)
@@ -229,7 +233,7 @@ class TickerManager:
             ticker.run(), name=f"ticker-dev{device.device_id}"
         )
 
-    def device_removed(self, device_id: int) -> None:
+    def device_removed(self, device_id: str) -> None:
         """Cancel an evicted device's ticker task so it stops idle-polling."""
         self.tickers.pop(device_id, None)
         task = self._tasks.pop(device_id, None)

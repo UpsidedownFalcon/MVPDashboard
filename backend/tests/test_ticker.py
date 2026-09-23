@@ -58,7 +58,7 @@ async def test_cadence_exact_and_frames_delivered(settings: Settings) -> None:
     clock = FakeClock(start=1000.0)
     registry = Registry()
     ticks: list[TickInput] = []
-    device = registry.device(30)
+    device = registry.device("30")
     ticker = DeviceTicker(device, settings, ticks.append,
                           now_fn=clock.now, sleep_fn=clock.sleep)
 
@@ -95,7 +95,7 @@ async def test_quality_reflects_sample_share(settings: Settings) -> None:
     clock = FakeClock(start=1000.0)
     registry = Registry()
     ticks: list[TickInput] = []
-    device = registry.device(30)
+    device = registry.device("30")
     ticker = DeviceTicker(device, settings, ticks.append,
                           now_fn=clock.now, sleep_fn=clock.sleep)
 
@@ -121,7 +121,7 @@ async def test_hold_when_no_data_then_suspend(settings: Settings) -> None:
     clock = FakeClock(start=1000.0)
     registry = Registry()
     ticks: list[TickInput] = []
-    device = registry.device(30)
+    device = registry.device("30")
     ticker = DeviceTicker(device, settings, ticks.append,
                           now_fn=clock.now, sleep_fn=clock.sleep)
 
@@ -151,7 +151,7 @@ def test_pending_and_jitter_drops_compose(settings: Settings) -> None:
 
     clock = FakeClock(start=1000.0)
     registry = Registry()
-    device = registry.device(30)
+    device = registry.device("30")
     ticker = DeviceTicker(device, settings, lambda tick: None,
                           now_fn=clock.now, sleep_fn=clock.sleep)
 
@@ -175,7 +175,7 @@ async def test_resume_after_offline_resets_and_ticks_again(settings: Settings) -
     clock = FakeClock(start=1000.0)
     registry = Registry()
     ticks: list[TickInput] = []
-    device = registry.device(30)
+    device = registry.device("30")
     ticker = DeviceTicker(device, settings, ticks.append,
                           now_fn=clock.now, sleep_fn=clock.sleep)
 

@@ -8,11 +8,13 @@
 import { ChevronsLeft, ChevronsRight } from 'lucide-react'
 import { useState, type MouseEvent } from 'react'
 import type { Device } from '../lib/api'
-import { SENSOR_SUMMARY_TEXT } from '../lib/config'
+import { sensorSummaryText } from '../lib/rig'
 import { QualityMeter, SensorDots } from './bits'
 
 interface Props {
-  device: Pick<Device, 'online' | 'sensors'>
+  /** `kind`/`units` are what make the line rig-aware; both are optional, so a
+   *  device that carries neither reads as bilateral (the R1 literal). */
+  device: Pick<Device, 'online' | 'sensors' | 'kind' | 'units' | 'device_id'>
   quality: number | null
   /** detail page only: show the toggle that reveals the real readout */
   expandable?: boolean
@@ -53,7 +55,7 @@ export default function SensorSummary({ device, quality, expandable = false }: P
           <SensorDots sensors={device.sensors} detailed />
         </>
       ) : (
-        <span className="sensor-summary-text">{SENSOR_SUMMARY_TEXT}</span>
+        <span className="sensor-summary-text">{sensorSummaryText(device)}</span>
       )}
     </span>
   )

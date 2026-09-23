@@ -928,8 +928,14 @@ class InsightJob:
     async def run_once(self) -> int:
         """One evaluation sweep; returns number of insights inserted."""
         inserted = 0
+        # Same visible-fleet definition as /api/devices: a sleeve rig that is
+        # currently paired into another one has no live data of its own, so
+        # evaluating rules on its frozen history would only manufacture advice
+        # for a soldier the dashboard no longer shows.
         devices = await self._pool.fetch(
-            "SELECT device_id, display_name FROM devices ORDER BY device_id"
+            f"""SELECT device_id, display_name FROM devices
+                WHERE {queries.visible_rig_predicate()}
+                ORDER BY device_id"""
         )
         for dev in devices:
             device_id = dev["device_id"]

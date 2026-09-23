@@ -2,8 +2,9 @@
 
 | | |
 |---|---|
-| Status | Set in stone as the build order (revised 2026-08-02: staged, biomech-first, task-granular). |
-| Task detail | [tasks/STAGE1.md](tasks/STAGE1.md) · [tasks/STAGE2.md](tasks/STAGE2.md) · [tasks/STAGE3.md](tasks/STAGE3.md) |
+| Status | Set in stone as the build order (revised 2026-08-02: staged, biomech-first, task-granular). All three stages shipped; work since then is tracked per change-set, not as new stages. |
+| Task detail | [tasks/STAGE1.md](tasks/STAGE1.md) · [tasks/STAGE2.md](tasks/STAGE2.md) · [tasks/STAGE3.md](tasks/STAGE3.md) · [tasks/STAGE4.md](tasks/STAGE4.md) (demo frontend + military theme, 2026-09-12) |
+| **Current work** | **Sleeve storage** — plan of record [`PLAN_msd_management.md`](../PLAN_msd_management.md) (approved 2026-09-23). Change-set 1 — the `/storage` page with a firmware-exact `CONFIG.TXT` editor and a verified log transfer, migration 006, `GET /api/config/udp-target`, and a sleeve's side seeded from its own `source_id` at registration (decision H) — **shipped 2026-09-23**; change-set 2 (a CSV plus a plain-text summary per transferred log, in a Web Worker) is **planned, not built** (that plan's §5). Previous change-set, shipped 2026-09-23: **unilateral knee sleeves** — [`PLAN_unilateral_devices.md`](../PLAN_unilateral_devices.md) (six work packages: common, ingest, api, simulator, frontend, docs): a second wearable kind on the same UDP port, dashboard-driven pairing, side and per-sleeve IMU full scale. Both touch the stable interfaces and config keys below, so read TRD §3/§4/§7 and BACKEND_SCHEMA §1/§3/§4/§5 before changing anything near them. |
 | Related | [PLAN.md](PLAN.md) · [TRD.md](TRD.md) · [BACKEND_SCHEMA.md](BACKEND_SCHEMA.md) |
 
 ## The three stages (user-mandated order)
@@ -105,15 +106,31 @@ MVPDashboard/
   backend/
     Dockerfile  pyproject.toml
     common/     config.py  durations.py  packet.py  redis_keys.py  scaling.py
+                kinds.py  (2026-09-23: wearable kinds, unit ids, UnitConfig)
     ingest/     main.py  udp.py  state.py  align.py  jitter.py  ticker.py
-                biomech.py  publish.py
+                biomech.py  publish.py  unit_config.py
     api/        main.py  ws.py  writer.py  queries.py  auth.py  deps.py  debug.html
-                routes/(auth devices metrics forecasts insights health)
+                unit_mirror.py  (sleeve registration + the api → Redis mirror)
+                routes/(auth devices units metrics forecasts insights health config)
                 jobs/(predict.py insights.py)  seed_users.py
     migrations/ 001_init.sql  002_insight_actions.sql
-                003_insight_action_grouping.sql  migrate.py
+                003_insight_action_grouping.sql  004_insight_decisions.sql
+                005_sleeve_units.sql  006_sleeve_side_backfill.sql  migrate.py
+                (the runner applies them in filename order and records each in
+                 schema_migrations; BACKEND_SCHEMA §1 carries the merged schema
+                 and one paragraph per migration. 004 shipped 2026-08-07 with
+                 Adopt/Override, 005 on 2026-09-23 with knee sleeves — this list
+                 stopped at 003 until then — and 006, data-only, the same day
+                 with sleeve storage: it seeds legacy NULL sides from the wire)
     tests/
   frontend/     (stage 2: crude → stage 3: product UI)
+    src/lib/config.ts  metrics.ts  rig.ts  api.ts  ...   (UI constants, copy tables)
+    src/lib/demo/            (the always-on synthetic soldiers, 2026-09-12)
+    src/lib/storage/         (2026-09-23, sleeve storage: pure CONFIG.TXT model,
+                              CRC32 + block scanner, verified-transfer engine,
+                              page reducer and STORAGE_COPY; fsa.ts is the only
+                              module touching the File System Access API)
+    src/components/storage/  src/pages/Storage.tsx   (the /storage page)
 ```
 
 ## Set in stone vs later

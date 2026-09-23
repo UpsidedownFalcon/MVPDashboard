@@ -19,6 +19,7 @@ import redis.asyncio as aioredis
 
 from common import redis_keys
 from common.config import Settings
+from common.kinds import KIND_NAMES
 from ingest import biomech
 from ingest.biomech import Metrics
 from ingest.state import Registry
@@ -75,6 +76,15 @@ class Publisher:
         self._started = time.time()
         self.published = 0
         self.pub_dropped = 0
+        # Rigs torn down by a configuration change. Their stored session
+        # describes a rig that no longer exists, so it is deleted rather than
+        # left to expire — but through the SAME pipeline as the writes, so a
+        # snapshot queued microseconds earlier cannot land after the delete.
+        self._reset_rigs: set[str] = set()
+
+    def rig_reset(self, rig_id: str) -> None:
+        """Registry callback: forget everything stored about this rig."""
+        self._reset_rigs.add(rig_id)
 
     # --- tick path (called from the ticker callback, must never block) ----------
 
@@ -117,11 +127,31 @@ class Publisher:
             "global:pub_dropped": str(self.pub_dropped),
             "global:published": str(self.published),
         }
+        # Samples accepted per wearable kind. A fleet that is silently all one
+        # kind is the first thing to check when sleeves do not appear.
+        for kind, n in self._registry.recv_by_kind.items():
+            mapping[f"global:recv:{KIND_NAMES.get(kind, kind)}"] = str(n)
         for device_id, device in self._registry.devices.items():
             mapping[f"dev:{device_id}:ticks_out"] = str(device.ticks_out)
             mapping[f"dev:{device_id}:tick_rate"] = f"{device.tick_rate:.1f}"
+            mapping[f"dev:{device_id}:kind"] = KIND_NAMES.get(device.kind, "bilateral")
             if device.quality_ema is not None:
                 mapping[f"dev:{device_id}:quality"] = f"{device.quality_ema:.3f}"
+            # Sleeve units of this rig. The api needs them to register new
+            # sleeves (it never sees the wire) and to show which unit a sensor
+            # belongs to; a bilateral rig publishes none.
+            for unit in device.units:
+                mapping[f"unit:{unit}:rig"] = device_id
+                cfg = self._registry.unit_cfg.get(unit)
+                mapping[f"unit:{unit}:side"] = cfg.side or ""
+                mapping[f"unit:{unit}:accel_fs_g"] = str(cfg.accel_fs_g)
+                mapping[f"unit:{unit}:gyro_fs_dps"] = str(cfg.gyro_fs_dps)
+                seen = device.unit_last_seen.get(unit)
+                if seen:
+                    mapping[f"unit:{unit}:last_seen"] = str(int(seen * 1000))
+                soc = device.unit_soc.get(unit)
+                if soc is not None:
+                    mapping[f"unit:{unit}:soc"] = str(soc)
             # Battery: publish the LOWEST of the device's leg MCUs, so a dying
             # unit cannot hide behind a healthy one. Per-source values go out
             # too, for diagnosis.
@@ -132,6 +162,12 @@ class Publisher:
             for (src, sen), sensor in device.sensors.items():
                 p = f"sensor:{device_id}:{src}:{sen}"
                 st = sensor.stats
+                # The limb name comes from the RIG's map: only ingest knows how
+                # a sleeve's sensors were assigned, and the api's global
+                # LIMB_MAP would mislabel them.
+                limb = device.limb_map.get((src, sen))
+                if limb:
+                    mapping[f"{p}:limb"] = limb
                 mapping[f"{p}:rate_hz"] = f"{st.rate_hz:.1f}"
                 mapping[f"{p}:recv"] = str(st.recv)
                 mapping[f"{p}:late_drop"] = str(st.late_drop)
@@ -149,6 +185,14 @@ class Publisher:
         they re-warm in under a second and are not worth the bytes.
         """
         ttl = int(2 * self._session_gap_s)
+        # Ordered before the writes below so a rig reconfigured this second
+        # cannot have its old snapshot re-queued behind the delete.
+        while self._reset_rigs:
+            rig_id = self._reset_rigs.pop()
+            pipe.delete(redis_keys.biomech_state(rig_id),
+                        redis_keys.biomech_cal(rig_id),
+                        redis_keys.biomech_diag(rig_id),
+                        redis_keys.last_seen_dev(rig_id))
         for device_id, device in self._registry.devices.items():
             metrics = getattr(device, "last_metrics", None)
             if metrics is not None:

@@ -88,13 +88,14 @@ def test_format_duration_rejects_subsecond_and_nonpositive() -> None:
 def clean_env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
     """Strip every TRD §7 env var so tests see pure defaults."""
     for key in (
-        "DOMAIN", "UDP_PORT", "API_PORT", "POSTGRES_HOST", "POSTGRES_PORT",
+        "DOMAIN", "UDP_PORT", "UDP_PUBLIC_IP", "API_PORT", "POSTGRES_HOST", "POSTGRES_PORT",
         "POSTGRES_DB", "POSTGRES_USER", "POSTGRES_PASSWORD", "REDIS_URL",
         "JWT_SECRET", "JWT_EXPIRE_HOURS", "SEED_USERS", "EXPECTED_INPUT_HZ",
         "OUTPUT_HZ", "LIMB_MAP", "JITTER_BUFFER_MS", "OFFLINE_AFTER_S",
         "PAST_WINDOWS", "FUTURE_HORIZONS", "PREDICT_INTERVAL_S",
         "PREDICT_TRAIN_WINDOW", "INSIGHT_INTERVAL_S", "INSIGHT_COOLDOWN_S",
-        "METRICS_RETENTION",
+        "METRICS_RETENTION", "UNILATERAL_SENSOR_MAP", "UNILATERAL_ACCEL_FS_G",
+        "UNILATERAL_GYRO_FS_DPS",
     ):
         monkeypatch.delenv(key, raising=False)
     return monkeypatch
@@ -104,6 +105,7 @@ def test_defaults_load_without_env_file(clean_env: pytest.MonkeyPatch) -> None:
     s = Settings(_env_file=None)
     assert s.domain == "dash.example.com"
     assert s.udp_port == 5005
+    assert s.udp_public_ip == ""       # blank = resolve DOMAIN (decision G)
     assert s.api_port == 8000
     assert s.redis_url == "redis://redis:6379/0"
     assert s.expected_input_hz == 640
@@ -146,6 +148,52 @@ def test_defaults_load_without_env_file(clean_env: pytest.MonkeyPatch) -> None:
     assert s.insight_max_actions == 3
     assert s.jwt_expire_hours == 24
     assert s.seed_users == "trainer:changeme"
+    # Unilateral knee sleeve (2026-09-23): the firmware fixes sensor 1 = thigh,
+    # 2 = shin and defaults to +-32 g / +-4000 dps; the side is never on the wire.
+    assert s.unilateral_sensor_map == {1: "thigh", 2: "shin"}
+    assert s.unilateral_accel_fs_g == 32
+    assert s.unilateral_gyro_fs_dps == 4000
+
+
+def test_unilateral_settings_parse_from_env(clean_env: pytest.MonkeyPatch) -> None:
+    clean_env.setenv("UNILATERAL_SENSOR_MAP", '{"1": "femur", "2": "tibia"}')
+    clean_env.setenv("UNILATERAL_ACCEL_FS_G", "16")
+    clean_env.setenv("UNILATERAL_GYRO_FS_DPS", "2000")
+    s = Settings(_env_file=None)
+    assert s.unilateral_sensor_map == {1: "femur", 2: "tibia"}
+    assert s.unilateral_accel_fs_g == 16
+    assert s.unilateral_gyro_fs_dps == 2000
+
+
+@pytest.mark.parametrize(("key", "value", "match"), [
+    ("UNILATERAL_ACCEL_FS_G", "12", "one of"),
+    ("UNILATERAL_GYRO_FS_DPS", "3000", "one of"),
+    ("UNILATERAL_SENSOR_MAP", '{"1": "shin", "2": "shin"}', "distinct"),
+    ("UNILATERAL_SENSOR_MAP", '{"1": "left_thigh", "2": "shin"}', "no side"),
+    ("UNILATERAL_SENSOR_MAP", '{"3": "thigh"}', "1 or 2"),
+])
+def test_bad_unilateral_settings_fail_at_load(
+    clean_env: pytest.MonkeyPatch, key: str, value: str, match: str,
+) -> None:
+    clean_env.setenv(key, value)
+    with pytest.raises(ValueError, match=match):
+        Settings(_env_file=None)
+
+
+@pytest.mark.parametrize("value", ["203.0.113.7", "10.0.0.1", " 192.0.2.44 "])
+def test_udp_public_ip_accepts_ipv4(clean_env: pytest.MonkeyPatch, value: str) -> None:
+    clean_env.setenv("UDP_PUBLIC_IP", value)
+    assert Settings(_env_file=None).udp_public_ip == value.strip()
+
+
+@pytest.mark.parametrize("junk", ["garbage", "dash.example.com", "1.2.3", "256.1.1.1",
+                                  "2001:db8::1", "203.0.113.7:5005"])
+def test_udp_public_ip_rejects_non_ipv4(clean_env: pytest.MonkeyPatch, junk: str) -> None:
+    """A bad value would be handed to every sleeve as its stream target, and the
+    firmware does not validate udp_ip -- so it must fail at load (decision G)."""
+    clean_env.setenv("UDP_PUBLIC_IP", junk)
+    with pytest.raises(ValueError, match="IPv4"):
+        Settings(_env_file=None)
 
 
 def test_limb_map_parsed_from_json_env(clean_env: pytest.MonkeyPatch) -> None:
@@ -201,3 +249,8 @@ def test_redis_keys_match_schema() -> None:
     assert redis_keys.INGEST_STATS == "ingest:stats"
     assert redis_keys.last_seen_dev("30") == "last_seen:dev:30"
     assert redis_keys.last_seen_sensor("30", 0, 1) == "last_seen:sensor:30:0:1"
+    # sleeve unit ids flow through unchanged (no ':' inside them, by design)
+    assert redis_keys.last_seen_dev("u30-0") == "last_seen:dev:u30-0"
+    assert redis_keys.unit_cfg("u30-0") == "unit:cfg:u30-0"
+    assert redis_keys.UNIT_CFG_CHANNEL == "unit_cfg"
+    assert redis_keys.UNIT_CFG_PATTERN == "unit:cfg:*"

@@ -1230,6 +1230,11 @@ disappearing would resize the state and destroy every filter's history. The desi
 - Each device's session allocates a **permanent 4-slot matrix** (one per limb in `LIMB_MAP`),
   fixed for the life of the session. Slot order is the sorted limb names, so it is stable across
   restarts — which is also why the §7.4 snapshot keys calibration by limb name, never by index.
+  **Added 2026-09-23:** the slot count is the **rig's** limb count, not a constant 4 — a single
+  knee sleeve allocates two slots (thigh + shin on one leg), a paired pair four. Everything else
+  about the mechanism is unchanged, because it was never the number 4 that mattered, only that
+  the shape is fixed for the life of the session. A rig whose shape changes (pairing, unpairing,
+  a side change) is torn down and rebuilt by ingest instead, which ends the session outright.
 - Slots for absent limbs are **hold-last filled** — the slot's most recent real sample is
   repeated (§7.2.1). Limbs also arrive with *different* sample counts within the same tick, so
   short limbs are padded the same way and a per-limb `valid_n` keeps padded rows out of the
@@ -1294,6 +1299,42 @@ axis-based model would have no such property and would need a full re-warm-up he
 
 *(Note: `zi` for the one-pole `y[n] = α·x[n] + (1−α)·y[n−1]` in scipy's transposed direct-form II
 is `(1−α)·v`, not `v`. Getting this wrong injects the very transient it is meant to remove.)*
+
+#### 7.2.2 Per-limb full scale — **added 2026-09-23 (user decision)**
+
+The bilateral hardware is fixed at ±16 g / ±2000 dps, which is why §3.1's conversion factors
+are compile-time constants. A **unilateral knee sleeve is not**: its IMU full scale is set per
+unit (accel 2/4/8/16/32 g, gyro 125/250/500/1000/2000/4000 dps, firmware defaults 32 / 4000)
+and **the datagram carries no scale at all**, so the receiver must be told it. Ingest owns that
+knowledge per rig and passes it in:
+
+```
+compute(frames, state, times, *, expected_limbs=4, limb_scale=None)
+#   limb_scale: limb -> (lsb_per_g, lsb_per_dps)   None = the §3.1 constants
+```
+
+- The session keeps two `(1, n_limbs, 1)` vectors, `ACCEL_LSB_PER_G / lsb_per_g` and
+  `GYRO_LSB_PER_DPS / lsb_per_dps` (`common/scaling.py`), both `1.0` for a bilateral rig. They
+  fold into the **existing** per-limb multiply — alongside the §3.8 calibration gain `k` for
+  accel, and ahead of the gyro bias subtraction — so there is no extra pass over the block and
+  the batching of §7.1 is untouched. At ±32 g one count is worth twice the acceleration it is
+  at ±16 g, and that factor of 2 is exactly what lands here.
+- Scale is **configuration, never snapshot state**: it is re-applied from `limb_scale` on every
+  tick (a no-op when unchanged) and is deliberately absent from the §7.4 snapshot, so a restart
+  can never resurrect a stale full scale. Changing it in the dashboard ends the session anyway
+  (TRD §4).
+- **Saturation (§3.7) stays in raw counts** (`SAT_THRESHOLD_COUNTS = 0.99 × 32767`) and is
+  therefore correct at any full scale — the clipping point is always the same count, whatever
+  that count means in g. What changes with the sleeve's setting is *when* real movement reaches
+  it: at ±32 g the §3.7 shank-clipping risk is largely gone, which is exactly why the firmware
+  defaults there.
+- Getting it wrong is silent and total: every acceleration and rotation on that sleeve is off by
+  the ratio of the two scales, and §3.8's calibration guard is what catches it — a ±32 g sleeve
+  decoded with the ±16 g constants reads **half** of gravity while standing still, so `k` would
+  have to be 2.0, it fails the `k ∈ [0.95, 1.05]` check and the tick carries `cal_failed`
+  instead of quietly halving every impact. Pinned by
+  `test_a_full_scale_mismatch_is_what_calibration_would_catch`.
+- The batch `calibrate()` helper (§10 item 6, scripts only) stays on the bilateral constants.
 
 ### 7.3 What needs history, and what does not
 
@@ -1391,24 +1432,38 @@ accumulated load. Ticks held during a short gap do not accumulate dose.
 
 ---
 
-## 8. Degraded operation — fewer than 4 sensors
+## 8. Degraded operation — fewer sensors than the rig should have
 
 Unavailable primitives emit **`null`**; the composite renormalises `degradation` over available
 terms so a device with fewer sensors is not systematically scored as lower-risk.
 
-| Sensors present | `m1` | `m2` | `m3` | `m4` | `m5` | Composite |
-|---|---|---|---|---|---|---|
-| 4 (both legs, shank+thigh) | ✔ | ✔ | ✔ | ✔ | ✔ | full |
-| 2 — one leg (shank+thigh) | ✔ | ✔ | ✔ | ✔ | `null` | over `m4`,`m3` |
-| 2 — both shanks | ✔ | ✔ | ✔ | ✔² | ✔ | over `m4`,`m5`,`m3` |
-| 2 — both thighs | ✔¹ | ✔ | ✔ | ✔² | ✔ | over `m4`,`m5`,`m3` |
-| 1 — any | ✔¹ | ✔ | ✔ | ✔² | `null` | over `m4`,`m3` |
-| 0 / no data | held | held | held | held | held | held |
+**Revised 2026-09-23 (user decision) — "fewer than 4" became "fewer than THIS RIG should have".**
+`compute()` takes `expected_limbs` (§7.2.2), and `degraded_sensors` fires on
+`n_limbs < expected_limbs` instead of a hardcoded `< 4`. A bilateral unit still expects 4; a
+single knee sleeve expects **2** and a healthy one must not wear a permanent "sensors missing"
+alert, which is exactly what the old constant did to it. A second flag, **`one_leg`**, reports
+the *shape* the old ladder could not express: the rig instruments one leg only (a lone sleeve,
+or one whose side is not set yet, so both its limbs are side-less). `one_leg` is **structural,
+not a fault** — `m1`..`m4` are unaffected and only `m5` is impossible — so on a one-leg rig
+`m5`'s `null` is attributed to `one_leg` and `degraded_sensors` is **suppressed for that null**.
+The two flags are independent and can both be true: a 4-limb rig with one leg dark is genuinely
+missing sensors *and* down to one leg.
+
+| Limbs streaming (of `expected_limbs`) | `m1` | `m2` | `m3` | `m4` | `m5` | Composite | Flags |
+|---|---|---|---|---|---|---|---|
+| 4 of 4 — both legs, shank+thigh (a bilateral unit, or two paired sleeves) | ✔ | ✔ | ✔ | ✔ | ✔ | full | — |
+| **2 of 2 — one knee sleeve: thigh+shin on one leg** | ✔ | ✔ | ✔ | ✔ | `null` | over `m4`,`m3` | `one_leg` |
+| 2 of 4 — one leg (shank+thigh) of a 4-limb rig | ✔ | ✔ | ✔ | ✔ | `null` | over `m4`,`m3` | `one_leg` + `degraded_sensors` |
+| 2 of 4 — both shanks | ✔ | ✔ | ✔ | ✔² | ✔ | over `m4`,`m5`,`m3` | `degraded_sensors` |
+| 2 of 4 — both thighs | ✔¹ | ✔ | ✔ | ✔² | ✔ | over `m4`,`m5`,`m3` | `degraded_sensors` + `no_shank` |
+| 1 — any single limb | ✔¹ | ✔ | ✔ | ✔² | `null` | over `m4`,`m3` | `one_leg` + `degraded_sensors`³ |
+| 0 / no data | held | held | held | held | held | held | — |
 
 ¹ `m1` falls back to **all mapped limbs** (`impact_i` = every slot when no shank is mapped),
 flagged `no_shank` — thigh impact is not the validated shank
 surrogate. `quality` (TRD §4 step 8) already reflects missing sensors, so the UI can distinguish
-"low risk" from "less data".
+"low risk" from "less data". Note a knee sleeve always maps a shin, so a healthy sleeve rig
+never reads `no_shank`.
 
 ² **Corrected 2026-08-06.** These three rows previously read `null` for `m4`, which was true of
 the shank/thigh **transmission ratio**. Since the 2026-08-03 tremor rebuild (§5.4) `m4` needs
@@ -1416,6 +1471,9 @@ only **one streaming limb** — the tremor fraction is measured per limb and ave
 is live — so it is available on every row above, and the composite's `degradation` renormalises
 over `m4` too. `test_degradation_ladder` asserts exactly this (`both shanks` → m4 available,
 single sensor → m4 available).
+
+³ **Added 2026-09-23.** `degraded_sensors` because no shipped rig expects a single limb — both
+wearable kinds carry at least two. `no_shank` applies as per ¹ when that single limb is a thigh.
 
 ---
 
@@ -1449,7 +1507,10 @@ Any individual flag must show the component panel that drove it (§2).
 
 ## 10. Interface changes (TRD §4 / BACKEND_SCHEMA §5)
 
-`compute()`'s signature is **unchanged**. Extensions:
+`compute()`'s signature was **unchanged** by this spec. ⚠️ **Superseded 2026-09-23 (user
+decision):** it now takes two **keyword-only, defaulted** arguments —
+`expected_limbs` (§8) and `limb_scale` (§7.2.2) — so every positional caller written against
+the original signature still works, and the *positional* signature is unchanged. Extensions:
 
 1. **`m` entries nullable** (§8, warm-up, saturation): `"m":[42.2, 48.3, 24.2, 0.0, null]`. The
    DDL already permits it (`m1..m5` nullable `REAL`); `metrics_1m`'s `avg()` skips NULLs.
@@ -1472,7 +1533,8 @@ Any individual flag must show the component panel that drove it (§2).
      undebounced flag toggled hundreds of times per second in a live session) | a required sensor went inactive mid-session; `m4`/`m5` frozen or `null` |
    | `no_shank` | `m1` fell back to all mapped limbs (§5.1) |
    | `saturated` | >2.6% clipped samples; **`m1`/`m2` are LOWER BOUNDS**, render as ">= x" (§3.7). They are still reported -- suppression to `null` was removed 2026-08-03 |
-   | `degraded_sensors` | device streaming <4 sensors (§8), **or** a sensor a metric requires was mapped but has never produced data (flat battery, bad strap). Both are "this value is never coming"; `warming_up` promises the opposite, so the two must not be confused. Tested against `ema_seen`, never against `LIMB_MAP` alone |
+   | `degraded_sensors` | the rig is streaming **fewer limbs than it should** (§8 — `n_limbs < expected_limbs`; ⚠️ **superseded 2026-09-23:** this used to read "<4 sensors", a constant that libelled a healthy two-sensor knee sleeve), **or** a sensor a metric requires was mapped but has never produced data (flat battery, bad strap). Both are "this value is never coming"; `warming_up` promises the opposite, so the two must not be confused. Tested against `ema_seen`, never against `LIMB_MAP` alone |
+   | **`one_leg`** (added 2026-09-23) | **the rig instruments ONE leg only** — a single knee sleeve, or one whose side an operator has not set yet (its limbs are then the side-less `thigh`/`shin`, which belong to neither side). **Structural, not a fault:** `m1`..`m4` are computed normally and only `m5` is impossible, so it nulls `m5` and **suppresses `degraded_sensors` for that null** — calling a complete one-leg rig "sensors missing" would claim a fault that does not exist. It does **not** suppress the §8 limb-count check: a 4-limb rig with one leg dark carries both flags, and both are true. `warming_up` needs no such guard — it requires both sides to have streamed, which `one_leg` rules out |
    | `uncalibrated` | at least one sensor running on default `k`/`bias`/`σ` — no history and no still window yet (§3.8) |
    | **`carried_over`** | **at least one sensor running last-known-good values from a PREVIOUS session (`biomech:cal:{dev}`), applied but not measured on this athlete today (§3.8)** |
    | `cal_failed` | a calibration attempt hit a validity guard and was rejected; last-known-good stands and detection continues |
@@ -1644,9 +1706,14 @@ presented to a trainer as a finding — only as a trend with the `unvalidated` f
 9. **Degradation ladder** — every row of §8 gives the right `null` pattern, and the composite
    does not fall merely because sensors are missing.
    *(As shipped: `test_degradation_ladder` asserts the `m4`/`m5` availability pattern, that
-   `m1`/`m2`/`m3` are non-`null`, that `degraded_sensors` is flagged below 4 limbs, and that
+   `m1`/`m2`/`m3` are non-`null`, that `degraded_sensors` is flagged below 4 limbs (it calls
+   `compute()` with the default `expected_limbs=4`), and that
    **`composite > 0`** — it does **not** compare the degraded composite against the 4-sensor
-   value, so "does not fall merely because sensors are missing" is argued, not pinned.)*
+   value, so "does not fall merely because sensors are missing" is argued, not pinned.
+   **Added 2026-09-23:** `backend/tests/test_unit_config.py` covers the rest of the revised
+   ladder — the same one-leg limb set raises `one_leg` **without** `degraded_sensors` at
+   `expected_limbs=2` and **both** at 4, the same motion reads the same through `limb_scale` at
+   either full scale, and an unscaled ±32 g stream is caught by calibration as `cal_failed`.)*
 10. **Held ticks** — empty `frames` repeats previous `Metrics`, accumulates no dose.
 11. **Session reset** — a >300 s gap zeroes `dose`/`R_base`; a 3 s gap does not.
     *(As shipped: `test_session_reset_clears_dose_but_keeps_calibration` exercises the reset by

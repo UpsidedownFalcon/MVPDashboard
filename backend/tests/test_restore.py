@@ -94,14 +94,14 @@ async def test_snapshot_restores_on_reconnect_not_just_at_startup() -> None:
 
     _route(registry, 30, t=1000.0)
     await _settle()
-    first = registry.devices[30].user_state["_biomech"]
+    first = registry.devices["30"].user_state["_biomech"]
     assert first.dose == pytest.approx(snap["dose"], rel=1e-3)
     assert restorer.restored == 1
 
     # 30 goes quiet; 31 takes the only slot and displaces it
     _route(registry, 31, t=1010.0)
     await _settle()
-    assert 30 not in registry.devices
+    assert "30" not in registry.devices
 
     # 30 comes back — inside SESSION_GAP_S, snapshot still in Redis
     snap["last_tick_t"] = time.time()
@@ -113,7 +113,7 @@ async def test_snapshot_restores_on_reconnect_not_just_at_startup() -> None:
         "a reconnecting device never restored — snapshots are being loaded "
         "once at startup instead of per device appearance"
     )
-    second = registry.devices[30].user_state["_biomech"]
+    second = registry.devices["30"].user_state["_biomech"]
     assert second is not first, "expected a fresh DeviceState after displacement"
     assert second.dose == pytest.approx(snap["dose"], rel=1e-3)
 
@@ -132,8 +132,8 @@ async def test_snapshot_older_than_the_session_gap_is_discarded() -> None:
     _route(registry, 30, t=1000.0)
     await _settle()
     assert restorer.restored == 0
-    assert registry.devices[30].user_state.get("_biomech") is None or \
-        registry.devices[30].user_state["_biomech"].dose == 0.0
+    assert registry.devices["30"].user_state.get("_biomech") is None or \
+        registry.devices["30"].user_state["_biomech"].dose == 0.0
 
 
 async def test_missing_snapshot_and_redis_failure_are_survivable() -> None:
@@ -156,4 +156,4 @@ async def test_missing_snapshot_and_redis_failure_are_survivable() -> None:
     _route(registry2, 31, t=1000.0)
     await _settle()
     assert restorer2.restored == 0
-    assert 31 in registry2.devices, "a Redis failure must not lose the device"
+    assert "31" in registry2.devices, "a Redis failure must not lose the device"

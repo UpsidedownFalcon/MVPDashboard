@@ -22,6 +22,28 @@ export interface Sensor {
   limb: string
   rate_hz: number
   last_seen: string | null
+  /** Which sleeve this sensor sits on; absent or null on a bilateral rig. */
+  unit_id?: string | null
+}
+
+/** One knee sleeve: a single MCU with two sensors on ONE leg. `rig_id`,
+ *  `rig_display_name` and `paired` come from GET /api/units (the pair picker);
+ *  the `units` array inside a device row carries the rest. Sleeve packets do
+ *  not carry their full scale, so accel_fs_g / gyro_fs_dps are configuration
+ *  the dashboard owns, not a measurement. */
+export interface Unit {
+  unit_id: string
+  /** null until an operator sets it - never guessed (decision G). */
+  side: 'left' | 'right' | null
+  accel_fs_g: number
+  gyro_fs_dps: number
+  online: boolean
+  last_seen: string | null
+  soc: number | null
+  /** GET /api/units only */
+  rig_id?: string
+  rig_display_name?: string
+  paired?: boolean
 }
 
 export interface Device {
@@ -35,6 +57,13 @@ export interface Device {
    *  datagram has been seen. */
   soc: number | null
   sensors: Sensor[]
+  /** OPTIONAL, additive 2026-09-23: absent means bilateral. lib/rig.ts is the
+   *  only place that interprets it, and it treats undefined as bilateral so
+   *  the demo layer (bilateral by decision L) needs no change. */
+  kind?: 'bilateral' | 'unilateral'
+  /** The sleeves making up this rig: one when unpaired, two when paired.
+   *  Absent or empty on a bilateral rig. */
+  units?: Unit[]
 }
 
 export interface WindowEntry {
@@ -299,6 +328,60 @@ export const renameDevice = (dev: string, display_name: string) => {
     body: JSON.stringify({ display_name }),
   })
 }
+
+// Sleeve units (PLAN_unilateral_devices §6). Same demo guard as renameDevice:
+// a demo soldier is bilateral (decision L) and carries no units, so these
+// resolve locally and the network never learns it exists.
+const demoUnitError = (id: string) =>
+  new ApiError(404, `${id} is a demo soldier - bilateral, with no sleeve units`)
+
+/** GET /api/units - every known sleeve, for the pair picker. `rig` is only the
+ *  demo guard for the rig asking (the route itself takes no parameters). */
+export const fetchUnits = (rig?: string): Promise<Unit[]> =>
+  rig !== undefined && isDemoId(rig)
+    ? Promise.resolve([])
+    : request<Unit[]>('/api/units')
+
+/** PATCH /api/units/{id} - side and full-scale. 409 when the side is already
+ *  taken in the rig, 422 when a full-scale value is outside the allowed set. */
+export const patchUnit = (
+  unitId: string,
+  body: { side?: 'left' | 'right' | null; accel_fs_g?: number; gyro_fs_dps?: number },
+) =>
+  isDemoId(unitId)
+    ? Promise.reject(demoUnitError(unitId))
+    : request<Unit>(`/api/units/${unitId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+
+/** POST /api/units/{host}/pair - the host keeps its id and history, the joiner
+ *  becomes a member and its own row disappears until unpaired (decision H). */
+export const pairUnit = (
+  hostUnitId: string,
+  body: { unit_id: string; side: 'left' | 'right'; host_side?: 'left' | 'right' },
+) =>
+  isDemoId(hostUnitId)
+    ? Promise.reject(demoUnitError(hostUnitId))
+    : post<Device>(`/api/units/${hostUnitId}/pair`, body)
+
+/** POST /api/units/{id}/unpair - releases the member, which returns with its
+ *  own history. Sides are kept. */
+export const unpairUnit = (unitId: string) =>
+  isDemoId(unitId)
+    ? Promise.reject(demoUnitError(unitId))
+    : post<{ units: Unit[] }>(`/api/units/${unitId}/unpair`)
+
+/** GET /api/config/udp-target (PLAN_msd_management decision G): where the
+ *  knee sleeves should stream to. `ip` is null when the api could not resolve
+ *  DOMAIN and no UDP_PUBLIC_IP override is set; `source` says which it used. */
+export interface UdpTarget {
+  ip: string | null
+  port: number
+  source: 'env' | 'dns' | 'unresolved'
+}
+export const fetchUdpTarget = () => request<UdpTarget>('/api/config/udp-target')
 
 export const login = (username: string, password: string) =>
   post<Me>('/api/auth/login', { username, password })

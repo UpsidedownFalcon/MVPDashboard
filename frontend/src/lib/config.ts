@@ -40,6 +40,47 @@ export const WS_CLOSE_UNAUTHORIZED = 4401
 export const HISTORY_MAX_BUCKETS = 30
 
 /** Static sensor line shown in place of the quality meter + per-sensor rates
- *  (STAGE4 R1, user decision 2026-09-12). Deliberately a LITERAL: it is not
- *  computed from the device and does not change with sensor count or rate. */
+ *  (STAGE4 R1, user decision 2026-09-12). Deliberately a LITERAL for BILATERAL
+ *  rigs (and the demo soldiers): it is not computed from the device and does
+ *  not change with sensor count or rate. Sleeve rigs re-open R1 by the user
+ *  decision of 2026-09-23 - their line is computed in lib/rig.ts. */
 export const SENSOR_SUMMARY_TEXT = '4 sensors | 6400Hz logging'
+
+/** Aggregate on-device logging rate, the tail of every sensor summary line.
+ *  lib/rig.ts composes the sleeve variants from it. */
+export const LOGGING_RATE_TEXT = '6400Hz logging'
+
+/** Full-scale ranges a knee sleeve accepts (firmware imu_fs_valid(); mirrored
+ *  in backend/common/kinds.py). The dashboard offers exactly these and nothing
+ *  else - an out-of-set value is rejected by the API with 422. */
+export const ACCEL_FS_ALLOWED_G = [2, 4, 8, 16, 32] as const
+export const GYRO_FS_ALLOWED_DPS = [125, 250, 500, 1000, 2000, 4000] as const
+
+/** Sleeve storage (PLAN_msd_management 4.1/4.3). Read budget per card
+ *  chunk: the first chunk carries the 512 B header plus whole 4096 B blocks,
+ *  later ones whole blocks only (lib/storage/io.ts chunkPlan). 4 MiB is about
+ *  four seconds of the ~1 MB/s full-speed USB link per progress event. */
+export const STORAGE_READ_CHUNK_BYTES = 4 * 1024 * 1024
+
+/** Weight of the newest rate sample in the transfer speed EWMA (0..1). */
+export const STORAGE_RATE_EWMA_ALPHA = 0.2
+
+/** Card read rate assumed until the first chunk lands (initial ETA): the
+ *  ESP32-S3 USB link is full-speed, about 1 MB/s. */
+export const STORAGE_EXPECTED_BYTES_PER_S = 1_000_000
+
+/** GET /api/config/udp-target is re-fetched when older than this while the
+ *  Sleeve storage page is open (the answer only changes with a redeploy). */
+export const STORAGE_UDP_TARGET_STALE_MS = 60_000
+
+/** A diagnostics log's `# cfg:` line (the dev/src identity used for a TXT
+ *  whose BIN is gone) sits in its first few lines; this is how much of the
+ *  TXT the transfer reads to find it. */
+export const STORAGE_TXT_CFG_PROBE_BYTES = 4096
+
+/** Defence in depth before the irreversible delete: blocks the scan called
+ *  bad are re-read from the card and must equal the local copy byte for byte
+ *  (lib/storage/transfer.ts confirmBadBlocks). The scanner keeps at most this
+ *  many bad-block indices per file, so the extra card traffic is bounded to
+ *  this many 4096 B reads (a genuinely corrupt file rarely has more). */
+export const STORAGE_BAD_BLOCK_CONFIRM_MAX = 32
