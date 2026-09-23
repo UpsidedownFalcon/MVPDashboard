@@ -366,13 +366,13 @@ is right and this section records it; the rest of the plan matched.
 7. **Unit registration** lives in `api/unit_mirror.py`'s periodic task, not in
    `writer.py`: the Writer has no Redis handle and returns early on an empty
    tick buffer, so a hidden member would never have been registered.
-8. **Side default changed after shipping** (2026-09-23, `PLAN_msd_management.md`
+8. **Side default changed after shipping** (2026-09-23, `agent-docs/02_PLAN_msd_management.md`
    decision H, amendment to decision G above): registration now seeds `side`
    from the wire `source_id` instead of `NULL`, `UnitConfig.default()` matches,
    and migration 006 backfills legacy unpaired rows. The sleeve's `CONFIG.TXT`
    (including `source_id`) is now edited from the dashboard's Sleeve storage
    page (`/storage`) rather than by hand over USB; that page's plan of record
-   is `PLAN_msd_management.md`.
+   is `agent-docs/02_PLAN_msd_management.md`.
 
 ### Verification actually run
 
