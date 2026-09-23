@@ -117,7 +117,9 @@ netsh advfirewall firewall add rule name="MVPDash UDP 5005" dir=in action=allow 
 ```
 
 Find your LAN IP with `ipconfig` (Wi-Fi/Ethernet IPv4 address). Devices
-auto-register on their first packet and appear on `/debug` within seconds.
+auto-register on their first packet and appear on `/debug` within seconds. For
+a knee sleeve, the step-by-step loop is "Local end-to-end test with one sleeve"
+below.
 
 ### Unilateral knee sleeves
 
@@ -277,6 +279,89 @@ with a real sleeve:
    gone from the card and present under `sleeve-u<dev>-<src>/raw/`;
 4. unplug mid-copy: the card is intact, nothing was deleted, and no partial
    copy remains in the destination.
+
+### Local end-to-end test with one sleeve
+
+The full loop on a dev laptop: configure a sleeve from the dashboard, watch it
+stream over the office Wi-Fi, then pull its logs. Written from the 2026-09-23
+walk-through. Replace `<laptop-ip>` with the laptop's Wi-Fi IPv4 from `ipconfig`
+(DHCP can change it between days) and `<your-wifi>` with the network the laptop
+is on; the sleeve joins the same network.
+
+1. **Tell the dashboard its own address.** In `.env`, under `UDP_PORT`, add
+   `UDP_PUBLIC_IP=<laptop-ip>`. The page's `Point at this dashboard` button
+   fills that address in; without it the api resolves `DOMAIN`, which is not
+   your laptop.
+2. **Allow inbound UDP 5005** once, with the firewall rule from
+   "Real wearables on the LAN" above.
+3. **Start the stack, but keep UDP out of Docker's proxy** (see Gotchas: it has
+   wedged port 5005 on this machine before). Ignore Caddy's certificate errors
+   for `DOMAIN` in the logs; the plain `http://:80` site still serves.
+
+   ```powershell
+   cd MVPDashboard
+   docker compose up -d --build          # first build takes a few minutes
+   docker compose stop ingest
+   ```
+
+   In a second window, run ingest natively and leave it open (it reads the
+   same `.env`, binds UDP 5005 on the laptop, and uses the Redis the `debug`
+   profile exposes):
+
+   ```powershell
+   cd MVPDashboard\backend
+   $env:REDIS_URL = 'redis://127.0.0.1:6379/0'
+   uv run python -m ingest.main
+   ```
+
+4. **Open Chrome at `http://localhost`** and sign in with an account from
+   `SEED_USERS`. Localhost is a secure context, so the drive picker works.
+5. **Plug the sleeve in.** Within a couple of seconds the LED pulses blue and a
+   `HIPPOSDATA` drive appears in Explorer.
+6. **Configure it from the page.** Sidebar: Command, `Sleeve storage`, then
+   `Open sleeve drive`; in the picker choose the HIPPOSDATA drive itself (its
+   root, e.g. `E:\`), not a folder inside it; accept "Allow on every visit" if
+   offered. Fill in WiFi network `<your-wifi>` and its password, Sleeve number
+   `1`, Leg `Left`, both checkboxes on. The UDP row reads
+   `Streams to 192.168.1.100:5050 (not this dashboard)` on a factory card; click
+   `Point at this dashboard` and it becomes `<laptop-ip>:5005 (this dashboard)`.
+   `Save to sleeve`: a `CONFIG.TXT.crswap` shows briefly on the drive, then the
+   green "Saved" panel. Notepad shows only those values changed.
+7. **Eject, unplug, power-cycle.** Eject in Windows, pull the cable, then switch
+   the sleeve off and on (or RESET): WiFi credentials are read at boot only;
+   every other key would already apply after the unplug.
+8. **Watch the LED**: green pulse is logging without WiFi, blue-green pulse is
+   logging and streaming. Expect blue-green within about ten seconds of boot.
+9. **See it live.** `Unit overview` shows soldier `u1-0` online within a few
+   seconds; its page reads `2 sensors | one leg` with the leg already `Left`.
+   The ingest window shows packets; `docker compose logs api` shows
+   `registered sleeve unit(s): u1-0`.
+
+   If nothing appears after 30 s, check in this order: the laptop is still on
+   `<your-wifi>` with the same IPv4; the network allows client-to-client traffic
+   (guest or isolated networks block it); the firewall rule exists; then prove
+   the ingest path with a synthetic sleeve from a third window:
+
+   ```powershell
+   uv run python simulator/simulate.py --sleeves 1 --target 127.0.0.1:5005 --duration 30
+   ```
+
+   A simulated sleeve that shows up while the real one does not means the
+   problem is on the network side.
+10. **Transfer the logs.** After a few minutes, plug the sleeve back in: logging
+    stops, the drive returns, the page reconnects and lists that session's
+    `LOG_NNNN.BIN` and `.TXT`. `Choose destination folder` (e.g.
+    `C:\Users\<you>\HipposLogs`). First run: tick `Keep copies on the sleeve`,
+    `Transfer selected`, watch Copying, Verifying, then `Copied (kept on sleeve)`
+    at about 1 MB/s; the files land in `HipposLogs\sleeve-u1-0\raw\` with the
+    sizes shown on the drive. Second run with the box unticked: identical files
+    read `Already transferred` and are removed from the sleeve; re-plugging
+    shows an empty log table.
+11. **Two safety checks worth doing once**: pull the cable mid-copy and confirm
+    the card still has the file and the destination has no partial copy; and
+    change a setting again to confirm the next `LOG_NNNN.TXT` header line
+    (`# cfg:`) carries it.
+12. **Stop**: Ctrl+C in the ingest window, then `docker compose stop`.
 
 ### Gotchas
 
