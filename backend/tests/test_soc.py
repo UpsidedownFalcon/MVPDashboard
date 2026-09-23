@@ -26,7 +26,7 @@ def test_soc_is_tracked_per_source_mcu() -> None:
     reg = Registry()
     reg.route(_batch(30, 0, 1, soc=88), recv_time=1000.0)
     reg.route(_batch(30, 1, 1, soc=42), recv_time=1000.0)
-    device = reg.devices[30]
+    device = reg.devices["30"]
     assert device.soc == {0: 88, 1: 42}
 
 
@@ -38,7 +38,7 @@ def test_soc_takes_the_newest_datagram_in_a_batch() -> None:
         for i, s in enumerate((90, 80, 70))
     ]
     reg.route(packet.decode(payloads), recv_time=1000.0)
-    assert reg.devices[30].soc[0] == 70
+    assert reg.devices["30"].soc[0] == 70
 
 
 def test_published_soc_is_the_lowest_mcu() -> None:
@@ -46,7 +46,7 @@ def test_published_soc_is_the_lowest_mcu() -> None:
     reg = Registry()
     reg.route(_batch(30, 0, 1, soc=95), recv_time=1000.0)
     reg.route(_batch(30, 1, 2, soc=17), recv_time=1000.0)
-    device = reg.devices[30]
+    device = reg.devices["30"]
     assert min(device.soc.values()) == 17
 
 
@@ -61,15 +61,15 @@ def test_sd_log_records_carry_no_soc() -> None:
     reg.route(batch, recv_time=1000.0)
     # routed from a log batch the value is the synthesised 0 -- documented, and
     # why the UI must treat "no datagram seen yet" as unknown rather than empty
-    assert reg.devices[30].soc == {0: 0}
+    assert reg.devices["30"].soc == {0: 0}
 
 
 def test_soc_survives_a_device_with_no_datagrams_yet() -> None:
     reg = Registry()
     reg.route(_batch(31, 0, 1, soc=64), recv_time=1000.0)
-    assert reg.devices[31].soc == {0: 64}
+    assert reg.devices["31"].soc == {0: 64}
     # a device that has never routed anything has no entry at all
-    assert 99 not in reg.devices
+    assert "99" not in reg.devices
 
 
 def test_decoded_soc_is_a_plain_uint8() -> None:

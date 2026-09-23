@@ -34,3 +34,19 @@ def biomech_cal(device_id: int | str) -> str:
     name, never on slot index.
     """
     return f"biomech:cal:{device_id}"
+
+
+# --- unilateral sleeve configuration (api -> ingest) ---------------------------
+# The FIRST keys the api writes and ingest reads. Ingest has no DB access, so
+# the dashboard-owned settings of each sleeve (pairing, side, full-scale;
+# table sleeve_units) are mirrored here as one JSON document per unit with NO
+# TTL, re-mirrored by the api on start and every minute so a Redis restart
+# self-heals. Ingest loads them all at start and follows UNIT_CFG_CHANNEL.
+
+UNIT_CFG_CHANNEL = "unit_cfg"   # payload: the unit id whose key changed
+UNIT_CFG_PATTERN = "unit:cfg:*"
+
+
+def unit_cfg(unit_id: str) -> str:
+    """common.kinds.UnitConfig JSON for one sleeve unit ("u30-0")."""
+    return f"unit:cfg:{unit_id}"

@@ -14,17 +14,30 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from common.durations import parse_duration, parse_duration_list
+from common.kinds import ACCEL_FS_ALLOWED, GYRO_FS_ALLOWED
 
 # Repo root when running from a checkout (backend/common/config.py -> repo root).
 # In containers the file is absent and config comes from process env vars.
 _ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 
-_DEFAULT_LIMB_MAP = {
+DEFAULT_LIMB_MAP = {
     (0, 1): "left_shin",
     (0, 2): "left_thigh",
     (1, 1): "right_thigh",
     (1, 2): "right_shin",
 }
+
+# Unilateral knee sleeve: sensor_id -> segment. The firmware fixes 1 = thigh
+# (top) and 2 = shin (bottom) on every source (app_config.h SENSOR_ID_IMU0/1);
+# the side comes from the dashboard, never from the wire (common/kinds.py).
+DEFAULT_UNILATERAL_SENSOR_MAP = {1: "thigh", 2: "shin"}
+# Firmware defaults, assumed for a sleeve nobody has configured yet.
+DEFAULT_UNILATERAL_ACCEL_FS_G = 32
+DEFAULT_UNILATERAL_GYRO_FS_DPS = 4000
+
+# Back-compat aliases: these were private until the sleeve work needed them.
+_DEFAULT_LIMB_MAP = DEFAULT_LIMB_MAP
+_DEFAULT_UNILATERAL_SENSOR_MAP = DEFAULT_UNILATERAL_SENSOR_MAP
 
 
 class Settings(BaseSettings):
@@ -53,7 +66,7 @@ class Settings(BaseSettings):
     expected_input_hz: float = 640.0   # measured device rate (TRD §3); was an
                                        # unmeasured 600 estimate until 2026-08-02
     output_hz: int = 60
-    limb_map: dict[tuple[int, int], str] = Field(default_factory=lambda: dict(_DEFAULT_LIMB_MAP))
+    limb_map: dict[tuple[int, int], str] = Field(default_factory=lambda: dict(DEFAULT_LIMB_MAP))
     jitter_buffer_ms: int = 50
     offline_after_s: float = 2.0
     reset_offset_jump_s: float = 5.0
@@ -63,6 +76,15 @@ class Settings(BaseSettings):
     session_gap_s: float = 300.0
     # Hard cap on concurrently tracked devices; extras are dropped and counted.
     max_devices: int = 5
+    # --- unilateral knee sleeve (0xA6 datagrams, PLAN_unilateral_devices.md) --
+    unilateral_sensor_map: dict[int, str] = Field(
+        default_factory=lambda: dict(DEFAULT_UNILATERAL_SENSOR_MAP))
+    # IMU full-scale assumed for every NEWLY SEEN sleeve, matching the firmware
+    # defaults; the datagram carries no scale. Per-sleeve values are then set in
+    # the dashboard and persisted (sleeve_units). Bilateral hardware stays at
+    # the compile-time constants in common/scaling.py (user decision F).
+    unilateral_accel_fs_g: int = DEFAULT_UNILATERAL_ACCEL_FS_G
+    unilateral_gyro_fs_dps: int = DEFAULT_UNILATERAL_GYRO_FS_DPS
 
     past_windows_raw: str = Field("5m,30m,2h", validation_alias="PAST_WINDOWS")
     future_horizons_raw: str = Field("10m,30m,1h", validation_alias="FUTURE_HORIZONS")
@@ -166,6 +188,45 @@ class Settings(BaseSettings):
                     f"(source={key[0]}, sensor={key[1]})"
                 )
             seen[limb] = key
+        return value
+
+    @field_validator("unilateral_sensor_map", mode="before")
+    @classmethod
+    def _parse_unilateral_sensor_map(cls, value: object) -> object:
+        if isinstance(value, str):
+            value = json.loads(value)
+        if isinstance(value, dict):
+            return {int(k): str(v) for k, v in value.items()}
+        return value
+
+    @field_validator("unilateral_sensor_map", mode="after")
+    @classmethod
+    def _unilateral_segments_must_be_distinct(cls, value: dict[int, str]) -> dict[int, str]:
+        """Same hazard as LIMB_MAP: two sensors on one segment name would make a
+        sleeve's frames overwrite each other and rebuild biomech every tick."""
+        if not value:
+            raise ValueError("UNILATERAL_SENSOR_MAP must map at least one sensor")
+        if any(sen not in (1, 2) for sen in value):
+            raise ValueError("UNILATERAL_SENSOR_MAP keys must be sensor ids 1 or 2")
+        if len(set(value.values())) != len(value):
+            raise ValueError("UNILATERAL_SENSOR_MAP segment names must be distinct")
+        if any("left" in seg or "right" in seg for seg in value.values()):
+            raise ValueError(
+                "UNILATERAL_SENSOR_MAP segments carry no side; the side is set in the dashboard")
+        return value
+
+    @field_validator("unilateral_accel_fs_g", mode="after")
+    @classmethod
+    def _accel_fs_allowed(cls, value: int) -> int:
+        if value not in ACCEL_FS_ALLOWED:
+            raise ValueError(f"UNILATERAL_ACCEL_FS_G must be one of {ACCEL_FS_ALLOWED}")
+        return value
+
+    @field_validator("unilateral_gyro_fs_dps", mode="after")
+    @classmethod
+    def _gyro_fs_allowed(cls, value: int) -> int:
+        if value not in GYRO_FS_ALLOWED:
+            raise ValueError(f"UNILATERAL_GYRO_FS_DPS must be one of {GYRO_FS_ALLOWED}")
         return value
 
     @property

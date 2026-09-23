@@ -32,6 +32,9 @@ FS = 600.0
 FLAG_VOCABULARY = {
     "warming_up", "partial", "no_shank", "saturated", "degraded_sensors",
     "uncalibrated", "cal_failed", "carried_over", "unvalidated",
+    # 2026-09-23: a rig that instruments one leg only (a knee sleeve, or one
+    # whose side is not set yet). Structural, never a fault.
+    "one_leg",
 }
 
 
@@ -68,7 +71,7 @@ def _real_payloads() -> dict[str, bytes]:
             frames, times = make_tick(a, w, limbs=LIMBS, t0=k * NS / FS)
             metrics = biomech.compute(frames, state, times)
         tick = TickInput(
-            device_id=int(dev),
+            device_id=str(dev),
             t_server=time.time(),
             frames={},
             times={},

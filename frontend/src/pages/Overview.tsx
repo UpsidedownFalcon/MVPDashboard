@@ -82,13 +82,13 @@ function Hero({
         {/* Commander-readiness copy (STAGE4 Appendix B, 2026-09-12). "Built for
             units like" is deliberate: it names the intended user without
             asserting adoption. */}
-        <div className="eyebrow">Lower-limb telemetry | 4 sensors | live</div>
+        <div className="eyebrow">Lower-limb telemetry | thigh and shin sensors | live</div>
         <h1>
           Every stride under load -<br />
           <span className="hero-accent">turned into readiness a commander can act on.</span>
         </h1>
         <p>
-          Four sensors on each soldier's thighs and shins stream motion hundreds of
+          Sensors on each soldier's thighs and shins stream motion hundreds of
           times a second, under load, on the march and in training. We distill it
           into six scores: how hard each footfall lands, how abruptly load is
           applied, how much has accumulated, how steady the movement stays and how

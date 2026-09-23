@@ -67,6 +67,46 @@ wearable silent > OFFLINE_AFTER_S ─▶ status event ─▶ the card badge flip
 wearable returns ─▶ online again (same identity, same name)
 ```
 
+### 1.4 Knee sleeves: set the leg, set the full scale, pair (2026-09-23)
+
+A knee sleeve is one MCU on one leg (TRD §3). It registers like any wearable, but three things
+about it cannot be learned from the wire, so an operator sets them in the dashboard. Every one
+of them **hard-resets that soldier's biomech session** — dose, baselines, calibration.
+
+```
+sleeve powers on ─▶ first 0xA6 packet ─▶ ingest routes it to its own rig "u31-0"
+  ─▶ ingest publishes unit:{u31-0}:rig into ingest:stats
+  ─▶ api (unit mirror, every 2 s) INSERTs the unpaired, side-less row into sleeve_units
+     and mirrors it to Redis  ─▶ the soldier appears, summary "2 sensors | side not set"
+
+/device/u31-0 ─▶ sleeve controls in the header (sleeve rigs only)
+   ├─ pick a leg ───────▶ PATCH /api/units/u31-0 {side}
+   ├─ open Full scale ──▶ PATCH /api/units/u31-0 {accel_fs_g | gyro_fs_dps}
+   ├─ "Pair with..." ───▶ GET /api/units (unpaired sleeves) ─▶ pick one + a leg each
+   │                   ─▶ POST /api/units/u31-0/pair {unit_id, side, host_side?}
+   └─ "Unpair" ────────▶ POST /api/units/u31-0/unpair
+
+any of the four ─▶ ONE db transaction ─▶ SET unit:cfg:{id} + PUBLISH unit_cfg
+  ─▶ ingest tears down the affected rig(s) and rebuilds them on the next packet,
+     skipping the Redis session snapshot (the old dose/baselines are not comparable)
+  ─▶ client invalidates devices, units and both rigs' windows/history/forecasts/
+     insights/advice-timeline
+```
+
+**Pairing hides exactly one row.** The sleeve you pair FROM is the host: it keeps its id,
+name and history, and the joiner becomes a member on the other leg. From that moment the whole
+pipeline is keyed by the host rig, so **the joiner's own card disappears from the overview,
+the sidebar, the squad insight feed and the forecast job** for as long as the pairing lasts —
+otherwise it would sit there forever offline with no sensors and a frozen composite. Nothing is
+deleted: its `devices` row and its whole history stay untouched, `PATCH /api/devices/{id}` still
+answers for it (so a rename mid-pairing works, rather than 404-ing), and **unpair brings the
+card back with its old history**. Unpair keeps both sides, so each released sleeve is a one-leg soldier on the leg it
+was worn on.
+
+A rig with one leg instrumented carries the `one_leg` flag: `m1`..`m4` run normally and only
+`m5` (L/R balance) reads blank with "one leg" as its reason. It is never reported as missing
+sensors.
+
 ## 2. Data flows
 
 ### 2.1 Hot path: packet → pixel (target ≪ 250ms end-to-end)
@@ -141,7 +181,7 @@ api:    watches last_seen keys → WS event {type:"status", dev, online, last_se
 | DB slow/down | api write buffer caps (~60s) then drops oldest + counts; window/forecast queries error visibly | live WS stream, ingest |
 | api down | no dashboard; ticks published meanwhile are lost (gap visible later) | ingest keeps processing |
 | ingest down | devices' data lost while down; dashboard shows all offline | history browsing, api |
-| Redis down | live+status stop until back (compose restarts it) | DB contents |
+| Redis down | live+status stop until back (compose restarts it). Sleeve configs (`unit:cfg:*`) are lost with the keyspace but the DB still has them: the api re-mirrors every row at start and every 60 s, so pairings, sides and full scales self-heal within a minute. Until they do, each sleeve runs on defaults (its own rig, no side, the `.env` full scale) | DB contents |
 | browser tab slow | that client's queue drops oldest | other clients, server |
 | packet loss/reorder | quality % drops; jitter buffer reorders within 50ms | tick cadence (holds last) |
 

@@ -54,6 +54,7 @@ import asyncpg
 import numpy as np
 import pandas as pd
 
+from api import queries
 from common.config import Settings
 
 log = logging.getLogger("api.jobs.predict")
@@ -305,10 +306,20 @@ class PredictJob:
         # entirely cannot be discovered from the query above, so the candidate
         # list comes from the registry. Once every device is established this
         # set is empty and no raw query runs at all.
-        established = {d for d, r in by_device.items() if len(r) >= MIN_BUCKETS}
-        registered = {
-            r["device_id"] for r in await self._pool.fetch("SELECT device_id FROM devices")
-        }
+        #
+        # A sleeve rig that is currently paired into another one is excluded by
+        # the SAME predicate /api/devices uses (decision H): it receives no new
+        # metrics while paired, so forecasting it would publish a fresh curve
+        # every PREDICT_INTERVAL_S for a soldier the dashboard does not show.
+        registry = await self._pool.fetch(
+            f"""SELECT device_id, {queries.visible_rig_predicate()} AS visible
+                FROM devices"""
+        )
+        hidden = {r["device_id"] for r in registry if not r["visible"]}
+        established = {
+            d for d, r in by_device.items() if len(r) >= MIN_BUCKETS
+        } - hidden
+        registered = {r["device_id"] for r in registry if r["visible"]}
         candidates = sorted(registered - established)
         boot = await self._bootstrap_buckets(made_at, candidates) if candidates else {}
 

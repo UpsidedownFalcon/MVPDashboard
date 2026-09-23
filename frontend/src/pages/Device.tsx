@@ -15,6 +15,7 @@ import HistoryBars from '../components/HistoryBars'
 import HumanoidFigure, { type LimbState } from '../components/HumanoidFigure'
 import InsightsPanel from '../components/InsightsPanel'
 import LiveChart from '../components/LiveChart'
+import RigControls from '../components/RigControls'
 import RiskStat from '../components/RiskStat'
 import SensorSummary from '../components/SensorSummary'
 import Tabs from '../components/Tabs'
@@ -31,16 +32,27 @@ import {
   m5SideLabel,
   METRICS,
   metricMagnitude,
+  type FlagMeta,
+  type MetricId,
 } from '../lib/metrics'
+import { instrumentedSides, isSleeveRig } from '../lib/rig'
 import { useLive } from '../lib/ws'
 
 /** Why is this primitive null right now? Ordered by severity (UIUX §6:
  *  warming_up must never look like degraded_sensors). */
-function nullReason(flags: string[]): { label: string; weight: string } {
-  for (const f of ['degraded_sensors', 'partial', 'saturated', 'warming_up']) {
+const NULL_REASON_ORDER = ['degraded_sensors', 'partial', 'saturated', 'warming_up']
+
+/** m5 only: with one leg instrumented there is no left/right balance to
+ *  report at all, so `one_leg` outranks everything (decision I). It explains
+ *  NO other primitive - m1..m4 run on one leg, and m4 must still read
+ *  "warming up" while it learns this soldier's baseline (decision G). */
+const NULL_REASON_ORDER_M5 = ['one_leg', ...NULL_REASON_ORDER]
+
+function nullReason(flags: string[], metricId: MetricId): Omit<FlagMeta, 'hint'> {
+  for (const f of metricId === 'm5' ? NULL_REASON_ORDER_M5 : NULL_REASON_ORDER) {
     if (flags.includes(f)) {
       const meta = FLAG_META[f]
-      return { label: meta.label, weight: meta.weight }
+      return { label: meta.label, weight: meta.weight, Icon: meta.Icon }
     }
   }
   return { label: 'no data', weight: 'muted' }
@@ -102,8 +114,11 @@ export default function Device() {
   // signed m5 -> which side is carrying more load right now ('even' and null
   // both mean "no emphasis")
   const side = m5Side(live?.m[4] ?? null)
+  const sides = instrumentedSides(device)
+  // A one-leg rig has no left/right comparison, so the figure must never
+  // emphasise a leg (SPEC §5.5: never a directional claim).
   const loadSide: 'left' | 'right' | null =
-    side === 'left' || side === 'right' ? side : null
+    sides.length === 2 && (side === 'left' || side === 'right') ? side : null
 
   return (
     <div className="device-page">
@@ -117,9 +132,13 @@ export default function Device() {
         {/* key={id}: remount per soldier so the toggle always opens collapsed (STAGE4 R1) */}
         <SensorSummary key={id} device={device} quality={live?.q ?? device.quality} expandable />
         <FlagChips flags={live?.flags ?? []} />
+        {/* sleeve rigs only: sides, full scale and pairing (decisions A, B, G).
+            A bilateral unit has none of these, and a demo soldier is
+            bilateral (decision L), so neither ever mounts this. */}
+        {isSleeveRig(device) && !isDemoId(id) && <RigControls key={id} device={device} />}
         {/* battery, top-right */}
         <span className="device-head-battery">
-          <Battery soc={device.soc} />
+          <Battery soc={device.soc} device={device} />
         </span>
       </header>
 
@@ -138,6 +157,7 @@ export default function Device() {
             <HumanoidFigure
               variant="compact"
               limbs={limbs}
+              sensorCount={device.sensors.length}
               active={device.online}
               // ambient emphasis on the side currently carrying more load;
               // the m5 row states it in words (SPEC §5.5: neutral, in-session)
@@ -182,14 +202,17 @@ export default function Device() {
               // cross-session). Its chart keeps the full −100..100 domain.
               const value = signed ? metricMagnitude(m.id, raw) : raw
               const side = signed ? m5SideLabel(raw) : null
-              const reason = raw == null ? nullReason(live?.flags ?? []) : null
+              const reason = raw == null ? nullReason(live?.flags ?? [], m.id) : null
               return (
                 <div key={m.id} className={`live-row ${raw == null ? 'is-null' : ''}`}>
                   <div className="live-row-head" title={m.tooltip}>
                     <span className="swatch" style={{ background: m.color }} aria-hidden />
                     <span className="live-row-label">{m.label}</span>
                     {reason ? (
-                      <span className={`chip flag flag-${reason.weight}`}>{reason.label}</span>
+                      <span className={`chip flag flag-${reason.weight}`}>
+                        {reason.Icon && <reason.Icon aria-hidden />}
+                        {reason.label}
+                      </span>
                     ) : (
                       <>
                         {side && <span className="live-row-side">{side}</span>}

@@ -1,7 +1,8 @@
 # MVP Dashboard — Injury-Risk Prediction
 
 A trainer-facing web dashboard that predicts when trainees are approaching injury.
-1–5 wearable devices stream raw IMU data over UDP to an ingest service; a Python
+1–5 wearable rigs — a bilateral unit, a single knee sleeve or two sleeves paired
+into one soldier — stream raw IMU data over UDP to an ingest service; a Python
 biomechanical pipeline converts it into constant 60Hz metric streams (5 primitives +
 1 composite risk index per device); the dashboard shows live charts, historical
 rolling windows, regression-based forecasts of the composite, and rules-based
@@ -10,7 +11,11 @@ insights.
 **Status: all three stages are built and deployed** (2026-08-03) — local real-time
 biomech, public VPS deployment with intelligence, and the designed product frontend
 with login. Live at `https://<your-domain>`; the only stage-3 item still open is the
-S3-T08 acceptance run.
+S3-T08 acceptance run. Since then: the demo frontend and military theme
+(2026-09-12, [docs/tasks/STAGE4.md](docs/tasks/STAGE4.md)) and **unilateral
+knee-sleeve support** (2026-09-23, [PLAN_unilateral_devices.md](PLAN_unilateral_devices.md)) —
+a second wearable kind on the same UDP port, with dashboard-driven pairing, side
+and per-sleeve IMU full scale (see “Unilateral knee sleeves” below).
 
 **Start here: read [docs/PLAN.md](docs/PLAN.md) first.** It anchors the full doc
 suite (TRD, backend schema, app flow, implementation plan, and per-stage task lists).
@@ -42,6 +47,8 @@ uv run python simulator/simulate.py --devices 5
 #                           (default 30; use it to add devices without colliding
 #                           with a run already streaming)
 #    --duration SECONDS     stop after N seconds   (default: run until Ctrl-C)
+#    --sleeves N            also emit N unilateral knee sleeves (sync 0xA6) —
+#                           see "Unilateral knee sleeves" below
 
 # 4. watch it live — the product dashboard, served by caddy
 Start-Process http://localhost
@@ -60,10 +67,12 @@ curl -s -c cj.txt -H "Content-Type: application/json" `
 curl -s -b cj.txt http://localhost/api/health      # now 200
 ```
 
-Every device panel shows the composite + m1..m5 charts at 60Hz, quality %,
-online badge, active flags and per-sensor input rates. `m1..m4` and the
-composite are **0–100**; **`m5` is signed, −100..+100** (+ = left-dominant,
-− = right) ([docs/biomech/SPEC.md](docs/biomech/SPEC.md)).
+Every device panel shows the composite + m1..m5 charts at 60Hz, an online badge,
+active flags and a one-line sensor summary; the quality % and the per-sensor
+input rates sit behind that summary's toggle on the detail page (STAGE4 R1,
+2026-09-12). `m1..m4` and the composite are **0–100**; **`m5` is signed,
+−100..+100** (+ = left-dominant, − = right)
+([docs/biomech/SPEC.md](docs/biomech/SPEC.md)).
 `GET /api/health` (cookie required) is the first place to look when anything
 misbehaves; it also carries the per-device `biomech` diagnostics block.
 `GET /api/health/live` needs no cookie and is the liveness probe.
@@ -105,6 +114,85 @@ netsh advfirewall firewall add rule name="MVPDash UDP 5005" dir=in action=allow 
 
 Find your LAN IP with `ipconfig` (Wi-Fi/Ethernet IPv4 address). Devices
 auto-register on their first packet and appear on `/debug` within seconds.
+
+### Unilateral knee sleeves
+
+A second wearable kind streams into the **same** UDP port (2026-09-23): the NY
+Knicks knee sleeve (firmware `NYKnicksDataLogger`). One sleeve is **one MCU on
+one leg** with two IMUs, and it marks its datagrams with sync byte **0xA6**
+instead of the bilateral unit's 0xA5. Sensor 1 is the **thigh**, sensor 2 the
+**shin**, on every source. Downstream, one sleeve is a **unit** named
+`u<device_id>-<source_id>` (e.g. `u31-0`), and a **rig** is what the dashboard
+shows as one soldier: a bilateral unit, a single sleeve, or two sleeves paired.
+
+**On the sleeve — `CONFIG.TXT` on its SD card** (edit it over USB, then unplug
+the cable; the device re-reads the file and starts a fresh session):
+
+```
+udp_ip=192.168.1.100     # the machine running ingest
+udp_port=5005            # MUST equal UDP_PORT in .env — the firmware default is 5050
+device_id=31
+source_id=0
+accel_fs_g=32            # 2, 4, 8, 16 or 32
+gyro_fs_dps=4000         # 125, 250, 500, 1000, 2000 or 4000
+```
+
+`(device_id, source_id)` is a sleeve's whole identity on the wire, so **give
+every sleeve in a session its own pair**: two sleeves sharing both values are
+indistinguishable and their samples merge into one unit. Sleeve ids never
+collide with bilateral ones — the `u` prefix namespaces them.
+
+**In the dashboard** — the sleeve controls sit in the device-detail header and
+appear for sleeve rigs only:
+
+1. **Set the leg.** A new sleeve has no side, and its summary reads
+   `2 sensors | side not set | 6400Hz logging`. Pick Left or Right — the
+   dashboard never guesses.
+2. **Set the full scale** if it differs from the firmware defaults
+   (`+-32 g | +-4000 dps`). The datagram carries **no** scale, so this is
+   configuration the dashboard owns; a wrong value scales every metric on that
+   sleeve. Defaults for newly seen sleeves come from `UNILATERAL_ACCEL_FS_G` /
+   `UNILATERAL_GYRO_FS_DPS` in `.env`.
+3. **Pair two sleeves** into one soldier with four sensors and a working L/R
+   balance: press `Pair with...` on the sleeve that should keep its name and
+   history, pick the other sleeve, and give each one a leg. The joiner's own
+   card disappears for as long as the pairing lasts and comes back, with its
+   history intact, on `Unpair`.
+
+Any of those three changes **hard-resets that soldier's biomech session** (dose,
+baselines, calibration): the rig is a different shape, or its counts mean
+something different, so the old numbers are not comparable.
+
+A rig that instruments one leg carries the `one leg` flag: `m1`..`m4` run
+normally and only `m5` (L/R balance) is blank, with "one leg" as its reason. It
+is a shape, not a fault, and it is deliberately never reported as
+`sensors missing`.
+
+**Simulate sleeves without hardware.** Pass `--target` explicitly — the
+simulator's default is the 5010 dev-box workaround (see Gotchas), not `UDP_PORT`:
+
+```powershell
+uv run python simulator/simulate.py --sleeves 2 --target 127.0.0.1:5005 --duration 600
+#    --sleeve-base-id N      device_id of the first sleeve, then N+1, …
+#                            (default: --base-id + --devices, so sleeves never
+#                            collide with a bilateral run in the same command)
+#    --sleeve-source-id 0|1  the source_id every sleeve transmits on (default 0)
+#    --sleeve-accel-fs G     2, 4, 8, 16, 32          (default 32)
+#    --sleeve-gyro-fs DPS    125 … 4000               (default 4000)
+```
+
+The capture is ±16 g / ±2000 dps, so its counts are multiplied once at load by
+`16/accel_fs` and `2000/gyro_fs`: a sleeve represents the **same motion** as a
+bilateral device, at its own full scale. `--loss`, `--jitter`, `--soc`,
+`--dead-sensors` and the rest apply to sleeves too (`--dead-sensors 0:2` kills a
+sleeve's shin).
+
+Note `--devices` still defaults to **1**, so the command above streams a mixed
+fleet: bilateral `30` plus sleeves `u31-0` and `u32-0`. Pass `--devices 0` for
+sleeves only.
+
+Check it arrived: `GET /api/health` → `ingest.global:recv:unilateral` should be
+counting and `global:bad_sync` should stay flat.
 
 ### Gotchas
 

@@ -40,6 +40,18 @@ export const WS_CLOSE_UNAUTHORIZED = 4401
 export const HISTORY_MAX_BUCKETS = 30
 
 /** Static sensor line shown in place of the quality meter + per-sensor rates
- *  (STAGE4 R1, user decision 2026-09-12). Deliberately a LITERAL: it is not
- *  computed from the device and does not change with sensor count or rate. */
+ *  (STAGE4 R1, user decision 2026-09-12). Deliberately a LITERAL for BILATERAL
+ *  rigs (and the demo soldiers): it is not computed from the device and does
+ *  not change with sensor count or rate. Sleeve rigs re-open R1 by the user
+ *  decision of 2026-09-23 - their line is computed in lib/rig.ts. */
 export const SENSOR_SUMMARY_TEXT = '4 sensors | 6400Hz logging'
+
+/** Aggregate on-device logging rate, the tail of every sensor summary line.
+ *  lib/rig.ts composes the sleeve variants from it. */
+export const LOGGING_RATE_TEXT = '6400Hz logging'
+
+/** Full-scale ranges a knee sleeve accepts (firmware imu_fs_valid(); mirrored
+ *  in backend/common/kinds.py). The dashboard offers exactly these and nothing
+ *  else - an out-of-set value is rejected by the API with 422. */
+export const ACCEL_FS_ALLOWED_G = [2, 4, 8, 16, 32] as const
+export const GYRO_FS_ALLOWED_DPS = [125, 250, 500, 1000, 2000, 4000] as const

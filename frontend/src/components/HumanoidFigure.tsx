@@ -30,6 +30,9 @@ interface Props {
   active?: boolean
   /** ambient leg emphasis; never a directional claim (SPEC §5.5). */
   emphasis?: 'left' | 'right' | null
+  /** how many sensors this rig actually wears; drives the aria-label only.
+   *  Omitted = the full four-sensor showcase (hero). */
+  sensorCount?: number
 }
 
 type V3 = readonly [number, number, number]
@@ -196,7 +199,16 @@ function buildBody(): CloudPoint[] {
 
 const clamp01 = (v: number) => Math.max(0, Math.min(1, v))
 
-export default function HumanoidFigure({ variant, limbs, active = true, emphasis }: Props) {
+/** The showcase figure wears every instrumented segment. */
+const FULL_SENSOR_COUNT = NODES.length
+
+export default function HumanoidFigure({
+  variant,
+  limbs,
+  active = true,
+  emphasis,
+  sensorCount = FULL_SENSOR_COUNT,
+}: Props) {
   const hostRef = useRef<HTMLCanvasElement>(null)
   // keep the latest props in a ref so the rAF loop never restarts on a tick
   const propsRef = useRef({ limbs, active, emphasis, variant })
@@ -356,6 +368,9 @@ export default function HumanoidFigure({ variant, limbs, active = true, emphasis
       )
       for (const n of nodes) {
         const state = p.limbs ? p.limbs[n.limb] : 'good'
+        // a limb this rig does not map carries no sensor: draw no node at all
+        // (decision K - the bone itself still renders dim in the point cloud)
+        if (p.limbs && !state) continue
         const color = state ? STATE_COLOR[state] : 'rgba(255,255,255,0.25)'
         const emph = !p.emphasis || p.emphasis === n.side ? 1 : 0.55
         const pulse = animate && state === 'good'
@@ -400,7 +415,9 @@ export default function HumanoidFigure({ variant, limbs, active = true, emphasis
     <div
       className={`figure figure-${variant} ${active ? 'is-active' : 'is-idle'}`}
       role="img"
-      aria-label="Soldier wearing four leg sensors streaming live motion data"
+      aria-label={`Soldier wearing ${sensorCount} leg ${
+        sensorCount === 1 ? 'sensor' : 'sensors'
+      } streaming live motion data`}
     >
       {hero && <div className="figure-glow" aria-hidden />}
       {hero && <div className="figure-ring" aria-hidden />}

@@ -34,7 +34,9 @@ from dataclasses import dataclass, field
 import numpy as np
 from scipy.signal import lfilter
 
+from common.kinds import BILATERAL_EXPECTED_LIMBS
 from common.scaling import (
+    ACCEL_LSB_PER_G,
     ACCEL_MS2_PER_COUNT,
     CAL_K_MAX,
     CAL_K_MIN,
@@ -43,6 +45,7 @@ from common.scaling import (
     DEFAULT_CALIBRATION,
     GRAVITY_MS2,
     GYRO_DPS_PER_COUNT,
+    GYRO_LSB_PER_DPS,
     SAT_SUPPRESS_FRACTION,
     SAT_THRESHOLD_COUNTS,
     Calibration,
@@ -512,6 +515,16 @@ class _Sess:
                                  if s == "right"], dtype=int)
         self.impact_i = (self.shank_i if len(self.shank_i)
                          else np.arange(n, dtype=int))
+        # Per-limb full-scale correction. The bilateral hardware is fixed at
+        # +-16 g / +-2000 dps and its counts convert with the scaling.py
+        # constants, so 1.0 is the whole fleet until a knee sleeve appears: a
+        # sleeve's full-scale is configurable and the datagram carries no scale
+        # (common/kinds.py), so its counts mean a different number of m/s^2.
+        # This is CONFIG, not session state -- it is re-applied every tick from
+        # the rig and is deliberately absent from the snapshot.
+        self.fs_a_vec = np.ones((1, n, 1))
+        self.fs_w_vec = np.ones((1, n, 1))
+        self._limb_scale_key: tuple | None = None
         self.refresh_cal()
         # filter state
         self.z1: np.ndarray | None = None
@@ -560,6 +573,35 @@ class _Sess:
         self.prev: Metrics | None = None
         self.last_tick_t: float | None = None
         self.session_start_t: float | None = None
+
+    def set_limb_scale(self, limb_scale: dict[str, tuple[float, float]] | None) -> None:
+        """Point the session at each limb's (lsb_per_g, lsb_per_dps).
+
+        Called every tick because get_session() can rebuild the session at any
+        time; it recomputes only when the values actually change. A limb absent
+        from the map keeps the bilateral constants.
+        """
+        key = None if limb_scale is None else tuple(
+            limb_scale.get(limb) for limb in self.limbs)
+        if key == self._limb_scale_key:
+            return
+        self._limb_scale_key = key
+        if limb_scale is None:
+            self.fs_a_vec = np.ones((1, len(self.limbs), 1))
+            self.fs_w_vec = np.ones((1, len(self.limbs), 1))
+            return
+        a, w = [], []
+        for limb in self.limbs:
+            scale = limb_scale.get(limb)
+            if scale is None:
+                a.append(1.0)
+                w.append(1.0)
+            else:
+                lsb_g, lsb_dps = scale
+                a.append(ACCEL_LSB_PER_G / float(lsb_g))
+                w.append(GYRO_LSB_PER_DPS / float(lsb_dps))
+        self.fs_a_vec = np.array(a)[None, :, None]
+        self.fs_w_vec = np.array(w)[None, :, None]
 
     def refresh_cal(self) -> None:
         """Recache the per-tick-invariant calibration derivatives."""
@@ -1002,6 +1044,9 @@ def compute(
     frames: dict[str, np.ndarray],
     state: dict,
     times: dict[str, np.ndarray] | None = None,
+    *,
+    expected_limbs: int = BILATERAL_EXPECTED_LIMBS,
+    limb_scale: dict[str, tuple[float, float]] | None = None,
 ) -> Metrics:
     """frames: limb -> float32[n, 6] (ax..gz, raw counts) since the last tick.
 
@@ -1010,6 +1055,15 @@ def compute(
             so real timestamps matter (SPEC Section 3.5).
     state:  persists across calls per device; holds filter state, the 1 s
             summary rings and the session accumulators.
+    expected_limbs:
+            how many limbs THIS RIG is supposed to carry. Fewer than this means
+            sensors are missing (`degraded_sensors`). It is a property of the
+            hardware, not a constant: a knee sleeve rig carries two limbs and a
+            healthy one must not wear a permanent "sensors missing" alert.
+    limb_scale:
+            limb -> (lsb_per_g, lsb_per_dps) for rigs whose IMU full-scale is
+            not the bilateral +-16 g / +-2000 dps. None keeps the scaling.py
+            constants for every limb.
 
     Called at OUTPUT_HZ per device. Returns Metrics(m1..m5, composite), 0..100.
     """
@@ -1017,6 +1071,7 @@ def compute(
     if not limbs:
         return HELD_ZERO
     sess = get_session(state, limbs)
+    sess.set_limb_scale(limb_scale)
     n_limbs = len(limbs)
 
     counts = [0 if frames[limb] is None else len(frames[limb]) for limb in limbs]
@@ -1051,8 +1106,8 @@ def compute(
             block[n_i:, i, :] = fill
 
     # --- 2. scale + apply calibration
-    a_raw = block[:, :, 0:3] * (ACCEL_MS2_PER_COUNT * sess.k_vec)
-    w_dps = block[:, :, 3:6] * GYRO_DPS_PER_COUNT - sess.bias_vec
+    a_raw = block[:, :, 0:3] * (ACCEL_MS2_PER_COUNT * sess.k_vec * sess.fs_a_vec)
+    w_dps = block[:, :, 3:6] * (GYRO_DPS_PER_COUNT * sess.fs_w_vec) - sess.bias_vec
 
     sat_any = (np.abs(block) >= SAT_THRESHOLD_COUNTS).any(axis=2)
     n_valid = int(valid.sum())
@@ -1261,8 +1316,16 @@ def compute(
         flags.add("carried_over")
     if sess.cal_failed.any():
         flags.add("cal_failed")
-    if n_limbs < 4:
+    if n_limbs < expected_limbs:
         flags.add("degraded_sensors")
+    # A rig that instruments only one leg -- a single knee sleeve, or a sleeve
+    # whose side the operator has not set yet. Structural, not a fault: m1..m4
+    # are fine and only m5 is impossible, so it must never read as
+    # `degraded_sensors` (SPEC Section 10: that flag means a sensor the rig
+    # SHOULD have is missing, and it must stay distinguishable from a fault).
+    one_leg = len(sess.left_i) == 0 or len(sess.right_i) == 0
+    if one_leg:
+        flags.add("one_leg")
 
     # --- 8. primitives ------------------------------------------------------
     sigma = sess.sigma_mean          # cached; only changes on calibration
@@ -1505,7 +1568,11 @@ def compute(
         sess.m5_stale += step
         if sess.m5_hold is not None and sess.m5_stale <= STALE_TIMEOUT_S:
             m5 = sess.m5_hold
-        elif not sides_live:
+        elif not sides_live and not one_leg:
+            # `one_leg` already says why m5 is null, and it says it truthfully.
+            # Calling a one-legged rig `degraded_sensors` would claim a sensor
+            # is missing from a complete rig. (`warming_up` above needs no such
+            # guard: it requires sides_live, which one_leg rules out.)
             flags.add("degraded_sensors")
         elif sess.m5_hold is not None and sess.debounce("sides_bad", not sides_ok, step):
             # As for m4: `partial` is a missing-sensor signal, not a rest signal.

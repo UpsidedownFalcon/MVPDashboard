@@ -90,9 +90,9 @@ every datagram to be rejected as `bad_len` with the device streaming normally.
 
 | Offset | Field | Type | Notes |
 |---|---|---|---|
-| 0 | device_id | u8 | wearable unit / person |
-| 1 | source_id | u8 | leg MCU: 0 or 1 |
-| 2 | sync | u8 | must be 0xA5, else drop |
+| 0 | device_id | u8 | wearable unit / person. On a **unilateral** sleeve, `(device_id, source_id)` together are the identity of one sleeve — see “Two wearable kinds” below |
+| 1 | source_id | u8 | leg MCU: 0 or 1. On a sleeve it is whatever `CONFIG.TXT` says (default 0) and carries **no** left/right meaning |
+| 2 | sync | u8 | **0xA5** = bilateral unit, **0xA6** = unilateral knee sleeve (added 2026-09-23). Anything else is dropped and counted as `bad_sync` |
 | 3 | header | u8 | bits[1:0] = sensor_id (1 or 2), bits[7:2] = version (=1) |
 | 4–7 | timestamp_us | u32 LE | device-local µs, **wraps every ~71.6 min**, monotonic per source only |
 | 8–19 | ax ay az gx gy gz | 6 × i16 LE | raw counts, unscaled |
@@ -106,12 +106,75 @@ source address** (NAT may rewrite it).
 
 **Limb mapping — default SET, values CONFIGURABLE** (`LIMB_MAP` in `.env`):
 `(0,1)=left_shin, (0,2)=left_thigh, (1,1)=right_thigh, (1,2)=right_shin`.
+This map applies to **bilateral** units only; a sleeve's limbs come from
+`UNILATERAL_SENSOR_MAP` plus its dashboard-set side (below).
+
+**Added 2026-09-23 (user decision) — two wearable kinds share this layout.**
+The 22-byte record above is byte-identical for both; the sync byte is what tells
+them apart, and it is deliberately outside the CRC range (`wire[1..17]`), so a
+sleeve datagram is validated by exactly the same check. `backend/common/kinds.py`
+is the single source of truth for everything in this block.
+
+| | Bilateral unit | Unilateral knee sleeve |
+|---|---|---|
+| Sync byte | `0xA5` | `0xA6` (firmware `NYKnicksDataLogger`, decision D13) |
+| Hardware | two leg MCUs, four IMUs | **one MCU on one leg**, two IMUs |
+| `sensor_id` meaning | per `LIMB_MAP` | **1 = thigh, 2 = shin on every source** (`UNILATERAL_SENSOR_MAP`, §7) |
+| Full scale | fixed ±16 g / ±2000 dps (`common/scaling.py`, compile-time) | **configurable per sleeve**: accel {2,4,8,16,32} g, gyro {125,250,500,1000,2000,4000} dps, firmware defaults 32 / 4000. **The datagram carries no scale**, so the receiver must be told it (`.env` seeds it, the dashboard owns it per sleeve) |
+| Battery `soc` | one per leg MCU, minimum published | one per sleeve |
+| Port | `UDP_PORT` | `UDP_PORT` too — set `udp_port` in each sleeve's `CONFIG.TXT` (firmware default 5050) |
+
+**Identities.** A bilateral device is its `device_id` byte, as a string (`"30"`).
+One sleeve is a **UNIT**, identified on the wire by `(device_id, source_id)` and
+named **`u<device_id>-<source_id>`** (`"u30-0"`), so a sleeve fleet and a
+bilateral fleet sharing device ids never collide. Two sleeves with the same
+`device_id` **and** `source_id` are indistinguishable on the wire; operators keep
+that pair unique. A **RIG** is what everything downstream is keyed by (§4).
+
+**Virtual sources.** Inside a sleeve rig each unit is mapped to a virtual
+`source_id` — **left or side-less → 0, right → 1** — so a paired rig presents
+`(0,1),(0,2),(1,1),(1,2)` exactly like a bilateral unit and every per-source
+mechanism (battery, sensor stats, `last_seen:sensor` keys) keeps working
+unchanged. Limb names are `<side>_<segment>` once the side is set
+(`left_thigh`), and the bare segment (`thigh`, `shin`) before that.
 
 Measured stream rate **~640Hz/sensor** (device decimates from ~6.6kHz); the pre-hardware estimate of 600 is superseded. Ingest never
 assumes the exact rate: it measures per-sensor rate live and computes quality against
 `EXPECTED_INPUT_HZ`.
 
 ## 4. Ingest pipeline design — SET IN STONE (parameters configurable)
+
+**Added 2026-09-23 (user decision) — the RIG model.** Everything below is keyed
+by a **rig**, not by a wire device: one rig = one ticker = one biomech session =
+one `devices` row = one card. Rig ids are **strings** throughout
+(`backend/ingest/state.py`). A bilateral unit is one rig, id = its `device_id`
+byte (`"30"`). A knee sleeve is a **unit** (§3); unpaired it is its own rig
+(`"u30-0"`), and two sleeves paired in the dashboard share the **host's** rig id,
+with the joiner mapped onto virtual source 1. `MAX_DEVICES` counts rigs.
+
+A sleeve's rig membership, side and IMU full scale come from the dashboard, not
+the wire, so each rig carries its own routing table built from configuration
+rather than from packets:
+
+- **`limb_map`** — `(virtual source, sensor_id) → limb name` for this rig. A
+  paired rig's map contains BOTH members from the moment it is created, before
+  the second member's first packet, so nothing re-shapes mid-session.
+- **`expected_limbs`** — 4 for bilateral, `2 × members` for a sleeve rig. This is
+  what "a sensor is missing" means for this rig (biomech SPEC §8); a healthy
+  single sleeve must not wear a permanent "sensors missing" alert.
+- **`limb_scale`** — `limb → (lsb_per_g, lsb_per_dps)` for sleeve rigs, `None`
+  for bilateral (which keeps the `common/scaling.py` constants).
+
+The configuration itself arrives from the api over Redis
+(`unit:cfg:{unit}` + the `unit_cfg` channel, BACKEND_SCHEMA §4 — the **only**
+api → ingest direction). `backend/ingest/unit_config.py` loads the whole keyspace
+at start (3 s budget; on timeout or a Redis outage every sleeve simply runs on
+defaults) and then follows the channel. **A config change tears down the affected
+rigs**, which cancels their tickers and ends their biomech sessions; the next
+packet rebuilds them, and a rig rebuilt within 2 s of a reset deliberately
+**skips its Redis snapshot restore** — the rig is a different shape or its counts
+mean something different, so the old dose, baselines and calibration are not
+comparable (user decision N).
 
 1. **UDP server:** `DatagramProtocol.datagram_received` does *only* length check +
    append to a raw `deque` (bounded, ~2s worth). `SO_RCVBUF` raised to 4MB at socket
@@ -139,8 +202,12 @@ assumes the exact rate: it measures per-sensor rate live and computes quality ag
    (biomech SPEC §7.2.1) — never zero-fill, which fabricates a 9.75 m/s² impact on
    reconnect.
 6. **Biomech (interface SET IN STONE):**
-   `compute(frames: dict[str, ndarray], state) -> Metrics(m1..m5, composite)`
-   called at 60Hz per device. The real algorithm replaces `biomech.py` only.
+   `compute(frames: dict[str, ndarray], state, times=None, *, expected_limbs=4,
+   limb_scale=None) -> Metrics(m1..m5, composite)`
+   called at 60Hz per rig. **Both keyword arguments were added 2026-09-23** and
+   both are optional, so every existing caller is unchanged; ingest passes the
+   rig's `expected_limbs` and `limb_scale` (see the rig model above), and
+   BACKEND_SCHEMA §5 carries the full signature. The real algorithm replaces `biomech.py` only.
    **Definitions are specified in [biomech/SPEC.md](biomech/SPEC.md)** (S1-T14);
    implemented in S1-T15. Summary of what the spec fixes:
    - **Orientation-free by mandate:** rotation-invariant magnitudes (`|a|`, `|ω|`) and
@@ -233,19 +300,28 @@ assumes the exact rate: it measures per-sensor rate live and computes quality ag
      movement vs their 60 s / 30 s warm-ups, so neither emits on it. Synthetic fixtures only, by
      user decision; flagged `unvalidated` in `Metrics` for all of stage 1 and surfaced via
      `/api/health`. Closing this needs one ≥10-min session with a fatigue block (SPEC §11.1).
-   - **Degraded operation:** devices may stream <4 sensors; unavailable primitives emit
-     `null` and the composite reweights (SPEC §8).
+   - **Degraded operation:** a rig may stream fewer sensors than it should; unavailable
+     primitives emit `null` and the composite reweights (SPEC §8). **Since 2026-09-23
+     "should" is the rig's `expected_limbs`, not a hardcoded 4**, and a rig that
+     instruments only one leg raises the new `one_leg` flag rather than
+     `degraded_sensors` — one leg is a shape, not a fault (SPEC §8, §10).
    - Scale factors are compile-time constants in `backend/common/scaling.py`:
      `9.81/2048` m/s² per count, `1/16.384` °/s per count (ICM-45686, ±16 g / ±2000 °/s,
-     verified against `example/squats.bin`).
+     verified against `example/squats.bin`). **A sleeve rig rescales on top of them**
+     from its per-unit `limb_scale` (§3: the datagram carries no full scale), composed
+     into the same per-limb vectors as the calibration gain, so saturation counting stays
+     in raw counts and is correct at any full scale. Scale is configuration, never
+     snapshot state.
 7. **60Hz ticker:** wall-clock driven (`asyncio` timer, drift-corrected by absolute
    scheduling). **Emits every tick regardless of input** — on missing data it
    holds the last value (flag `held=true` internally, quality reflects it). Output
    cadence is constant even if the input rate wobbles. If no packets for
    `OFFLINE_AFTER_S` (default 2s), the device's ticker suspends (device offline)
    rather than streaming stale holds.
-8. **Quality:** per tick, `received_samples / expected_samples` across the device's
-   mapped sensors (expected = `EXPECTED_INPUT_HZ / OUTPUT_HZ × len(LIMB_MAP)`), clamped
+8. **Quality:** per tick, `received_samples / expected_samples` across the rig's
+   mapped sensors (expected = `EXPECTED_INPUT_HZ / OUTPUT_HZ × len(rig limb_map)` —
+   the **rig's own** map since 2026-09-23, so a single sleeve's two sensors read
+   ~1.0 rather than a permanent 0.5), clamped
    to [0,1]. Scaled by the **mapped** count, not a hardcoded 4: a valid 3-sensor
    `LIMB_MAP` used to read a permanent 0.75 — a 25% data-loss warning on healthy
    hardware — while a 5+ sensor map clamped at 1.0 and hid real loss. A physically
@@ -330,7 +406,10 @@ Everything that connects components lives in **one root `.env`** (template:
 | `INSIGHT_WARN_THRESHOLD` / `INSIGHT_ALERT_THRESHOLD` | 85 / 92 | composite 0–100. Raised from 70/85 after the SPEC §6.1 rescale: a measured hard interval session reads ~77, so 70 warned during ordinary hard training. At 85 acute effort alone does not fire — accumulated dose is what raises the flag |
 | `INSIGHT_INTERVAL_S` / `INSIGHT_COOLDOWN_S` | **15 / 120** | tuned as a set with `INSIGHT_LIVE_WINDOW` and `INSIGHT_HOLD_S` — see ANALYTICS §4.6 |
 | `METRICS_RETENTION` | 30d | hypertable retention |
-| `MAX_DEVICES` | 5 | hard cap on concurrently tracked devices; a 6th while all 5 are live is dropped and counted in `ingest:stats/global:dev_dropped`, never merged into another device's stream (biomech SPEC §7.2). Raising it needs an ingest restart |
+| `MAX_DEVICES` | 5 | hard cap on concurrently tracked **rigs** (§4: a paired pair of sleeves is one rig, not two); a 6th while all 5 are live is dropped and counted in `ingest:stats/global:dev_dropped`, never merged into another device's stream (biomech SPEC §7.2). Raising it needs an ingest restart |
+| `UNILATERAL_SENSOR_MAP` | `{"1":"thigh","2":"shin"}` | **Added 2026-09-23.** `sensor_id → segment` on a unilateral knee sleeve, JSON with sensor-id keys, parsed like `LIMB_MAP`. Fixed by the sleeve firmware (`SENSOR_ID_IMU0/1`: 1 = top/thigh, 2 = bottom/shin) on **every** source. Segments carry **no side** — the side is set per sleeve in the dashboard — and must be distinct, or ingest would overwrite one limb with the other |
+| `UNILATERAL_ACCEL_FS_G` | 32 | **Added 2026-09-23.** IMU accelerometer full scale assumed for every **newly seen** sleeve, in g; one of 2, 4, 8, 16, 32 (validated at load, mirrors the firmware's `imu_fs_valid()`). The datagram carries no scale, so this is the seed; the per-sleeve value then lives in `sleeve_units` (BACKEND_SCHEMA §1) and is edited in the dashboard |
+| `UNILATERAL_GYRO_FS_DPS` | 4000 | **Added 2026-09-23.** As above for the gyroscope, in dps; one of 125, 250, 500, 1000, 2000, 4000. Both defaults match the sleeve firmware's own defaults, so an unconfigured sleeve is right out of the box |
 | `POSTGRES_HOST` / `POSTGRES_PORT` | db / 5432 | expanded from the `POSTGRES_*` row above, which listed no per-key defaults |
 | `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD` | mvpdash / mvpdash / changeme | password is a placeholder — real value only in `.env`, never committed |
 | `JWT_EXPIRE_HOURS` | 24 | cookie lifetime; `JWT_SECRET` has no default on purpose (empty until stage 3) |

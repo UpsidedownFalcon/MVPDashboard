@@ -60,7 +60,8 @@ async def test_migrate_idempotent_and_cagg(scratch_db) -> None:
     applied = await apply_migrations(conn, settings)
     assert applied == ["001_init.sql", "002_insight_actions.sql",
                        "003_insight_action_grouping.sql",
-                       "004_insight_decisions.sql"]
+                       "004_insight_decisions.sql",
+                       "005_sleeve_units.sql"]
 
     # 002: action-first insight columns exist (nullable TEXT)
     # 003: action_id groups rules onto one imperative; reason is the short bullet
@@ -73,13 +74,14 @@ async def test_migrate_idempotent_and_cagg(scratch_db) -> None:
     }
     assert {"action", "rationale", "action_id", "reason"} <= insight_cols
 
-    # all tables exist (insight_decisions: migration 004, Adopt/Override)
+    # all tables exist (insight_decisions: migration 004, Adopt/Override;
+    # sleeve_units: migration 005, unilateral knee sleeves)
     tables = {
         r["tablename"]
         for r in await conn.fetch("SELECT tablename FROM pg_tables WHERE schemaname='public'")
     }
     assert {"users", "devices", "metrics", "forecasts", "insights",
-            "insight_decisions", "schema_migrations"} <= tables
+            "insight_decisions", "sleeve_units", "schema_migrations"} <= tables
 
     # metrics is a hypertable with a retention policy from METRICS_RETENTION
     hyper = await conn.fetchrow(

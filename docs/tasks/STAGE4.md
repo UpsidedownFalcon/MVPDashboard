@@ -419,3 +419,36 @@ Verification performed:
   cards), the expanded detail header, the insights stack, history and projections.
 - Still to run by hand against the real stack: the offline-summary behaviour on a real wearable
   (checklist 6) and the Caddy image rebuild (checklist 8).
+
+---
+
+## As built, amended 2026-09-23 — R1 re-opened for SLEEVES ONLY (user decision)
+
+R0/R1 above locked the sensor summary to the static literal `4 sensors | 6400Hz logging`. That
+was written when exactly one wearable kind existed. The unilateral knee sleeve
+(`PLAN_unilateral_devices.md`, shipped 2026-09-23) is **one MCU on one leg with two sensors**,
+so on a sleeve the literal states a number the rig does not have. The user's decision M
+therefore re-opens R1 **for sleeve rigs only**, and this note records it rather than editing the
+requirement above:
+
+- **Bilateral rigs and all five demo soldiers keep the literal verbatim** —
+  `SENSOR_SUMMARY_TEXT` in `lib/config.ts` is unchanged, demo soldiers stay bilateral by
+  decision L, and any device whose API row carries no `kind` reads as bilateral. Nothing about
+  R1's behaviour changes either: same `»`/`«` toggle, same in-place swap for the real readout,
+  never persisted, hidden while offline.
+- **Sleeve rigs word the line from their own shape** (`sensorSummaryText` in `lib/rig.ts`):
+  `2 sensors | one leg | 6400Hz logging`, `2 sensors | side not set | 6400Hz logging`, or
+  `4 sensors | 2 sleeves | 6400Hz logging` when two sleeves are paired. The variants are built
+  from a new `LOGGING_RATE_TEXT = '6400Hz logging'` constant so the rate is stated in one place.
+- **The hero copy of Appendix B loses its fixed count** for the same reason — a squad can now
+  mix two-sensor and four-sensor rigs. Shipped: eyebrow
+  `Lower-limb telemetry | thigh and shin sensors | live` (was `Lower-limb telemetry | 4 sensors |
+  live`), and the paragraph opens "Sensors on each soldier's thighs and shins stream motion
+  hundreds of times a second" (was "Four sensors on each soldier's thighs and shins"). The rest
+  of Appendix B is unchanged, including "Built for units like the 1st Cavalry Division".
+- R2 (demo soldiers), R3 (military vocabulary) and R4 (plain dashes) are **not** re-opened. The
+  new strings obey them: "soldier" never "athlete", ` | ` as the separator, no em dash, en dash,
+  ellipsis or middle dot, and `+-` for the plus-or-minus in the full-scale readout.
+
+Spec of record for the amended behaviour: [../UIUX.md](../UIUX.md) §4 (sensor summary table and
+the sleeve controls) and §11 (copy rules).

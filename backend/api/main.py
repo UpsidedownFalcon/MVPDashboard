@@ -25,6 +25,8 @@ from api.routes.forecasts import router as forecasts_router
 from api.routes.health import router as health_router
 from api.routes.insights import router as insights_router
 from api.routes.metrics import router as metrics_router
+from api.routes.units import router as units_router
+from api.unit_mirror import UnitMirror
 from api.writer import Writer
 from api.ws import Hub
 
@@ -56,14 +58,21 @@ def create_app() -> FastAPI:
         await predict_job.start()
         insight_job = InsightJob(settings, pool)
         await insight_job.start()
+        # Sleeve registration + the api -> Redis -> ingest config mirror. It
+        # lives here rather than in Writer because Writer has no Redis handle
+        # and returns early on an empty tick buffer (unit_mirror.py header).
+        unit_mirror = UnitMirror(settings, pool, hub.redis)
+        await unit_mirror.start()
         app.state.pool = pool
         app.state.writer = writer
         app.state.predict_job = predict_job
         app.state.insight_job = insight_job
+        app.state.unit_mirror = unit_mirror
         app.state.settings = settings
         app.state.redis = hub.redis
         log.info("api up (ws fan-out + /debug + db writer + rest + jobs)")
         yield
+        await unit_mirror.stop()
         await insight_job.stop()
         await predict_job.stop()
         await writer.stop()
@@ -75,6 +84,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_router)
     guard = [Depends(require_user)]
     app.include_router(devices_router, dependencies=guard)
+    app.include_router(units_router, dependencies=guard)
     app.include_router(metrics_router, dependencies=guard)
     app.include_router(forecasts_router, dependencies=guard)
     app.include_router(insights_router, dependencies=guard)

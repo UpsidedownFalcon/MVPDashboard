@@ -92,7 +92,8 @@ Panel contents, top to bottom:
    **calibration badge** (§6a) while settling, the static **sensor summary** line
    "4 sensors | 6400Hz logging" (STAGE4 R1, 2026-09-12: it replaces the quality meter and the
    four sensor micro-dots on the card, which are not reachable from the overview at all;
-   hidden while the device is offline), and the **battery** (§6b) top-right.
+   hidden while the device is offline — **since 2026-09-23 a knee-sleeve rig words this line
+   from its own shape instead**, §4), and the **battery** (§6b) top-right.
 2. **Projected Injury Risk block — the panel's headline.** Closest configured
    horizon rendered as the stat-tile hero: label "Projected risk | +10m" (label
    text from `FUTURE_HORIZONS` config, never hardcoded), value ≥48px semibold
@@ -133,8 +134,45 @@ and the **per-limb sensor row** (for each mapped limb in sorted order — limb l
 ("641Hz"), liveness dot (§6); a limb that has never streamed shows its dot in critical, with
 "never streamed" in the dot's tooltip), and the toggle flips to "«". The state is never
 persisted: every detail-page mount opens collapsed (the page remounts it per `:id`), and the
-whole summary is hidden while the device is offline. Active flag chips, then the **battery**
+whole summary is hidden while the device is offline. Active flag chips, then — for a
+**knee-sleeve rig only** — the sleeve controls (below), and the **battery**
 (§6b) top-right.
+
+**Amended 2026-09-23 (user decision) — the sensor summary is rig-aware.** The STAGE4 R1 literal
+was written when one wearable kind existed, and on a two-sensor knee sleeve it states a number
+that is simply false. The rule now:
+
+| Rig | Summary line |
+|---|---|
+| bilateral unit, demo soldier, or any device whose `kind` the API does not state | `4 sensors \| 6400Hz logging` — the R1 literal, **verbatim and unchanged** |
+| one sleeve, leg set | `2 sensors \| one leg \| 6400Hz logging` |
+| one sleeve, **no leg set yet** | `2 sensors \| side not set \| 6400Hz logging` |
+| two sleeves paired | `4 sensors \| 2 sleeves \| 6400Hz logging` |
+
+Every string lives in one exported table (`RIG_COPY` in `lib/rig.ts`) that the copy-rules test
+walks, and `kind`/`units` are optional on the API type, so anything that does not carry them
+reads as bilateral. This is a deliberate, recorded re-opening of STAGE4 R1 **for sleeves only**
+(docs/tasks/STAGE4.md, as-built note).
+
+**Sleeve controls (`RigControls`) — new 2026-09-23, device header, sleeve rigs only.** A
+bilateral unit has fixed sides and compile-time full-scale constants and a demo soldier is
+bilateral, so neither ever renders this. Per sleeve in the rig:
+
+- **Leg** — a Left / Right segmented group. Unset reads "side not set"; the dashboard never
+  guesses a side, and an unset sleeve is not assumed to be either leg.
+- **Full scale** — a readout, `+-32 g | +-4000 dps`, that expands into two segmented groups over
+  the allowed sets (accel 2/4/8/16/32 g, gyro 125/250/500/1000/2000/4000 dps). This is
+  **configuration, not measurement**: the sleeve's datagrams carry no scale (TRD §3).
+- **`Pair with...`** — expands an inline list of unpaired sleeves currently known, plus a leg
+  choice for each side (the same inline-form pattern as the Override note). **`Unpair`** releases
+  the member, which reappears as its own soldier with its own history.
+
+Every one of those mutations **hard-resets the soldier's biomech session** on the backend, so
+the stakes are higher than a rename: errors are shown **inline** rather than swallowed, and
+success invalidates the registry, the unit list and the per-rig `windows`, `history`,
+`forecasts`, `insights` and `advice-timeline` caches — for **both** rigs on a pair or unpair.
+⚠️ **Accepted:** the 60 s live buffer still holds samples recorded before a full-scale change,
+so the live charts show a step until they scroll past it.
 
 **Left column — LIVE:**
 - Top row: the humanoid figure (compact variant, §10) **driven by real data**:
@@ -145,6 +183,16 @@ whole summary is hidden while the device is offline. Active flag chips, then the
   "even" (updated 2026-08-03: BACKEND_SCHEMA §2 sanctions a
   **neutral** side readout; what SPEC §5.5 forbids is the *claim* — "weaker", a
   finding, or any cross-session comparison — not the factual side).
+  **Amended 2026-09-23 for one-leg rigs:** when the rig maps only some limbs the
+  figure **skips the sensor nodes of the limbs it does not have** and leaves
+  those bones dim — a lone right-leg sleeve lights the right leg only, and a
+  sleeve with no side yet streams side-less limbs that match no bone, so **both**
+  legs render dim. Load emphasis is suppressed unless **both** legs are
+  instrumented: with one leg there is no left/right comparison to make, and
+  tinting a leg anyway would read as a directional claim (SPEC §5.5). The
+  figure's `aria-label` is derived from the rig's **actual sensor count**
+  ("Soldier wearing 2 leg sensors streaming live motion data", singular at 1),
+  never a fixed four and never a left/right wording.
   Beside it, **current Injury Risk as the view's single hero figure**: ≥48px
   semibold sans, risk-band tint, band word, trend arrow vs 5 min ago.
   Below the pair: a one-liner. Demo posture (2026-08-05): "Computed live from every
@@ -350,7 +398,10 @@ UI's 20 s hard cap above is the belt-and-braces on top of that.
 
 Phone-style icon + percentage, **top-right** of the overview card and the detail header.
 Source: `soc` on `GET /api/devices`, which is already the **minimum across the device's two
-leg MCUs** — a flat unit must not hide behind a healthy one. Amber ≤20%, red + a slow pulse
+leg MCUs** — a flat unit must not hide behind a healthy one. The tooltip names that source, and
+**since 2026-09-23 it is rig-aware**: "lowest of the two leg sensors" for a bilateral unit,
+"sleeve" for one knee sleeve, "lowest of the two sleeves" for a paired rig — the reading means
+something different in each case, and a single sleeve has nothing to be the lowest of. Amber ≤20%, red + a slow pulse
 ≤10%; at ≤10% a bolt glyph also appears inside the shell. **`null` renders nothing at all**, never 0%: the SD-log decode path synthesises 0, so a
 zero would be indistinguishable from "no reading yet".
 
@@ -367,10 +418,15 @@ the calibration story's only surface, SPEC §10):
 | `no_shank` | impact falls back to all limbs | warning |
 | `carried_over` | calibrated from a previous session | info |
 | `warming_up` | `m4`/`m5` inside 60 s / 30 s warm-up — a value **is** coming | muted |
+| `one_leg` | **added 2026-09-23**: the rig instruments one leg only (a single knee sleeve, or one whose leg is not set yet). Chip label "one leg", hint "One leg instrumented - balance needs both legs". Structural, **not** a fault — `m1`..`m4` are unaffected and only `m5` is impossible, so it must read calmer than `degraded_sensors`, never as an alert | muted |
 | `unvalidated` | **not rendered** (demo posture 2026-08-05, `HIDDEN_FLAGS` in `metrics.ts`); still on the wire per SPEC §11.1 | — |
 
 `warming_up` and `degraded_sensors` must never look alike: muted grey chip + greyed
-panel vs alert chip + explicit "no data from <limb>". The uncalibrated→calibrated
+panel vs alert chip + explicit "no data from <limb>". **The same holds for `one_leg`
+(2026-09-23):** on a one-leg rig the `m5` panel is greyed with the muted "one leg" reason, and
+`one_leg` outranks every other reason **for `m5` only** — `m1`..`m4` keep their own reasons, so
+`m4` still reads "warming up" while it learns this soldier's baseline. The `m5` reason order is
+`one_leg`, `degraded_sensors`, `partial`, `saturated`, `warming_up`. The uncalibrated→calibrated
 transition is a visible step in `m4`/`m5`: when `uncalibrated`/`carried_over` clears,
 show a muted "calibrated ✓" chip for ~10 s — a system event, not a change in the
 athlete. ⚠️ **NOT YET IMPLEMENTED** — `FlagChips` renders only flags that are currently
@@ -529,6 +585,18 @@ checks PASS (lightness band, chroma, CVD ΔE worst adjacent 8.4, normal-vision
   marks a missing value and " | " is the separator ("Injury risk | now", "Alerts | 30 min").
   The backend's own advice text is deliberately untouched, so a real device's cards keep the
   backend wording; demo soldiers (§14) are worded on the frontend.
+- **Never state a sensor count the rig does not have** (2026-09-23). The hero strip no longer
+  opens with a count at all: the eyebrow reads `Lower-limb telemetry | thigh and shin sensors |
+  live` and the paragraph opens "Sensors on each soldier's thighs and shins stream motion
+  hundreds of times a second" (both were "4 sensors" / "Four sensors" until sleeves existed, and a squad can now mix
+  two-sensor and four-sensor rigs). Per-soldier lines say what **that** rig carries (§4), and
+  the STAGE4 R1 literal survives verbatim wherever the rig really is a four-sensor bilateral
+  unit — including every demo soldier.
+- **Never claim a leg the operator has not set** (2026-09-23). An unassigned sleeve reads
+  `side not set`; the UI does not infer left or right from the wire, does not tint a leg on a
+  one-leg rig, and `one_leg` copy says what is missing ("balance needs both legs") rather than
+  anything about the soldier — the SPEC §5.5 ban on directional claims applies with full force
+  here, where exactly one leg is being measured.
 
 ## 12. Accessibility & responsive — SET
 
@@ -562,6 +630,9 @@ checks PASS (lightness band, chroma, CVD ΔE worst adjacent 8.4, normal-vision
 | Insights tab (the advice timeline) | `GET /api/insights/timeline` **+** `GET /api/insights?device&limit=100` (evidence join on `(rule_id, created_at)`) | 10 s poll (`POLL_ADVICE_MS`) |
 | Adopt/Override buttons on a card | `POST /api/insights/decisions`, then invalidate the timeline query | on press |
 | rename | `PATCH /api/devices/:id` | on action |
+| **sensor summary wording, battery tooltip, instrumented legs, sleeve controls** (2026-09-23) | `kind`, `units[]` and `sensors[].unit_id` on the **same** `GET /api/devices` — no extra request | with the registry poll |
+| **the pair picker's list of sleeves** | `GET /api/units` | when `Pair with...` is opened |
+| **leg / full-scale change, pair, unpair** | `PATCH /api/units/:id`, `POST /api/units/:host/pair`, `POST /api/units/:id/unpair`, then invalidate `devices`, `units` and both rigs' `windows` / `history` / `forecasts` / `insights` / `advice-timeline` | on action |
 | auth | `POST /api/auth/login|logout`, `GET /api/auth/me` | on action |
 
 Evidence rendering (`lib/evidence.ts`) owns the expander contract: which `context` keys are
@@ -575,6 +646,11 @@ calibration badge's re-arm threshold — it hides nothing), `POLL_ADVICE_MS = 10
 `RENDER_DELAY_S`), the WS set (`WS_BACKOFF_MIN_MS`/`MAX_MS`, `WS_CLOSE_UNAUTHORIZED`), poll intervals
 above, metric map (`lib/metrics.ts` — SPEC §9 names/tooltips + §8 colors). Window
 and horizon labels are always generated from config strings — never hardcoded.
+Added 2026-09-23: `SENSOR_SUMMARY_TEXT` (the R1 literal) is joined by
+`LOGGING_RATE_TEXT = '6400Hz logging'`, which the sleeve variants are built from, and by
+`ACCEL_FS_ALLOWED_G` / `GYRO_FS_ALLOWED_DPS` (the segmented groups' options, mirroring the
+backend's allowed sets). All rig-dependent user-facing strings live in `RIG_COPY`
+(`lib/rig.ts`), which the copy-rules test walks.
 
 ## 14. Demo soldiers — SET (2026-09-12, STAGE4 R2)
 
@@ -608,6 +684,10 @@ synthetic in the address bar: `/device/demo-1` … `/device/demo-5`.
 - **Controls look live, change nothing**: rename snaps back to the scripted name (no cache
   write, no PATCH); Adopt / Override close their form and the card stays undecided (no POST).
   No calibration badge ever arms (`cal` is always null).
+- **Demo soldiers stay bilateral** (2026-09-23, user decision L): they carry no `kind` or
+  `units`, so they read as four-sensor bilateral rigs everywhere, keep the STAGE4 R1 summary
+  literal verbatim, and never render the sleeve controls. The four unit helpers short-circuit on
+  a `demo-` id exactly like the others, so the network still never learns a demo soldier exists.
 - Unit tests (`npm test`, vitest) pin determinism, ranges, exact buffer windows, the
   timeline/event-log join, backend parity of the grouping, the scripted stories, and zero
   fetch calls for demo ids. See `docs/tasks/STAGE4.md` for the plan and as-built notes.

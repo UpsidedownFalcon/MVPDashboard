@@ -2,8 +2,9 @@
 
 | | |
 |---|---|
-| Status | Set in stone as the build order (revised 2026-08-02: staged, biomech-first, task-granular). |
-| Task detail | [tasks/STAGE1.md](tasks/STAGE1.md) · [tasks/STAGE2.md](tasks/STAGE2.md) · [tasks/STAGE3.md](tasks/STAGE3.md) |
+| Status | Set in stone as the build order (revised 2026-08-02: staged, biomech-first, task-granular). All three stages shipped; work since then is tracked per change-set, not as new stages. |
+| Task detail | [tasks/STAGE1.md](tasks/STAGE1.md) · [tasks/STAGE2.md](tasks/STAGE2.md) · [tasks/STAGE3.md](tasks/STAGE3.md) · [tasks/STAGE4.md](tasks/STAGE4.md) (demo frontend + military theme, 2026-09-12) |
+| **Current work** | **Unilateral knee sleeves** — plan of record [`PLAN_unilateral_devices.md`](../PLAN_unilateral_devices.md) (approved 2026-09-23, shipped in six work packages: common, ingest, api, simulator, frontend, docs). A second wearable kind on the same UDP port, dashboard-driven pairing, side and per-sleeve IMU full scale. It touches the stable interfaces and config keys below, so read TRD §3/§4/§7 and BACKEND_SCHEMA §1/§3/§4/§5 before changing anything near them. |
 | Related | [PLAN.md](PLAN.md) · [TRD.md](TRD.md) · [BACKEND_SCHEMA.md](BACKEND_SCHEMA.md) |
 
 ## The three stages (user-mandated order)
@@ -111,7 +112,13 @@ MVPDashboard/
                 routes/(auth devices metrics forecasts insights health)
                 jobs/(predict.py insights.py)  seed_users.py
     migrations/ 001_init.sql  002_insight_actions.sql
-                003_insight_action_grouping.sql  migrate.py
+                003_insight_action_grouping.sql  004_insight_decisions.sql
+                005_sleeve_units.sql  migrate.py
+                (the runner applies them in filename order and records each in
+                 schema_migrations; BACKEND_SCHEMA §1 carries the merged schema
+                 and one paragraph per migration. 004 shipped 2026-08-07 with
+                 Adopt/Override, 005 on 2026-09-23 with knee sleeves — this list
+                 stopped at 003 until then)
     tests/
   frontend/     (stage 2: crude → stage 3: product UI)
 ```

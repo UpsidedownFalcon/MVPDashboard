@@ -7,6 +7,7 @@ state (pool / stub redis / settings) — no hub, no writer, no lifespan.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from fnmatch import fnmatch
 
 import asyncpg
 import pytest
@@ -20,21 +21,49 @@ from migrations.migrate import dsn
 
 
 class StubRedis:
-    """Just enough of redis.asyncio for queries.py (bytes, like the real one)."""
+    """Just enough of redis.asyncio for queries.py and the unit mirror.
+
+    Reads answer in BYTES like the real client; writes land in `kv` as the str
+    or bytes the caller passed, and every `unit_cfg` publish is recorded so a
+    test can assert ingest was told (api/unit_mirror.py).
+    """
 
     def __init__(self, kv: dict[str, str] | None = None,
                  stats: dict[str, str] | None = None) -> None:
         self.kv = kv or {}
         self.stats = stats or {}
+        self.published: list[tuple[str, str]] = []
 
     async def get(self, key: str):
         v = self.kv.get(key)
-        return v.encode() if v is not None else None
+        if v is None:
+            return None
+        return v if isinstance(v, bytes) else str(v).encode()
 
     async def hgetall(self, key: str):
         if key != "ingest:stats":
             return {}
         return {k.encode(): v.encode() for k, v in self.stats.items()}
+
+    async def set(self, key: str, value, **kwargs) -> bool:
+        self.kv[key] = value
+        return True
+
+    async def publish(self, channel: str, message) -> int:
+        if isinstance(message, (bytes, bytearray)):
+            message = message.decode()
+        self.published.append((channel, message))
+        return 1
+
+    def keys_matching(self, pattern: str) -> list[str]:
+        return sorted(k for k in self.kv if fnmatch(k, pattern))
+
+    async def keys(self, pattern: str = "*") -> list[bytes]:
+        return [k.encode() for k in self.keys_matching(pattern)]
+
+    async def scan_iter(self, match: str = "*", **kwargs):
+        for key in self.keys_matching(match):
+            yield key.encode()
 
 
 @pytest.fixture()
@@ -207,9 +236,12 @@ async def test_devices_merge_and_rename(api_app) -> None:
     assert devs["30"]["quality"] == pytest.approx(0.97)
     assert devs["30"]["sensors"] == [{
         "source_id": 0, "sensor_id": 1, "limb": "left_shin",
+        "unit_id": None,                      # bilateral rig: no sleeve units
         "rate_hz": pytest.approx(600.2),
         "last_seen": devs["30"]["sensors"][0]["last_seen"],
     }]
+    # additive rig fields (schema §3): a bilateral device has no units
+    assert devs["30"]["kind"] == "bilateral" and devs["30"]["units"] == []
     assert devs["31"]["online"] is False and devs["31"]["last_seen"] is None
 
     # rename round-trip

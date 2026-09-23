@@ -49,16 +49,16 @@ async def test_udp_end_to_end_routing():
         sock.sendto(b"junk-wrong-length", ("127.0.0.1", port))
 
         assert await _wait_until(
-            lambda: 30 in registry.devices and 31 in registry.devices
-            and registry.devices[30].sensor(0, 1).stats.recv >= 100
-            and registry.devices[30].sensor(1, 2).stats.recv >= 100
-            and registry.devices[31].sensor(0, 1).stats.recv >= 100
+            lambda: "30" in registry.devices and "31" in registry.devices
+            and registry.devices["30"].sensor(0, 1).stats.recv >= 100
+            and registry.devices["30"].sensor(1, 2).stats.recv >= 100
+            and registry.devices["31"].sensor(0, 1).stats.recv >= 100
             and registry.crc_fail >= 1 and registry.bad_sync >= 1
             and registry.bad_len >= 1
         ), "expected all datagrams routed/counted"
 
         # routed chunks carry the right samples
-        chunks = registry.devices[30].sensor(0, 1).drain_pending()
+        chunks = registry.devices["30"].sensor(0, 1).drain_pending()
         total = sum(len(c.ts_us) for c in chunks)
         assert total == 100
         assert all(c.imu.shape[1] == 6 for c in chunks)
@@ -84,6 +84,6 @@ def test_registry_rate_update():
     batch = packet.decode([_payload(30, 0, 1, ts) for ts in range(600)])
     registry.route(batch, recv_time=100.0)
     registry.update_rates(1.0)
-    assert registry.devices[30].sensor(0, 1).stats.rate_hz == 600.0
+    assert registry.devices["30"].sensor(0, 1).stats.rate_hz == 600.0
     registry.update_rates(1.0)
-    assert registry.devices[30].sensor(0, 1).stats.rate_hz == 0.0
+    assert registry.devices["30"].sensor(0, 1).stats.rate_hz == 0.0
