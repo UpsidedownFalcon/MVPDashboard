@@ -24,14 +24,14 @@ Everything favors simplicity, stubs with stable interfaces, and configuration ov
 > plan of record:
 > - **2026-09-12 — demo frontend, military theme, plain dashes**: [tasks/STAGE4.md](tasks/STAGE4.md).
 > - **2026-09-23 — unilateral knee sleeves**:
->   [`../PLAN_unilateral_devices.md`](../PLAN_unilateral_devices.md). A **second wearable kind**
+>   [`../agent-docs/01_PLAN_unilateral_devices.md`](../agent-docs/01_PLAN_unilateral_devices.md). A **second wearable kind**
 >   on the same UDP port — one MCU on one leg, sync byte 0xA6 — with dashboard-driven pairing,
 >   side and per-sleeve IMU full scale. It introduces the **rig** as the thing everything
 >   downstream is keyed by (TRD §4), the first api → ingest Redis key (BACKEND_SCHEMA §4),
 >   migration 005, four `/api/units*` routes and the `one_leg` flag. The "confirmed facts" below
 >   describe the **bilateral** wearable and still hold for it; TRD §3 carries both kinds.
 > - **2026-09-23 — sleeve storage (CURRENT)**:
->   [`../PLAN_msd_management.md`](../PLAN_msd_management.md). A **"Sleeve storage" page**
+>   [`../agent-docs/02_PLAN_msd_management.md`](../agent-docs/02_PLAN_msd_management.md). A **"Sleeve storage" page**
 >   (`/storage`, UIUX §15) that opens a plugged-in sleeve's HIPPOSDATA USB drive in Chrome/Edge
 >   through the File System Access API: it edits the sleeve's `CONFIG.TXT` exactly as the
 >   firmware parses it and transfers its `LOG_NNNN` files to the PC, deleting each from the

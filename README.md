@@ -13,16 +13,21 @@ biomech, public VPS deployment with intelligence, and the designed product front
 with login. Live at `https://<your-domain>`; the only stage-3 item still open is the
 S3-T08 acceptance run. Since then: the demo frontend and military theme
 (2026-09-12, [docs/tasks/STAGE4.md](docs/tasks/STAGE4.md)) and **unilateral
-knee-sleeve support** (2026-09-23, [PLAN_unilateral_devices.md](PLAN_unilateral_devices.md)) —
+knee-sleeve support** (2026-09-23, [PLAN_unilateral_devices.md](agent-docs/01_PLAN_unilateral_devices.md)) —
 a second wearable kind on the same UDP port, with dashboard-driven pairing, side
 and per-sleeve IMU full scale (see “Unilateral knee sleeves” below); and
 **2026-09-23: sleeve storage** (USB drive management —
-[PLAN_msd_management.md](PLAN_msd_management.md)): the dashboard edits a plugged-in
+[PLAN_msd_management.md](agent-docs/02_PLAN_msd_management.md)): the dashboard edits a plugged-in
 sleeve's `CONFIG.TXT` and transfers its logs with verified copies (see "Sleeve
 storage (USB)" below).
 
 **Start here: read [docs/PLAN.md](docs/PLAN.md) first.** It anchors the full doc
 suite (TRD, backend schema, app flow, implementation plan, and per-stage task lists).
+
+Working on this repo with an AI coding agent? Start at
+[agent-docs/README.md](agent-docs/README.md): the project context and every plan of
+record live there, numbered in the order the work was done. The root `AGENTS.md` and
+`CLAUDE.md` are pointers that load it automatically.
 
 ## Quickstart (full local stack)
 
@@ -218,7 +223,7 @@ counting and `global:bad_sync` should stay flat.
 ### Sleeve storage (USB)
 
 Since 2026-09-23 the dashboard manages a sleeve's SD card directly
-([PLAN_msd_management.md](PLAN_msd_management.md); UI spec in
+([PLAN_msd_management.md](agent-docs/02_PLAN_msd_management.md); UI spec in
 [docs/UIUX.md](docs/UIUX.md) §15). Plug the sleeve into the PC running the
 browser, open **Sleeve storage** (sidebar, under Command; route `/storage`),
 press `Open sleeve drive` and pick the **HIPPOSDATA** drive itself (the page
@@ -264,7 +269,7 @@ Requirements and rules:
   the sleeve appear as a **new** soldier; pairing, leg and history stay with
   the old id.
 - Change-set 2 (a CSV and a plain-text summary per transferred log) is planned,
-  not built: [PLAN_msd_management.md](PLAN_msd_management.md) §5.
+  not built: [PLAN_msd_management.md](agent-docs/02_PLAN_msd_management.md) §5.
 
 **Dry run without a sleeve**: `cd frontend; npm run dev`, then pick any local
 folder holding copies of `CONFIG.TXT` and some `LOG_NNNN.{BIN,TXT}` — for
@@ -398,6 +403,16 @@ is on; the sleeve joins the same network.
   Don't rebuild the ingest container mid-session — that is what wedges the port.
 - The api service is bound to `127.0.0.1:8000` on purpose (stage 1 is
   local-only); nothing except the UDP port is reachable from the LAN.
+
+## Deploying to the VPS
+
+Production is one Ubuntu VPS running this compose stack behind Caddy; a release
+is `git pull` + `docker compose up -d --build` on the box, wrapped by
+`deploy/deploy.sh`. The step-by-step guide, first-time provisioning, the
+production `.env` checklist, post-deploy checks and rollback are in
+[deploy/deploy.md](deploy/deploy.md). Read it before running either script:
+`provision.sh` resets the firewall and `deploy.sh` rebuilds production without
+asking.
 
 ## Configuration
 
