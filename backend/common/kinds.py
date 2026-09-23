@@ -99,6 +99,19 @@ def is_unit_id(text: str) -> bool:
     return parse_unit_id(text) is not None
 
 
+def side_for_source(source_id: int) -> str:
+    """The leg a sleeve's wire source_id implies: 0 = left, 1 = right.
+
+    The sleeve's CONFIG.TXT `source_id` is set by the person fitting it, so it
+    is the best default the dashboard has (PLAN_msd_management decision H,
+    2026-09-23, amending PLAN_unilateral decision G); an operator may still
+    override or clear it per unit. Raises ValueError outside 0/1.
+    """
+    if source_id not in (0, 1):
+        raise ValueError(f"source_id must be 0 (left) or 1 (right), got {source_id!r}")
+    return SIDES[source_id]
+
+
 def rig_kind(rig_id: str) -> str:
     """'unilateral' for a sleeve rig (unit-id shaped), else 'bilateral'.
 
@@ -119,9 +132,11 @@ UNIT_CONFIG_VERSION = 1
 class UnitConfig:
     """Dashboard-owned settings of one sleeve, mirrored api -> Redis -> ingest.
 
-    `rig_id == unit_id` means unpaired. `side is None` means the operator has
-    not set it yet (decision G): the unit then streams side-less limbs
-    ("thigh", "shin") that biomech treats as neither left nor right.
+    `rig_id == unit_id` means unpaired. `side` defaults to the leg the wire
+    source_id implies (`side_for_source`, decision H) and may be overridden
+    per unit; `side is None` means an operator has CLEARED it: the unit then
+    streams side-less limbs ("thigh", "shin") that biomech treats as neither
+    left nor right.
     """
 
     unit_id: str
@@ -132,7 +147,16 @@ class UnitConfig:
 
     @classmethod
     def default(cls, unit: str, accel_fs_g: int, gyro_fs_dps: int) -> "UnitConfig":
-        return cls(unit_id=unit, rig_id=unit, side=None,
+        """An unconfigured sleeve: its own rig, the side of its wire source_id.
+
+        This must equal the row `api.unit_mirror.register_units` inserts, or
+        the mirror publish would hard-reset a brand-new sleeve's rig two
+        seconds after ingest built it on this default. `side` is None only
+        when `unit` is not a well-formed unit id.
+        """
+        wire = parse_unit_id(unit)
+        side = side_for_source(wire[1]) if wire is not None else None
+        return cls(unit_id=unit, rig_id=unit, side=side,
                    accel_fs_g=accel_fs_g, gyro_fs_dps=gyro_fs_dps)
 
     @property

@@ -88,7 +88,7 @@ def test_format_duration_rejects_subsecond_and_nonpositive() -> None:
 def clean_env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
     """Strip every TRD §7 env var so tests see pure defaults."""
     for key in (
-        "DOMAIN", "UDP_PORT", "API_PORT", "POSTGRES_HOST", "POSTGRES_PORT",
+        "DOMAIN", "UDP_PORT", "UDP_PUBLIC_IP", "API_PORT", "POSTGRES_HOST", "POSTGRES_PORT",
         "POSTGRES_DB", "POSTGRES_USER", "POSTGRES_PASSWORD", "REDIS_URL",
         "JWT_SECRET", "JWT_EXPIRE_HOURS", "SEED_USERS", "EXPECTED_INPUT_HZ",
         "OUTPUT_HZ", "LIMB_MAP", "JITTER_BUFFER_MS", "OFFLINE_AFTER_S",
@@ -105,6 +105,7 @@ def test_defaults_load_without_env_file(clean_env: pytest.MonkeyPatch) -> None:
     s = Settings(_env_file=None)
     assert s.domain == "dash.example.com"
     assert s.udp_port == 5005
+    assert s.udp_public_ip == ""       # blank = resolve DOMAIN (decision G)
     assert s.api_port == 8000
     assert s.redis_url == "redis://redis:6379/0"
     assert s.expected_input_hz == 640
@@ -176,6 +177,22 @@ def test_bad_unilateral_settings_fail_at_load(
 ) -> None:
     clean_env.setenv(key, value)
     with pytest.raises(ValueError, match=match):
+        Settings(_env_file=None)
+
+
+@pytest.mark.parametrize("value", ["203.0.113.7", "10.0.0.1", " 192.0.2.44 "])
+def test_udp_public_ip_accepts_ipv4(clean_env: pytest.MonkeyPatch, value: str) -> None:
+    clean_env.setenv("UDP_PUBLIC_IP", value)
+    assert Settings(_env_file=None).udp_public_ip == value.strip()
+
+
+@pytest.mark.parametrize("junk", ["garbage", "dash.example.com", "1.2.3", "256.1.1.1",
+                                  "2001:db8::1", "203.0.113.7:5005"])
+def test_udp_public_ip_rejects_non_ipv4(clean_env: pytest.MonkeyPatch, junk: str) -> None:
+    """A bad value would be handed to every sleeve as its stream target, and the
+    firmware does not validate udp_ip -- so it must fail at load (decision G)."""
+    clean_env.setenv("UDP_PUBLIC_IP", junk)
+    with pytest.raises(ValueError, match="IPv4"):
         Settings(_env_file=None)
 
 

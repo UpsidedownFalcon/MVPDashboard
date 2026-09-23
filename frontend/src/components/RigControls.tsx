@@ -19,11 +19,15 @@ import { CircleDashed, Link2, SlidersHorizontal, Unlink } from 'lucide-react'
 import { useState, type MouseEvent } from 'react'
 import { ApiError, fetchUnits, pairUnit, patchUnit, unpairUnit, type Unit } from '../lib/api'
 import { ACCEL_FS_ALLOWED_G, GYRO_FS_ALLOWED_DPS } from '../lib/config'
-import { fullScaleText, RIG_COPY, sideLabel, SIDES, type RigDevice, type Side } from '../lib/rig'
-
-/** Per-rig caches that a pairing, side or full-scale change invalidates: the
- *  backend resets the biomech session, so every stored view of it is stale. */
-const RIG_QUERY_KEYS = ['windows', 'history', 'forecasts', 'insights', 'advice-timeline'] as const
+import {
+  fullScaleText,
+  RIG_COPY,
+  RIG_QUERY_KEYS,
+  sideLabel,
+  SIDES,
+  type RigDevice,
+  type Side,
+} from '../lib/rig'
 
 /** The header sits inside click-through surfaces elsewhere; keep every press
  *  local, exactly as RenameInline does. */

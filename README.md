@@ -15,7 +15,11 @@ S3-T08 acceptance run. Since then: the demo frontend and military theme
 (2026-09-12, [docs/tasks/STAGE4.md](docs/tasks/STAGE4.md)) and **unilateral
 knee-sleeve support** (2026-09-23, [PLAN_unilateral_devices.md](PLAN_unilateral_devices.md)) —
 a second wearable kind on the same UDP port, with dashboard-driven pairing, side
-and per-sleeve IMU full scale (see “Unilateral knee sleeves” below).
+and per-sleeve IMU full scale (see “Unilateral knee sleeves” below); and
+**2026-09-23: sleeve storage** (USB drive management —
+[PLAN_msd_management.md](PLAN_msd_management.md)): the dashboard edits a plugged-in
+sleeve's `CONFIG.TXT` and transfers its logs with verified copies (see "Sleeve
+storage (USB)" below).
 
 **Start here: read [docs/PLAN.md](docs/PLAN.md) first.** It anchors the full doc
 suite (TRD, backend schema, app flow, implementation plan, and per-stage task lists).
@@ -113,7 +117,9 @@ netsh advfirewall firewall add rule name="MVPDash UDP 5005" dir=in action=allow 
 ```
 
 Find your LAN IP with `ipconfig` (Wi-Fi/Ethernet IPv4 address). Devices
-auto-register on their first packet and appear on `/debug` within seconds.
+auto-register on their first packet and appear on `/debug` within seconds. For
+a knee sleeve, the step-by-step loop is "Local end-to-end test with one sleeve"
+below.
 
 ### Unilateral knee sleeves
 
@@ -125,17 +131,29 @@ instead of the bilateral unit's 0xA5. Sensor 1 is the **thigh**, sensor 2 the
 `u<device_id>-<source_id>` (e.g. `u31-0`), and a **rig** is what the dashboard
 shows as one soldier: a bilateral unit, a single sleeve, or two sleeves paired.
 
-**On the sleeve — `CONFIG.TXT` on its SD card** (edit it over USB, then unplug
-the cable; the device re-reads the file and starts a fresh session):
+**On the sleeve — `CONFIG.TXT` on its SD card.** Since 2026-09-23 the dashboard
+edits it for you: plug the sleeve in and open **Sleeve storage** (see "Sleeve
+storage (USB)" below). Any text editor still works over USB. Either way, **eject
+the drive, then unplug the cable**: the sleeve re-reads the file about 2 s after
+unplugging and starts a fresh session (a WiFi change also needs a power cycle).
 
 ```
-udp_ip=192.168.1.100     # the machine running ingest
-udp_port=5005            # MUST equal UDP_PORT in .env — the firmware default is 5050
+# the machine running ingest
+udp_ip=192.168.1.100
+# MUST equal UDP_PORT in .env; the firmware default is 5050
+udp_port=5005
 device_id=31
+# 0 = left leg, 1 = right leg: the dashboard seeds the sleeve's leg from this
 source_id=0
-accel_fs_g=32            # 2, 4, 8, 16 or 32
-gyro_fs_dps=4000         # 125, 250, 500, 1000, 2000 or 4000
+# 2, 4, 8, 16 or 32
+accel_fs_g=32
+# 125, 250, 500, 1000, 2000 or 4000
+gyro_fs_dps=4000
 ```
+
+Comments must be **whole lines**: the firmware does not strip a trailing `# ...`
+from a value, so an inline comment on `udp_ip` silently disables streaming, and a
+leading zero makes a number octal. The Sleeve storage page writes neither.
 
 `(device_id, source_id)` is a sleeve's whole identity on the wire, so **give
 every sleeve in a session its own pair**: two sleeves sharing both values are
@@ -145,9 +163,12 @@ collide with bilateral ones — the `u` prefix namespaces them.
 **In the dashboard** — the sleeve controls sit in the device-detail header and
 appear for sleeve rigs only:
 
-1. **Set the leg.** A new sleeve has no side, and its summary reads
-   `2 sensors | side not set | 6400Hz logging`. Pick Left or Right — the
-   dashboard never guesses.
+1. **Check the leg.** Since 2026-09-23 a new sleeve arrives with the leg its
+   own `source_id` says (0 = left, 1 = right — set on the card or in Sleeve
+   storage), and its summary reads `2 sensors | one leg | 6400Hz logging`.
+   Change it here if the sleeve is worn on the other leg, or clear it (then
+   `side not set`). The dashboard never guesses beyond what the sleeve itself
+   declares.
 2. **Set the full scale** if it differs from the firmware defaults
    (`+-32 g | +-4000 dps`). The datagram carries **no** scale, so this is
    configuration the dashboard owns; a wrong value scales every metric on that
@@ -194,6 +215,154 @@ sleeves only.
 Check it arrived: `GET /api/health` → `ingest.global:recv:unilateral` should be
 counting and `global:bad_sync` should stay flat.
 
+### Sleeve storage (USB)
+
+Since 2026-09-23 the dashboard manages a sleeve's SD card directly
+([PLAN_msd_management.md](PLAN_msd_management.md); UI spec in
+[docs/UIUX.md](docs/UIUX.md) §15). Plug the sleeve into the PC running the
+browser, open **Sleeve storage** (sidebar, under Command; route `/storage`),
+press `Open sleeve drive` and pick the **HIPPOSDATA** drive itself (the page
+checks that it holds `CONFIG.TXT`). The page then:
+
+- **edits `CONFIG.TXT`** exactly as the firmware parses it: a basic view (WiFi
+  network and password, sleeve number, Left/Right leg, diagnostics log,
+  streaming), a read-only "Streams to ip:port (this dashboard / not this
+  dashboard)" line with a one-click `Point at this dashboard`, and a
+  warning-gated Advanced view (`udp_ip`/`udp_port`, low-battery stop, IMU full
+  scales, WiFi transmit power, battery calibration). Only the values you
+  changed are rewritten, the file is read back and verified, and leading-zero
+  numbers (octal to the firmware), duplicate keys and a byte-order mark are
+  surfaced and repaired on save;
+- **transfers `LOG_NNNN.BIN` / `.TXT`** to a folder you pick once, as
+  `<folder>/sleeve-u<dev>-<src>/raw/LOG_NNNN.BIN` (the sleeve identity recorded
+  in each file), and **deletes each file from the sleeve only after its copy
+  verified** (the local copy is re-read: length, CRC32 and an identical block
+  scan; blocks the scan called bad are re-read from the card byte for byte).
+  Tick `Keep copies on the sleeve` to skip the delete. A failure, a cancel or
+  an unplug mid-copy never deletes and never leaves a partial copy; a file
+  already at the destination with the same CRC reads "Already transferred".
+  `CONFIG.TXT` can never be listed, transferred or deleted.
+
+Requirements and rules:
+
+- **Chrome or Edge on a secure address** (`https://<your-domain>` or
+  `http://localhost`, e.g. `npm run dev`): the page uses the File System Access
+  API. Firefox, Safari and a plain-http LAN address show an "unsupported"
+  message instead. The drive and destination handles are remembered; after a
+  reload press `Reconnect` once (Chrome 122+ offers "Allow on every visit",
+  after which it is automatic).
+- **Eject, then unplug.** A host eject does not end the sleeve's session; the
+  sleeve re-reads `CONFIG.TXT` about 2 s after the cable comes out and starts a
+  new session. WiFi network or password changes also need a power cycle. The
+  page says so after every save.
+- **Speed**: the sleeve's USB link is full-speed, about 1 MB/s, so a 512 MB log
+  takes about 9 minutes; the page shows rate and ETA and asks you not to unplug
+  while a transfer runs.
+- After a save that changed `accel_fs_g` / `gyro_fs_dps`, the dashboard's own
+  record for that sleeve (`PATCH /api/units/u<dev>-<src>`) is updated to match
+  and that soldier's session resets. Changing the sleeve number or leg makes
+  the sleeve appear as a **new** soldier; pairing, leg and history stay with
+  the old id.
+- Change-set 2 (a CSV and a plain-text summary per transferred log) is planned,
+  not built: [PLAN_msd_management.md](PLAN_msd_management.md) §5.
+
+**Dry run without a sleeve**: `cd frontend; npm run dev`, then pick any local
+folder holding copies of `CONFIG.TXT` and some `LOG_NNNN.{BIN,TXT}` — for
+instance `frontend/src/lib/storage/fixtures/config_generated_1_2_0.txt` saved as
+`CONFIG.TXT` and `LOG_0010.head64.bin` saved as `LOG_0010.BIN`. Then verify
+with a real sleeve:
+
+1. the picker offers the drive root and `Open sleeve drive` accepts it;
+2. change a value, save, eject, unplug: the next `LOG_NNNN.TXT` on the card
+   shows the new values on its `# cfg:` line;
+3. transfer a 512 MB file and time it (about 9 min); re-plug and confirm it is
+   gone from the card and present under `sleeve-u<dev>-<src>/raw/`;
+4. unplug mid-copy: the card is intact, nothing was deleted, and no partial
+   copy remains in the destination.
+
+### Local end-to-end test with one sleeve
+
+The full loop on a dev laptop: configure a sleeve from the dashboard, watch it
+stream over the office Wi-Fi, then pull its logs. Written from the 2026-09-23
+walk-through. Replace `<laptop-ip>` with the laptop's Wi-Fi IPv4 from `ipconfig`
+(DHCP can change it between days) and `<your-wifi>` with the network the laptop
+is on; the sleeve joins the same network.
+
+1. **Tell the dashboard its own address.** In `.env`, under `UDP_PORT`, add
+   `UDP_PUBLIC_IP=<laptop-ip>`. The page's `Point at this dashboard` button
+   fills that address in; without it the api resolves `DOMAIN`, which is not
+   your laptop.
+2. **Allow inbound UDP 5005** once, with the firewall rule from
+   "Real wearables on the LAN" above.
+3. **Start the stack, but keep UDP out of Docker's proxy** (see Gotchas: it has
+   wedged port 5005 on this machine before). Ignore Caddy's certificate errors
+   for `DOMAIN` in the logs; the plain `http://:80` site still serves.
+
+   ```powershell
+   cd MVPDashboard
+   docker compose up -d --build          # first build takes a few minutes
+   docker compose stop ingest
+   ```
+
+   In a second window, run ingest natively and leave it open (it reads the
+   same `.env`, binds UDP 5005 on the laptop, and uses the Redis the `debug`
+   profile exposes):
+
+   ```powershell
+   cd MVPDashboard\backend
+   $env:REDIS_URL = 'redis://127.0.0.1:6379/0'
+   uv run python -m ingest.main
+   ```
+
+4. **Open Chrome at `http://localhost`** and sign in with an account from
+   `SEED_USERS`. Localhost is a secure context, so the drive picker works.
+5. **Plug the sleeve in.** Within a couple of seconds the LED pulses blue and a
+   `HIPPOSDATA` drive appears in Explorer.
+6. **Configure it from the page.** Sidebar: Command, `Sleeve storage`, then
+   `Open sleeve drive`; in the picker choose the HIPPOSDATA drive itself (its
+   root, e.g. `E:\`), not a folder inside it; accept "Allow on every visit" if
+   offered. Fill in WiFi network `<your-wifi>` and its password, Sleeve number
+   `1`, Leg `Left`, both checkboxes on. The UDP row reads
+   `Streams to 192.168.1.100:5050 (not this dashboard)` on a factory card; click
+   `Point at this dashboard` and it becomes `<laptop-ip>:5005 (this dashboard)`.
+   `Save to sleeve`: a `CONFIG.TXT.crswap` shows briefly on the drive, then the
+   green "Saved" panel. Notepad shows only those values changed.
+7. **Eject, unplug, power-cycle.** Eject in Windows, pull the cable, then switch
+   the sleeve off and on (or RESET): WiFi credentials are read at boot only;
+   every other key would already apply after the unplug.
+8. **Watch the LED**: green pulse is logging without WiFi, blue-green pulse is
+   logging and streaming. Expect blue-green within about ten seconds of boot.
+9. **See it live.** `Unit overview` shows soldier `u1-0` online within a few
+   seconds; its page reads `2 sensors | one leg` with the leg already `Left`.
+   The ingest window shows packets; `docker compose logs api` shows
+   `registered sleeve unit(s): u1-0`.
+
+   If nothing appears after 30 s, check in this order: the laptop is still on
+   `<your-wifi>` with the same IPv4; the network allows client-to-client traffic
+   (guest or isolated networks block it); the firewall rule exists; then prove
+   the ingest path with a synthetic sleeve from a third window:
+
+   ```powershell
+   uv run python simulator/simulate.py --sleeves 1 --target 127.0.0.1:5005 --duration 30
+   ```
+
+   A simulated sleeve that shows up while the real one does not means the
+   problem is on the network side.
+10. **Transfer the logs.** After a few minutes, plug the sleeve back in: logging
+    stops, the drive returns, the page reconnects and lists that session's
+    `LOG_NNNN.BIN` and `.TXT`. `Choose destination folder` (e.g.
+    `C:\Users\<you>\HipposLogs`). First run: tick `Keep copies on the sleeve`,
+    `Transfer selected`, watch Copying, Verifying, then `Copied (kept on sleeve)`
+    at about 1 MB/s; the files land in `HipposLogs\sleeve-u1-0\raw\` with the
+    sizes shown on the drive. Second run with the box unticked: identical files
+    read `Already transferred` and are removed from the sleeve; re-plugging
+    shows an empty log table.
+11. **Two safety checks worth doing once**: pull the cable mid-copy and confirm
+    the card still has the file and the destination has no partial copy; and
+    change a setting again to confirm the next `LOG_NNNN.TXT` header line
+    (`# cfg:`) carries it.
+12. **Stop**: Ctrl+C in the ingest window, then `docker compose stop`.
+
 ### Gotchas
 
 - **Never run the simulator against the production VPS with default IDs.** Its
@@ -234,3 +403,11 @@ counting and `global:bad_sync` should stay flat.
 
 Everything is wired from a single root `.env` (copy [.env.example](.env.example),
 which documents every key). No other config location exists on purpose.
+
+**`UDP_PUBLIC_IP`** (added 2026-09-23, blank by default): the IPv4 the knee
+sleeves should stream to, served by `GET /api/config/udp-target` to the Sleeve
+storage page's "Streams to ... (this dashboard)" line and its `Point at this
+dashboard` button. Blank means the api resolves `DOMAIN` itself (3 s budget,
+cached 60 s); set it explicitly when `DOMAIN` is behind a proxy or CDN, because
+the resolved address would then not be this box. It must be a dotted-quad IPv4
+or the api refuses to start.

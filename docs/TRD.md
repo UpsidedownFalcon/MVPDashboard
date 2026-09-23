@@ -107,7 +107,9 @@ source address** (NAT may rewrite it).
 **Limb mapping — default SET, values CONFIGURABLE** (`LIMB_MAP` in `.env`):
 `(0,1)=left_shin, (0,2)=left_thigh, (1,1)=right_thigh, (1,2)=right_shin`.
 This map applies to **bilateral** units only; a sleeve's limbs come from
-`UNILATERAL_SENSOR_MAP` plus its dashboard-set side (below).
+`UNILATERAL_SENSOR_MAP` plus its side (below) — seeded from the sleeve's own
+`source_id` at registration since 2026-09-23 (0 = left, 1 = right;
+PLAN_msd_management decision H) and changeable or clearable in the dashboard.
 
 **Added 2026-09-23 (user decision) — two wearable kinds share this layout.**
 The 22-byte record above is byte-identical for both; the sync byte is what tells
@@ -120,7 +122,7 @@ is the single source of truth for everything in this block.
 | Sync byte | `0xA5` | `0xA6` (firmware `NYKnicksDataLogger`, decision D13) |
 | Hardware | two leg MCUs, four IMUs | **one MCU on one leg**, two IMUs |
 | `sensor_id` meaning | per `LIMB_MAP` | **1 = thigh, 2 = shin on every source** (`UNILATERAL_SENSOR_MAP`, §7) |
-| Full scale | fixed ±16 g / ±2000 dps (`common/scaling.py`, compile-time) | **configurable per sleeve**: accel {2,4,8,16,32} g, gyro {125,250,500,1000,2000,4000} dps, firmware defaults 32 / 4000. **The datagram carries no scale**, so the receiver must be told it (`.env` seeds it, the dashboard owns it per sleeve) |
+| Full scale | fixed ±16 g / ±2000 dps (`common/scaling.py`, compile-time) | **configurable per sleeve**: accel {2,4,8,16,32} g, gyro {125,250,500,1000,2000,4000} dps, firmware defaults 32 / 4000. **The datagram carries no scale**, so the receiver must be told it (`.env` seeds it, the dashboard owns it per sleeve, and after a `CONFIG.TXT` save in Sleeve storage that changed it the page updates the dashboard's record to match — PLAN_msd_management decision I) |
 | Battery `soc` | one per leg MCU, minimum published | one per sleeve |
 | Port | `UDP_PORT` | `UDP_PORT` too — set `udp_port` in each sleeve's `CONFIG.TXT` (firmware default 5050) |
 
@@ -135,8 +137,9 @@ that pair unique. A **RIG** is what everything downstream is keyed by (§4).
 `source_id` — **left or side-less → 0, right → 1** — so a paired rig presents
 `(0,1),(0,2),(1,1),(1,2)` exactly like a bilateral unit and every per-source
 mechanism (battery, sensor stats, `last_seen:sensor` keys) keeps working
-unchanged. Limb names are `<side>_<segment>` once the side is set
-(`left_thigh`), and the bare segment (`thigh`, `shin`) before that.
+unchanged. Limb names are `<side>_<segment>` while a side is set (`left_thigh` —
+since 2026-09-23 a sleeve arrives with the side its `source_id` implies), and the
+bare segment (`thigh`, `shin`) when an operator has cleared it.
 
 Measured stream rate **~640Hz/sensor** (device decimates from ~6.6kHz); the pre-hardware estimate of 600 is superseded. Ingest never
 assumes the exact rate: it measures per-sensor rate live and computes quality against
@@ -382,6 +385,7 @@ Everything that connects components lives in **one root `.env`** (template:
 |---|---|---|
 | `DOMAIN` | dash.example.com | dashboard hostname (Caddy only; the session cookie is host-only, no Domain attribute) |
 | `UDP_PORT` | 5005 | device ingest. **Local dev may differ** — Docker Desktop on the dev machine wedged both 5005 and 5010 (port shows bound, nothing reaches the container); the local `.env` overrides it and real-device sessions run ingest natively on the host. See README “Gotchas”. The VPS keeps 5005. |
+| `UDP_PUBLIC_IP` | *(blank)* | **Added 2026-09-23 (PLAN_msd_management decision G).** IPv4 the knee sleeves should stream to, served by `GET /api/config/udp-target` (BACKEND_SCHEMA §3) for the dashboard's Sleeve storage page. Blank = the api resolves `DOMAIN` itself (first IPv4 answer, 3 s budget, cached per host for 60 s — unresolved answers included, so a dead resolver is asked once a minute rather than once per page open; `ip` is then `null`, still a 200). Set it explicitly when `DOMAIN` is behind a proxy or CDN, because the resolved address would then not be this box. Validated at load (`ipaddress.IPv4Address`, dotted quad only — the sleeve firmware's `udp_ip` field is 15 bytes, no IPv6) |
 | `API_PORT` | 8000 | internal only (Caddy proxies) |
 | `POSTGRES_*` | db/5432/mvpdash/… | host, port, db, user, password |
 | `REDIS_URL` | redis://redis:6379/0 | |
@@ -407,7 +411,7 @@ Everything that connects components lives in **one root `.env`** (template:
 | `INSIGHT_INTERVAL_S` / `INSIGHT_COOLDOWN_S` | **15 / 120** | tuned as a set with `INSIGHT_LIVE_WINDOW` and `INSIGHT_HOLD_S` — see ANALYTICS §4.6 |
 | `METRICS_RETENTION` | 30d | hypertable retention |
 | `MAX_DEVICES` | 5 | hard cap on concurrently tracked **rigs** (§4: a paired pair of sleeves is one rig, not two); a 6th while all 5 are live is dropped and counted in `ingest:stats/global:dev_dropped`, never merged into another device's stream (biomech SPEC §7.2). Raising it needs an ingest restart |
-| `UNILATERAL_SENSOR_MAP` | `{"1":"thigh","2":"shin"}` | **Added 2026-09-23.** `sensor_id → segment` on a unilateral knee sleeve, JSON with sensor-id keys, parsed like `LIMB_MAP`. Fixed by the sleeve firmware (`SENSOR_ID_IMU0/1`: 1 = top/thigh, 2 = bottom/shin) on **every** source. Segments carry **no side** — the side is set per sleeve in the dashboard — and must be distinct, or ingest would overwrite one limb with the other |
+| `UNILATERAL_SENSOR_MAP` | `{"1":"thigh","2":"shin"}` | **Added 2026-09-23.** `sensor_id → segment` on a unilateral knee sleeve, JSON with sensor-id keys, parsed like `LIMB_MAP`. Fixed by the sleeve firmware (`SENSOR_ID_IMU0/1`: 1 = top/thigh, 2 = bottom/shin) on **every** source. Segments carry **no side** — the side is seeded from the sleeve's own `source_id` at registration and editable or clearable per sleeve in the dashboard (PLAN_msd_management decision H, 2026-09-23) — and must be distinct, or ingest would overwrite one limb with the other |
 | `UNILATERAL_ACCEL_FS_G` | 32 | **Added 2026-09-23.** IMU accelerometer full scale assumed for every **newly seen** sleeve, in g; one of 2, 4, 8, 16, 32 (validated at load, mirrors the firmware's `imu_fs_valid()`). The datagram carries no scale, so this is the seed; the per-sleeve value then lives in `sleeve_units` (BACKEND_SCHEMA §1) and is edited in the dashboard |
 | `UNILATERAL_GYRO_FS_DPS` | 4000 | **Added 2026-09-23.** As above for the gyroscope, in dps; one of 125, 250, 500, 1000, 2000, 4000. Both defaults match the sleeve firmware's own defaults, so an unconfigured sleeve is right out of the box |
 | `POSTGRES_HOST` / `POSTGRES_PORT` | db / 5432 | expanded from the `POSTGRES_*` row above, which listed no per-key defaults |

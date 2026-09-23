@@ -12,6 +12,7 @@ import { LiveProvider } from './lib/ws'
 import Device from './pages/Device'
 import Login from './pages/Login'
 import Overview from './pages/Overview'
+import Storage from './pages/Storage'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -41,6 +42,7 @@ createRoot(document.getElementById('root')!).render(
             >
               <Route path="/" element={<Overview />} />
               <Route path="/device/:id" element={<Device />} />
+              <Route path="/storage" element={<Storage />} />
             </Route>
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>

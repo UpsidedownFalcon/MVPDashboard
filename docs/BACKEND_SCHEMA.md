@@ -5,11 +5,12 @@
 | Status | Set in stone for the MVP build. Metric *names* (`m1..m5`, `composite`) are stable column/field IDs (**5 primitives + 1 composite — confirmed**). Their meanings are now **DECIDED** — [biomech/SPEC.md](biomech/SPEC.md) (S1-T14): `m1` Impact, `m2` Loading Rate, `m3` Accumulated Load, `m4` Movement Control, `m5` L/R Balance, `composite` Injury Risk; all **0–100**, nullable except `composite`. Display names live only in the frontend (SPEC §10). Staged activation: §1 DDL + REST routes from stage 2 (`users` table used from stage 3); §2 tick format and §4 Redis contract from stage 1; auth on routes from stage 3 (until then all routes open — TRD §1.1). |
 | Related | [TRD.md](TRD.md) · [APPFLOW.md](APPFLOW.md) |
 
-## 1. Database DDL (TimescaleDB) — current schema (`001_init.sql` + `002` … `005`)
+## 1. Database DDL (TimescaleDB) — current schema (`001_init.sql` + `002` … `006`)
 
 > The block below is the **merged current schema**, not one file: the `insights` table shows the
 > columns added by migrations 002 and 003 (marked inline), and `insight_decisions` (004) and
-> `sleeve_units` (005) are whole tables added later. Two mechanics are not visible here —
+> `sleeve_units` (005) are whole tables added later; `006` is **data-only** (one `UPDATE` on
+> `sleeve_units.side`, no DDL) and so leaves the block unchanged. Two mechanics are not visible here —
 > `001_init.sql` carries `-- NOTRANSACTION` markers so the continuous-aggregate DDL runs in
 > autocommit (Timescale forbids it inside a transaction), and the runner maintains its own
 > `schema_migrations(filename, applied_at)` bookkeeping table in every database.
@@ -120,7 +121,8 @@ CREATE TABLE sleeve_units (
     wire_device_id SMALLINT NOT NULL,
     wire_source_id SMALLINT NOT NULL,
     rig_id         TEXT NOT NULL,               -- own unit_id when unpaired, host's when paired
-    side           TEXT CHECK (side IN ('left','right')),  -- NULL until an operator sets it
+    side           TEXT CHECK (side IN ('left','right')),  -- seeded from wire_source_id at registration
+                                                           -- (006 / decision H); NULL = cleared by an operator
     accel_fs_g     SMALLINT NOT NULL,           -- seeded from Settings, no DDL default
     gyro_fs_dps    SMALLINT NOT NULL,
     first_seen     TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -162,9 +164,11 @@ invalidating the decision. Served back on `/api/insights/timeline` (§3); writte
 `(device_id, source_id)` and named `u<device_id>-<source_id>` (TRD §3). It holds the three
 things the wire cannot carry: **pairing** (`rig_id` — its own `unit_id` when unpaired, the
 host's when paired, so the host keeps its id and history and the joiner's own rig is hidden
-from `/api/devices` for as long as the pairing lasts), **side** (`NULL` until an operator sets
-it; the API refuses to clear the side of a *paired* unit, because two side-less members of one
-rig would stream the same bare limb names `thigh`/`shin` and silently overwrite each other),
+from `/api/devices` for as long as the pairing lasts), **side** (since 2026-09-23 **seeded from the wire
+`source_id` at registration** — 0 left, 1 right, PLAN_msd_management decision H, `kinds.side_for_source`
+— so a new sleeve arrives with a leg and `NULL` now means an operator *cleared* it; the API refuses
+to clear the side of a *paired* unit, because two side-less members of one rig would stream the
+same bare limb names `thigh`/`shin` and silently overwrite each other),
 and the **IMU full scale** (`accel_fs_g`, `gyro_fs_dps`). The full-scale columns deliberately
 have **no DDL default**: the operational default lives only in `.env`
 (`UNILATERAL_ACCEL_FS_G` / `UNILATERAL_GYRO_FS_DPS`, TRD §7) and is written into the row at
@@ -175,6 +179,19 @@ can precede) the rig row the tick writer auto-registers, and pruning a `devices`
 delete a sleeve's pairing and full scale. `devices` itself is **unchanged** — a rig's kind is
 derived from its id prefix (`u…` = unilateral), never stored. Written by
 `POST/PATCH /api/units*` (§3).
+
+**Migration `006_sleeve_side_backfill.sql`** (2026-09-23, sleeve storage — PLAN_msd_management
+decision H, amending the unilateral plan's decision G): **data only, no DDL.** Registration now
+inserts `side = side_for_source(wire_source_id)` (0 → `left`, 1 → `right`) instead of `NULL`, and
+`kinds.UnitConfig.default()` derives the same side, so the row the api writes still equals the
+default ingest already runs on and registering a new sleeve resets nothing. `NULL` therefore
+changed meaning from "not set yet" to "an operator cleared it". Rows registered under the old
+rule would have read as cleared, so this migration runs one `UPDATE`: every **unpaired** row
+(`rig_id = unit_id`) whose `side IS NULL` gets the side its `wire_source_id` implies, with
+`updated_at = now()`. Paired members and explicitly set sides are untouched (only unpaired rows
+can be `NULL` — the API refuses to clear a paired member's side), `PATCH {"side": null}` still
+works afterwards, and the change is reversible per unit through `PATCH /api/units/{id}`. The api
+mirrors the rewritten rows into `unit:cfg:*` on its next 60 s pass (§4).
 
 Notes: window aggregates and forecasts are **not** columns on `metrics` (different
 cadence/keys/retention — TRD §6). If sub-minute test windows ever need finer
@@ -220,7 +237,7 @@ when no flag is active. The vocabulary is fixed by [biomech/SPEC.md](biomech/SPE
 `metrics` table (the full diagnostic set goes to `biomech:diag:{device_id}`, §4).
 
 **Added 2026-09-23 — `one_leg`.** The rig instruments **one leg only**: a single knee sleeve,
-or one whose side an operator has not set yet (TRD §3/§4). It is **structural, not a fault** —
+or one whose side an operator has cleared (TRD §3/§4). It is **structural, not a fault** —
 `m1`..`m4` are computed normally and only `m5` (L/R balance) is impossible — so it must never
 be confused with `degraded_sensors`, which means a sensor the rig SHOULD have is missing. On a
 one-leg rig `m5` is `null` with `one_leg` as the reason and `degraded_sensors` is deliberately
@@ -282,6 +299,7 @@ All routes require the auth cookie except `POST /api/auth/login`, `POST /api/aut
 | PATCH `/api/units/{unit_id}` | `{"side"?:"left"\|"right"\|null, "accel_fs_g"?:int, "gyro_fs_dps"?:int}` | the updated unit object (same shape as `GET /api/units`). An **absent** field is left alone; `"side": null` clears the side. **404** unknown unit; **422** a full-scale value outside the allowed sets (accel 2/4/8/16/32 g, gyro 125/250/500/1000/2000/4000 dps); **409** that side is already taken by another member of the rig, or `"side": null` on a **paired** unit (both members would then stream the same bare limb names — unpair first) |
 | POST `/api/units/{host}/pair` | `{"unit_id","side","host_side"?}` | the **rig's** device object (the host's). `unit_id` is the JOINER and `side` its leg; `host_side` is required only while the host has no side. **404** either unit unknown; **409** the joiner is the host, either unit is already paired or already hosts a pair, the host rig is full, or both units would be on the same side; **422** the host has no side and none was given |
 | POST `/api/units/{unit_id}/unpair` | — | `{"units":[…]}` — the whole former rig, so the caller can invalidate both rigs' caches. Called on a **member** it releases that one; called on the **host** it releases every member. Sides are **kept** (a released sleeve is a one-leg soldier on the leg it was worn on). **404** unknown unit; **409** called on an unpaired host |
+| GET `/api/config/udp-target` | — | `{"ip":str\|null,"port":int,"source":"env"\|"dns"\|"unresolved"}` — **added 2026-09-23 (PLAN_msd_management decision G)**: the IPv4 and port the knee sleeves should stream to, for the Sleeve storage page's "Streams to a.b.c.d:port (this dashboard / not this dashboard)" line and its "Point at this dashboard" button. `port` is `UDP_PORT`. `ip` is `UDP_PUBLIC_IP` (`source` `"env"`) when set, else the first IPv4 that `DOMAIN` resolves to from the api container (`"dns"`, 3 s budget, **cached per host for 60 s in the api process, unresolved answers included** — a dead resolver costs one lookup a minute, not one per page open); **`null` with `"unresolved"` — still 200, never a 5xx — when `DOMAIN` does not resolve**, so the page can show the port and disable the button with a reason. Cookie-guarded like every other route (401 without it). Set `UDP_PUBLIC_IP` when `DOMAIN` sits behind a proxy or CDN, because the resolved address is then not this box (TRD §7). The page treats the answer as deployment state and re-fetches it only when older than 60 s (`STORAGE_UDP_TARGET_STALE_MS`) |
 | GET `/api/metrics/recent` | `?device=30&seconds=30` | `{"device_id","t0",…,"rows":[[t_offset_ms,m1..m5,c,q],…]}` (compact arrays for chart backfill) |
 | GET `/api/metrics/windows` | `?device=30` | `{"windows":[{"window":"5m","from":ts,"m":[…5 avgs],"sd":[…5 std devs],"composite":{"avg","min","max","sd"},"quality":num,"coverage":num\|null,"trend":"up\|down\|flat"},…]}` — one entry per `PAST_WINDOWS`, `trend` vs the preceding equal-length window. **`sd`** is the within-window standard deviation of each metric; **`coverage`** is observed rows ÷ expected rows for the window (0–1). Both added 2026-08-03: `sd` is what lets an insight express a deviation in units of the athlete's own spread — the property that makes the rule catalogue survive a biomech retune (docs/ANALYTICS.md §4.1) — and `coverage` is what distinguishes a full window from a sliver of one. Both nullable when the window is empty. |
 | GET `/api/metrics/history` | `?device=30&window=30m&buckets=24` | `{"device_id","window","from":ts,"bucket_s":int,"buckets":[{"t":ts,"m":[…5 avgs\|null],"composite":{"avg","min","max"},"quality":num}\|null,…]}` — stage-3 (S3-T01): time-bucketed series for the History tab. `window` MUST be one of `PAST_WINDOWS` (400 otherwise); `buckets` 1–96, default 24; bucket span = window/buckets, clamped to ≥1m when reading `metrics_1m` (bucket count shrinks accordingly — the response's `bucket_s` is authoritative). Buckets are aligned to `from`. Reads `metrics_1m` (or `metrics` for windows ≤5m, same source rule as `/windows`); a bucket with no rows is `null` (chart gap, never 0) |
@@ -341,7 +359,7 @@ calibration (user decision N). A no-op PATCH (same values) writes nothing and re
 | `biomech:diag:{device_id}` | hash, rewritten 1s, TTL `2×SESSION_GAP_S` | ingest → api (`/api/health`) | biomech diagnostics (SPEC §10 item 3), all values formatted `%.6g`: `flags` (comma-separated), **unsigned tremor fraction `R`** (m4's raw ratio — *not* a signed transmission ratio; m4 became a tremor index 2026-08-03), `R_base` (the learned fresh baseline **for the band currently in use**), `m4_band` (current intensity-band index), `m4_band_t` (seconds served of that band's 60 s lock), signed **`usi_pct`** (`m5`'s pre-normalisation USI, in percent), signed `usi_fast_pct` (10 s diagnostic channel), `dose`, `dose_fast`, `dose_slow` (the two decay pools; their sum is `dose`), `move_t`, `intensity`, `a_int`, `w_int`, `sat_frac`, `m1_lo`, per-tick noise weight `W`, `demand`, `degradation`, `cal_left` (stillness seconds remaining — the source of the tick's `cal` field, §2) — for tuning the provisional reference bounds against real trial data |
 | `biomech:state:{device_id}` | **string (JSON), rewritten 1s, TTL `2×SESSION_GAP_S`** | ingest → **ingest** | **Warm-restart snapshot** (~200 B, SPEC §7.4). A single JSON document, *not* a hash — it is written and read whole, so one `SET` beats a multi-field `HSET`. Fields: `v` (schema version, **currently `4`** — v3 is accepted with its `m4` baselines dropped, since it predates `r_mask` and a baseline restored without its mask froze m4 (fixed 2026-08-06); v1/v2 are rejected and the session starts fresh, v2 predating the fast/slow dose split), `dose` (**informational total only**), `dose_fast`, `dose_slow` (**the two pools `restore()` actually rebuilds from**, each decayed at its own half-life), `accL`, `accR`, `move_t`, `asym_t` (m5's 30 s warm-up gate), `r_sum`, `r_time`, `r_base` (**per-band lists**, length `M4_BANDS` — lower-case, not the old scalar `R_base`), `r_mask` (**v4**: per-band lock-time limb sets, serialised as **limb names**), `session_start_t`, `last_tick_t` (both unix seconds), `cal` = `{limb_name: {k, gyro_bias[3], sigma}}` **keyed by limb name, never by slot index** (§7.4), and `cal_src` = `{limb_name: "default"\|"carried"\|"measured"}` (calibration provenance, §5). Written fire-and-forget; **read only by ingest**, applying elapsed-time decay before use, and discarded when `now − last_tick_t > SESSION_GAP_S`. Without it an ingest restart silently resets a mid-session athlete to zero accumulated load. |
 | `biomech:cal:{device_id}` | string (JSON), rewritten 1s, **TTL 30 days** | ingest → **ingest** | **Last-known-good calibration, carried BETWEEN sessions** (SPEC §3.8): `{limb_name: {k, gyro_bias[3], sigma}}`, limb-keyed for the same reason as above. Deliberately *not* the §7.4 snapshot, which is discarded after `SESSION_GAP_S` — that is exactly the case this key exists for, an athlete returning the next day. Read once when a device appears and applied immediately, so a device with any history starts calibrated and only refines from there; upgraded in place when a fresh still window lands. Only a device with no history ever runs on defaults. |
-| `unit:cfg:{unit_id}` | string (JSON), **no TTL** | **api → ingest** | **Added 2026-09-23 — the FIRST key written by the api and read by ingest;** every other entry in this table flows the other way. One document per knee-sleeve unit, mirroring its `sleeve_units` row (§1): `{"unit":"u30-0","rig":"u30-0","side":"left"\|"right"\|null,"accel_fs_g":32,"gyro_fs_dps":4000,"v":1}` (`common.kinds.UnitConfig`). **No TTL on purpose**: this is state, not liveness — a sleeve that stops streaming for a week must still be paired when it comes back. The api re-mirrors **every** row at start and every **60 s**, so a Redis restart or flush self-heals within a minute instead of needing an api restart. Ingest `SCAN`s the whole `unit:cfg:*` keyspace once at startup (3 s budget) and then follows the channel below; Redis being unavailable simply means every sleeve runs on its defaults (own rig, no side, `.env` full scale), which is what a brand-new sleeve does anyway. A malformed document is rejected, never half-applied |
+| `unit:cfg:{unit_id}` | string (JSON), **no TTL** | **api → ingest** | **Added 2026-09-23 — the FIRST key written by the api and read by ingest;** every other entry in this table flows the other way. One document per knee-sleeve unit, mirroring its `sleeve_units` row (§1): `{"unit":"u30-0","rig":"u30-0","side":"left"\|"right"\|null,"accel_fs_g":32,"gyro_fs_dps":4000,"v":1}` (`common.kinds.UnitConfig`). **No TTL on purpose**: this is state, not liveness — a sleeve that stops streaming for a week must still be paired when it comes back. The api re-mirrors **every** row at start and every **60 s**, so a Redis restart or flush self-heals within a minute instead of needing an api restart. Ingest `SCAN`s the whole `unit:cfg:*` keyspace once at startup (3 s budget) and then follows the channel below; Redis being unavailable simply means every sleeve runs on its defaults (own rig, the side its wire `source_id` implies — `kinds.UnitConfig.default`, decision H since 2026-09-23 — and the `.env` full scale), which is what a brand-new sleeve does anyway; `"side": null` in a document means an operator cleared it. A malformed document is rejected, never half-applied |
 | `unit_cfg` | pub/sub channel | **api → ingest** | **Added 2026-09-23.** Payload is the **unit id** whose `unit:cfg:{id}` key changed, nothing more — the reader always `GET`s the key (a missing key = that unit's defaults). Published after the transaction commits, once per affected unit. On receipt ingest applies the config and, if it actually differs, **tears down the affected rigs** so they rebuild with the new shape, side or scale — the mechanism behind "any pairing, side or full-scale change resets that soldier's session" (§3). An equal config is a no-op, which is why registering a newly seen sleeve never resets anything |
 
 `sat_count` counts samples with any axis within 1% of full scale (±16 g / ±2000 °/s). The
@@ -352,6 +370,13 @@ still a real large impact). See [biomech/SPEC.md](biomech/SPEC.md) §2.
 No Redis persistence needed (`appendonly no`); everything in Redis is reconstructible — the
 `unit:cfg:*` keys included, since the database is their source of truth and the api rewrites
 them all every 60 s.
+
+**Unchanged by the 2026-09-23 sleeve-storage change-set** (PLAN_msd_management CS1): the Sleeve
+storage page reaches the card through the browser and the api only through §3
+(`GET /api/config/udp-target`, `GET /api/units`, `PATCH /api/units/{id}`); no key, channel or
+document shape in this table changed. The only visible effect is that the `side` in a freshly
+registered unit's `unit:cfg` document is `"left"`/`"right"` rather than `null` (decision H), and
+that migration 006's rewritten rows reach the existing documents on the api's next 60 s pass.
 
 ## 5. Stable code interfaces (drop-in points for later sessions)
 

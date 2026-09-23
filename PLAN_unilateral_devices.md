@@ -1,6 +1,7 @@
 # Plan: unilateral device (knee sleeve) support
 
-Status: approved 2026-09-23, Phase D in progress. Plan of record for the
+Status: approved 2026-09-23, shipped 2026-09-23 (Phases D and E done; see "As
+built" at the end). Plan of record for the
 unilateral-devices work; linked from `docs/PLAN.md`. Code is ground truth once
 shipped; keep the "as built" notes at the end honest.
 
@@ -49,6 +50,18 @@ single, and dashboard-driven pairing and full-scale settings.
 | L | Demo soldiers stay bilateral. |
 | M | Sensor summary and hero copy: rig-aware for sleeves, R1 literal kept for bilateral and demo; hero loses the fixed count. Record as a deliberate re-open of STAGE4 R1 for sleeves only. |
 | N | Any pairing, unpairing, side or full-scale change hard-resets that soldier's biomech session (dose, baselines, calibration). |
+
+**Amended 2026-09-23 (PLAN_msd_management decision H) — decision G.** The side is now
+**seeded from the sleeve's wire `source_id`** at registration (0 = left, 1 = right,
+`common/kinds.py::side_for_source`; `api/unit_mirror.py::register_units` inserts it and
+`UnitConfig.default()` derives the same value, so the api row still equals ingest's default
+and registering a new sleeve resets nothing). `NULL` therefore means an operator **cleared**
+the side, not "not set yet"; the UI still reads "side not set", streams the bare `thigh`/`shin`
+segments and flags `one_leg` for that case, and `PATCH {"side": null}` still works on an
+unpaired unit. Migration `006_sleeve_side_backfill.sql` (data-only) gives every legacy unpaired
+`NULL` row the side its `wire_source_id` implies; paired members and explicit sides are
+untouched, and the change is reversible per unit through `PATCH /api/units/{id}`. Everything
+else in G (side-less limbs, m1..m4 running, the copy) stands for a cleared side.
 
 ## Design
 
@@ -353,6 +366,13 @@ is right and this section records it; the rest of the plan matched.
 7. **Unit registration** lives in `api/unit_mirror.py`'s periodic task, not in
    `writer.py`: the Writer has no Redis handle and returns early on an empty
    tick buffer, so a hidden member would never have been registered.
+8. **Side default changed after shipping** (2026-09-23, `PLAN_msd_management.md`
+   decision H, amendment to decision G above): registration now seeds `side`
+   from the wire `source_id` instead of `NULL`, `UnitConfig.default()` matches,
+   and migration 006 backfills legacy unpaired rows. The sleeve's `CONFIG.TXT`
+   (including `source_id`) is now edited from the dashboard's Sleeve storage
+   page (`/storage`) rather than by hand over USB; that page's plan of record
+   is `PLAN_msd_management.md`.
 
 ### Verification actually run
 

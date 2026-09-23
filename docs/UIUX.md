@@ -12,11 +12,14 @@
 | `/login` | Login | preset-account sign-in; the only unauthenticated route |
 | `/` | Overview | explain-the-product hero + one panel per online device, projection-first |
 | `/device/:id` | Device detail | one trainee: live left column + Insights/History/Projections tabs |
+| `/storage` | Sleeve storage | **added 2026-09-23** — plug a knee sleeve in over USB: edit its `CONFIG.TXT`, transfer and verify its log files (§15). Chrome/Edge on https or localhost only |
 
 **Navigation is a left sidebar** (224px, `--surface` on `--bg`, hairline right border):
 1. HIPPOS logo — the `<LogoFull />` inline SVG component (paths taken from
    `mockup/visual_guidelines/Logo/svg/`; see §10 for why it must be inline), links `/`.
-2. "Unit overview" nav item under a "Command" section eyebrow (military theme 2026-09-12, STAGE4 R3).
+2. "Unit overview" nav item under a "Command" section eyebrow (military theme 2026-09-12, STAGE4 R3),
+   followed since 2026-09-23 by **"Sleeve storage"** (lucide `HardDrive`, route `/storage`, §15) in
+   the same section; its label is `STORAGE_COPY.navItem`.
 3. **Soldiers** section (2026-09-12; was "Athletes", and "Athletes online" before 2026-08-06): one row per **registered**
    device, online first then by name — display name, status dot (muted when offline),
    current composite as a small number tinted by risk band ("--" when offline).
@@ -146,7 +149,7 @@ that is simply false. The rule now:
 |---|---|
 | bilateral unit, demo soldier, or any device whose `kind` the API does not state | `4 sensors \| 6400Hz logging` — the R1 literal, **verbatim and unchanged** |
 | one sleeve, leg set | `2 sensors \| one leg \| 6400Hz logging` |
-| one sleeve, **no leg set yet** | `2 sensors \| side not set \| 6400Hz logging` |
+| one sleeve, **leg cleared by an operator** (since 2026-09-23 a new sleeve arrives with the leg its `source_id` implies, so this is the cleared case — decision H, below) | `2 sensors \| side not set \| 6400Hz logging` |
 | two sleeves paired | `4 sensors \| 2 sleeves \| 6400Hz logging` |
 
 Every string lives in one exported table (`RIG_COPY` in `lib/rig.ts`) that the copy-rules test
@@ -160,6 +163,13 @@ bilateral, so neither ever renders this. Per sleeve in the rig:
 
 - **Leg** — a Left / Right segmented group. Unset reads "side not set"; the dashboard never
   guesses a side, and an unset sleeve is not assumed to be either leg.
+  **Amended 2026-09-23 (PLAN_msd_management decision H):** the leg shown **defaults to the
+  sleeve's own `source_id`** (0 = left, 1 = right) — the value the person fitting the sleeve
+  wrote on its card, or set in Sleeve storage (§15) — which registration seeds into the unit, so
+  a new sleeve arrives with a leg rather than "side not set". That is the fitter's own statement
+  carried through, not the UI inferring anything. The operator may still override it here or
+  **clear** it (`PATCH {"side": null}`); a cleared side reads "side not set", streams side-less
+  limbs and dims both legs exactly as before.
 - **Full scale** — a readout, `+-32 g | +-4000 dps`, that expands into two segmented groups over
   the allowed sets (accel 2/4/8/16/32 g, gyro 125/250/500/1000/2000/4000 dps). This is
   **configuration, not measurement**: the sleeve's datagrams carry no scale (TRD §3).
@@ -186,8 +196,9 @@ so the live charts show a step until they scroll past it.
   **Amended 2026-09-23 for one-leg rigs:** when the rig maps only some limbs the
   figure **skips the sensor nodes of the limbs it does not have** and leaves
   those bones dim — a lone right-leg sleeve lights the right leg only, and a
-  sleeve with no side yet streams side-less limbs that match no bone, so **both**
-  legs render dim. Load emphasis is suppressed unless **both** legs are
+  sleeve whose side an operator has cleared streams side-less limbs that match no
+  bone, so **both** legs render dim (since 2026-09-23 a new sleeve arrives with the
+  leg its `source_id` implies, so this is the cleared case — decision H, above). Load emphasis is suppressed unless **both** legs are
   instrumented: with one leg there is no left/right comparison to make, and
   tinting a leg anyway would read as a directional claim (SPEC §5.5). The
   figure's `aria-label` is derived from the rig's **actual sensor count**
@@ -418,7 +429,7 @@ the calibration story's only surface, SPEC §10):
 | `no_shank` | impact falls back to all limbs | warning |
 | `carried_over` | calibrated from a previous session | info |
 | `warming_up` | `m4`/`m5` inside 60 s / 30 s warm-up — a value **is** coming | muted |
-| `one_leg` | **added 2026-09-23**: the rig instruments one leg only (a single knee sleeve, or one whose leg is not set yet). Chip label "one leg", hint "One leg instrumented - balance needs both legs". Structural, **not** a fault — `m1`..`m4` are unaffected and only `m5` is impossible, so it must read calmer than `degraded_sensors`, never as an alert | muted |
+| `one_leg` | **added 2026-09-23**: the rig instruments one leg only (a single knee sleeve, whether its leg is set or an operator cleared it). Chip label "one leg", hint "One leg instrumented - balance needs both legs". Structural, **not** a fault — `m1`..`m4` are unaffected and only `m5` is impossible, so it must read calmer than `degraded_sensors`, never as an alert | muted |
 | `unvalidated` | **not rendered** (demo posture 2026-08-05, `HIDDEN_FLAGS` in `metrics.ts`); still on the wire per SPEC §11.1 | — |
 
 `warming_up` and `degraded_sensors` must never look alike: muted grey chip + greyed
@@ -597,6 +608,13 @@ checks PASS (lightness band, chroma, CVD ΔE worst adjacent 8.4, normal-vision
   one-leg rig, and `one_leg` copy says what is missing ("balance needs both legs") rather than
   anything about the soldier — the SPEC §5.5 ban on directional claims applies with full force
   here, where exactly one leg is being measured.
+  **Amended 2026-09-23 (PLAN_msd_management decision H):** the leg comes from the sleeve's own
+  `source_id` — set by the person fitting it, on the card or in Sleeve storage (§15), and seeded
+  into the unit at registration — so a new sleeve shows Left or Right from its first packet.
+  That is the fitter's statement carried through, not the UI inferring; the operator may
+  override or clear it, and a cleared side still reads `side not set` and lights neither leg.
+  Everything else in this rule stands: no leg tint on a one-leg rig, and `one_leg` copy names
+  what is missing.
 
 ## 12. Accessibility & responsive — SET
 
@@ -609,6 +627,11 @@ checks PASS (lightness band, chroma, CVD ΔE worst adjacent 8.4, normal-vision
   is a `<canvas aria-hidden>` inside a `role="img"` wrapper carrying the `aria-label`;
   live regions announce new alerts
   (`aria-live="polite"`).
+- Sleeve storage (§15): validation and failure lines are `role="alert"`; the eject notice,
+  "Reading the sleeve...", the do-not-unplug line and the run summary are `role="status"`;
+  progress and per-file status are `aria-live="polite"`; the Advanced toggle carries
+  `aria-expanded`/`aria-controls`; segmented groups are `role="group"` with `aria-pressed`
+  buttons; every input has a `<label for>` and, where help text exists, `aria-describedby`.
 - Contrast: ink tokens ≥4.5:1 on their surfaces; `--ink-3` used ≥11px only;
   status-on-surface ≥3:1 (validated).
 - Breakpoints: ≤1024px sidebar → top bar; ≤1180px detail stacks (live first) and
@@ -634,6 +657,10 @@ checks PASS (lightness band, chroma, CVD ΔE worst adjacent 8.4, normal-vision
 | **the pair picker's list of sleeves** | `GET /api/units` | when `Pair with...` is opened |
 | **leg / full-scale change, pair, unpair** | `PATCH /api/units/:id`, `POST /api/units/:host/pair`, `POST /api/units/:id/unpair`, then invalidate `devices`, `units` and both rigs' `windows` / `history` / `forecasts` / `insights` / `advice-timeline` | on action |
 | auth | `POST /api/auth/login|logout`, `GET /api/auth/me` | on action |
+| **Sleeve storage: "Streams to ... (this dashboard)" line and `Point at this dashboard`** (2026-09-23, §15) | `GET /api/config/udp-target` | on page open, re-fetched when older than `STORAGE_UDP_TARGET_STALE_MS` (60 s) |
+| **Sleeve storage: soldier name on the identity line, duplicate-number warning** | `GET /api/units` + the merged device list | on page open, with the registry poll |
+| **Sleeve storage: full-scale sync after a save** (decision I) | `PATCH /api/units/:id` `{accel_fs_g?, gyro_fs_dps?}`, then invalidate `devices`, `units` and that rig's `windows` / `history` / `forecasts` / `insights` / `advice-timeline` | after a save that changed the card's full scale, only when that unit is already known |
+| **Sleeve storage: the drive and the destination folder** | the browser's File System Access API — **never the network**; handles remembered in IndexedDB | on click |
 
 Evidence rendering (`lib/evidence.ts`) owns the expander contract: which `context` keys are
 hidden, their display order, and the translation of jargon into trainer language (`z` renders as
@@ -651,6 +678,13 @@ Added 2026-09-23: `SENSOR_SUMMARY_TEXT` (the R1 literal) is joined by
 `ACCEL_FS_ALLOWED_G` / `GYRO_FS_ALLOWED_DPS` (the segmented groups' options, mirroring the
 backend's allowed sets). All rig-dependent user-facing strings live in `RIG_COPY`
 (`lib/rig.ts`), which the copy-rules test walks.
+Added 2026-09-23 (sleeve storage, §15): `STORAGE_READ_CHUNK_BYTES` (4 MiB card reads),
+`STORAGE_RATE_EWMA_ALPHA` (0.2), `STORAGE_EXPECTED_BYTES_PER_S` (1 MB/s, the first ETA),
+`STORAGE_UDP_TARGET_STALE_MS` (60 s), `STORAGE_TXT_CFG_PROBE_BYTES` (4096) and
+`STORAGE_BAD_BLOCK_CONFIRM_MAX` (32); the Advanced editor reuses `ACCEL_FS_ALLOWED_G` /
+`GYRO_FS_ALLOWED_DPS`. Firmware limits (key ranges, byte limits, the 159-byte line) are
+**format facts** in `lib/storage/configSchema.ts`, deliberately not tunables. Every string of
+the page lives in `STORAGE_COPY` (`lib/storage/copy.ts`), also walked by the copy-rules test.
 
 ## 14. Demo soldiers — SET (2026-09-12, STAGE4 R2)
 
@@ -691,3 +725,169 @@ synthetic in the address bar: `/device/demo-1` … `/device/demo-5`.
 - Unit tests (`npm test`, vitest) pin determinism, ranges, exact buffer windows, the
   timeline/event-log join, backend parity of the grouping, the scripted stories, and zero
   fetch calls for demo ids. See `docs/tasks/STAGE4.md` for the plan and as-built notes.
+
+## 15. Sleeve storage — SET (2026-09-23, PLAN_msd_management change-set 1)
+
+Route `/storage`, sidebar item "Sleeve storage" under Command (§1). The page opens a plugged-in
+knee sleeve's **HIPPOSDATA** USB drive in the browser and does two things: it edits the sleeve's
+`CONFIG.TXT` exactly the way the firmware will parse it, and it moves the sleeve's `LOG_NNNN`
+files to a folder on this PC, verifying every copy before the original is deleted. It is
+**browser-native**: the File System Access API reads and writes the drive, nothing is uploaded
+and there is no helper app (decision A). Change-set 2 — a CSV and a plain-text summary per
+transferred log, produced in a Web Worker — is **planned, not built** (PLAN_msd_management §5);
+until then the page ends at the verified raw copy.
+
+**Browser requirement.** `isSupported()` is "`showDirectoryPicker` exists **and** the context is
+secure", i.e. Chrome or Edge on `https://DOMAIN` or `localhost`. Anything else (Firefox, Safari,
+a plain-`http` LAN address) renders the intro line plus one `role="alert"` notice — "Sleeve
+storage needs Chrome or Edge on a secure (https) address. This browser or address cannot open
+drives." — and nothing else. Both directory handles (sleeve, destination) are persisted in
+IndexedDB (`hippos-storage/handles`); on the next visit a handle whose permission is still
+granted opens by itself, otherwise a **Reconnect** button asks for it again (`requestPermission`
+needs a click, so it never runs on mount). Where the browser offers "Allow on every visit"
+(Chrome 122+, a browser behaviour recorded in the plan of record, not something the page
+controls) reconnecting becomes automatic. IndexedDB being unavailable (a private window) simply
+means the user picks again.
+
+**Layout** — one column, title "Sleeve storage", four cards top to bottom; cards 2–4 exist only
+once a drive is open and valid:
+
+1. **Drive** — the intro line, `Open sleeve drive` (primary, `HardDrive` icon), `Reconnect sleeve
+   drive` when a stored handle needs permission again, "Drive: {name}" once open, and "Reading
+   the sleeve..." (`role="status"`) while validating. A picked folder is the drive **only if it
+   holds `CONFIG.TXT`** (case-insensitive; the card's own spelling is kept for the write) —
+   otherwise `role="alert"`: "That folder has no CONFIG.TXT. Pick the HIPPOSDATA drive itself,
+   not a folder inside it." The other invalid states are read-failed (with the browser's detail)
+   and permission-denied ("Try again and choose Allow"). The page never relies on `handle.name`
+   to identify a drive. Open and Reconnect are locked while a save or transfer runs.
+2. **Sleeve settings** — the `CONFIG.TXT` editor (decisions E, F, G). Identity line "Sleeve
+   **u<dev>-<src>** | <soldier name>", the name coming from the merged device list (the unit's
+   own rig, or the host rig it is paired into; otherwise "not yet seen by the dashboard"). Then
+   any **file notices**, each with a warning icon: a byte-order mark ("...makes the sleeve ignore
+   its first setting") with a `Repair file` button that queues the strip for the next save; a
+   duplicated key ("the last value is the one the sleeve uses"); a leading-zero number ("reads
+   as {n} to the sleeve (a leading zero means octal). Save to write it as plain decimal") or one
+   the firmware cannot read at all ("...so it uses its built-in default. Enter a value to fix
+   it" — Save stays blocked until it is replaced); a line longer than the firmware reads in one
+   go. **Basic fields**: WiFi network (cannot be empty — the firmware would silently keep its
+   factory network), WiFi password (masked, `Show`/`Hide` toggle with `aria-pressed`; empty is
+   allowed with a warning), Sleeve number (0–255; "A sleeve with this number and leg is already
+   known to the dashboard. If that is this sleeve, ignore this." when the draft identity already
+   exists in `/api/units`), **Leg this sleeve is worn on** (a Left/Right segmented group,
+   `role="group"` + `aria-pressed`, writing `source_id` 0/1), and two checkboxes (diagnostics
+   log, stream over WiFi). **UDP row**: "Streams to {ip}:{port}" plus "(this dashboard)",
+   "(not this dashboard)" or "(target unknown)" from `GET /api/config/udp-target`, and `Point at
+   this dashboard`, disabled when already pointing here or when the api could not resolve its
+   own address — then the reason shows: "The dashboard could not work out its own address. Set
+   UDP_PUBLIC_IP on the server." **Advanced settings** is a toggle button (`aria-expanded`,
+   `aria-controls`); opening it shows the warning ("Changing these can make the sleeve
+   misbehave: stop logging, mis-scale its sensors, drain or over-protect its battery, or stop it
+   streaming. Only change them if an engineer asked you to.") and an `I understand` checkbox that
+   unlocks its fieldset **for this page session only** — `udp_ip`, `udp_port` (plus the same
+   Point button), low-battery stop, WiFi transmit power (steps of 0.25 dBm), accelerometer and
+   gyroscope full scale as segmented groups over the allowed sets, and the two battery
+   calibration values (0 = off). Validation mirrors the firmware: ranges, allowed sets, UTF-8
+   byte limits (ssid 32, password 64, `udp_ip` 15 — "a character outside plain ASCII counts as 2
+   to 4"), no leading or trailing space (the firmware trims it), a 159-byte line limit; a problem
+   renders inline with `role="alert"` and `aria-invalid` on the input. `Save to sleeve` is
+   enabled only while something is pending (a changed value, a queued BOM repair or an octal
+   rewrite), nothing is invalid, the drive is ready and no transfer runs; it reads "Writing..."
+   during the save.
+3. **Log files on the sleeve** — a `data-table` with Select | File | Size | Session | Firmware |
+   Sleeve | Full scale | Status, grouped by session ascending, **all selected by default**, a
+   select-all box (`aria-label` "Select all log files") and one box per row labelled by its file
+   name. Only names matching `LOG_NNNN.BIN` / `LOG_NNNN.TXT` are ever listed; `CONFIG.TXT` cannot
+   match that pattern, and `*.crswap`, `System Volume Information`, `$RECYCLE.BIN` and dotfiles
+   are hidden. Firmware, sleeve (`u<dev>-<src>`) and full scale come from each BIN's 512 B
+   header; a header that fails reads as a warning chip in the Sleeve column ("not a sleeve log",
+   "unknown log format", "header checksum wrong", "header too short", "header could not be
+   read") and the row stays transferable. The Status cell (`aria-live="polite"`) carries the
+   per-file line during and after a run: Queued, "Copying {pct}% | {rate} | {eta} left",
+   Verifying copy, Removing from sleeve, "Copied and removed from sleeve", "Copied (kept on
+   sleeve)", "Already transferred", "Failed: {reason}", Cancelled. Selection is frozen while a
+   transfer runs. Empty state: "No log files on this sleeve."
+4. **Transfer** — `Choose destination folder` / `Reconnect destination folder`, "Destination:
+   {name}", the hint "Each file goes to sleeve-uN-M/raw inside the destination, named after the
+   sleeve number and leg recorded in that file", the `Keep copies on the sleeve (do not delete
+   after transfer)` checkbox (**off** by default — decision J), and `Transfer selected` (enabled
+   when a drive and a destination are ready, at least one listed file is selected, and no save
+   or transfer runs), which becomes `Cancel` / "Cancelling..." while running, beside the
+   persistent "Do not unplug the sleeve while a transfer is running." (`role="status"`).
+   Progress: a `<progress>` bar labelled "Transfer progress" and "{done} of {total} | {rate} |
+   {eta} left" inside an `aria-live="polite"` region (the rate is an EWMA,
+   `STORAGE_RATE_EWMA_ALPHA`; the first ETA assumes `STORAGE_EXPECTED_BYTES_PER_S` = 1 MB/s).
+   Afterwards: "Done: {copied} copied, {already} already transferred, {failed} failed,
+   {deleted} removed from the sleeve." (plus "{n} not started." after a cancel), or
+   `role="alert"` "Transfer stopped unexpectedly - {detail}". The speed note "Sleeves transfer
+   at about 1 MB/s over USB, so a 512 MB file takes about 9 minutes." is always visible.
+
+**Save flow** (`pages/Storage.tsx` → `lib/storage/configFile.ts`). Every value the editor shows
+is what the **firmware** would read from the file (`interpretAsFirmware`: 159-byte `fgets`
+pieces, C `isspace` trimming, whole-line `#`/`;` comments only, first-`=` split, last duplicate
+wins, unknown keys ignored, base-0 integers), never a naive parse. `applyEdits` rewrites **only
+the value span of the last line holding each edited key** and appends `key=value` with CRLF for
+keys the file lacks — comments, unknown keys, line endings and even invalid UTF-8 elsewhere
+survive byte for byte; it never writes a BOM or an inline comment, and integers are always plain
+decimal (`010` would be octal to the firmware). The write goes through `createWritable` (a
+`CONFIG.TXT.crswap` is visible beside the file until the browser swaps it in), the file is
+**read back** and `verifyReadback` must find every intended value; otherwise `role="alert"`
+"The file read back differently from what was written; nothing else was changed. Try again."
+Success shows the **eject notice** (`role="status"`): "Saved. Now eject the HIPPOSDATA drive,
+then unplug the cable." / "The sleeve re-reads its settings about 2 seconds after the cable is
+out and starts a new session." — a host eject alone does **not** end the sleeve's session, so
+the order is always eject, then unplug — plus, when they apply: "WiFi network or password
+changed: also switch the sleeve off and on again." (`wifi_ssid` and `wifi_password` are the
+only boot-effect keys), "Dashboard full scale for {unit} updated to match." (decision I: after a
+save that changed `accel_fs_g`/`gyro_fs_dps` the page `PATCH`es `/api/units/{unit}` when that
+unit is already known — never for an unknown or malformed id — and invalidates `units`,
+`devices` and the rig's per-rig queries; a failure reads "...could not be updated - {detail}.
+Set it on the soldier's page." as an alert), and "This sleeve will now appear as a new soldier
+({to}). Pairing, leg and history stay with {from}." when the sleeve number or leg changed.
+
+**Transfer guarantees** (`lib/storage/transfer.ts`, decisions J and K) — per file, in order:
+**probe** (the destination folder `sleeve-u<dev>-<src>/raw/` is created — the identity is the
+file's own header, else the TXT's `# cfg:` line, else `CONFIG.TXT`; a same-name file already
+there is sized and CRC'd) → **copy** (4 MiB slices, each read awaited before the next, with a
+running CRC32 and a whole-file block scan on the way; the sink must `close()` cleanly) →
+**verify** (the **local copy is re-read**: length, CRC32 and an identical block-scan result are
+required; every block the scan called bad is re-read from the card and compared byte for byte,
+at most `STORAGE_BAD_BLOCK_CONFIRM_MAX` = 32 of them, so a transient USB read error can never
+pass as on-card corruption and cost the only good copy; a `.TXT` is byte-compared whole) →
+**dedupe** (a pre-existing local file with the same size and CRC means the fresh copy is
+dropped and the row reads "Already transferred"; a different one keeps the fresh copy as
+`LOG_0010-2.BIN`) → **delete** from the sleeve, **only** when copy and verify passed, "Keep
+copies" is off and the run was not cancelled. A verify mismatch removes the local copy and
+leaves the card untouched; a delete failure reports "the copy is good but the file could not be
+removed from the sleeve"; a failure in any phase never deletes. Cancel or an unplug mid-copy
+aborts the writable (Chrome discards the `.crswap`), so **no partial copy exists and the card is
+as it was**; the listing is re-read from the card after every run. Failure reasons are plain
+sentences ("the sleeve stopped answering - was it unplugged?", "could not write to the
+destination folder", ...). The page never deletes anything on the PC. The engine runs on the
+main thread (its CPU cost is negligible against the ~1 MB/s full-speed USB link) and touches no
+DOM, so it can move to a worker for CS2.
+
+**Never possible.** `CONFIG.TXT` cannot be listed, transferred or deleted (the transfer allowlist
+is the `LOG_NNNN` pattern, pinned by `logNames.test.ts`); the destination is never deleted from;
+the card is never written except by Save (`CONFIG.TXT`) and the post-verify delete; a demo id
+never reaches the API (the one PATCH is guarded by `UNIT_ID_RE`).
+
+**Copy rules.** Every user-facing string lives in `STORAGE_COPY` (`lib/storage/copy.ts`), which
+`text.test.ts` walks for the §11 rules: plain ASCII (a spaced hyphen joins clauses, " | "
+separates), "soldier" never "athlete", the device is a "sleeve" and its side is a "leg" ("Leg
+this sleeve is worn on"; "Pairing, leg and history stay with..."). Firmware key names
+(`wifi_ssid`, `accel_fs_g`, ...) appear only in notices that describe the sleeve's own file.
+Composite messages are templates with `{slot}` holes filled at render time, so the test sees
+every word the page can show.
+
+**Accessibility.** Real buttons everywhere (segmented groups are buttons with `aria-pressed`);
+each input has a `<label for>` and, where a help line exists, `aria-describedby`; validation and
+failure lines are `role="alert"`; the eject notice, "Reading the sleeve...", the do-not-unplug
+line and the run summary are `role="status"`; progress and per-row status are
+`aria-live="polite"`; the Advanced toggle carries `aria-expanded`/`aria-controls`; the whole
+basic fieldset is `disabled` while a save or transfer runs, so nothing can be edited mid-write.
+
+**Without hardware.** Pick any local folder holding a copy of `CONFIG.TXT` and some
+`LOG_NNNN.{BIN,TXT}` files; the page treats it as the drive. The real-drive checks — the picker
+offering the drive root, "Allow on every visit", the `.crswap` visible during a write, unplug
+mid-copy leaving the card intact — are a manual checklist, not headless tests
+(PLAN_msd_management §4.6).

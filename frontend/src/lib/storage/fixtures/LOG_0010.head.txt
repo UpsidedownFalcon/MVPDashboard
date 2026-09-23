@@ -1,0 +1,32 @@
+# NYKnicks knee sleeve diagnostics — session 0010
+# fw=1.1.0 odr=6400Hz wm=8 spi=1000000Hz sd=10000kHz reset=POWERON
+# card: 00000 14910MB 1-bit @10000kHz
+# cfg: ssid='Nirat' udp=192.168.1.100:5050 dev=1 src=0 stream=1 low_batt=3100mV fs=±32g/±4000dps tx=8.50dBm batt_cal=0/0 mode=demo
+[       1.698] session 0010 start
+[       1.709] --- status: uptime 1 s | mode INIT | model demo | session 0010 | fw 1.1.0 | reset POWERON ---
+  IMU1 (sensor_id 1, SPI2): init OK whoami 0xE9 | odr 0.0 Hz = 0.00% of 6400 (session avg 0.0) | fs ±32g/±4000dps | samples 0 ovf 0 frame_err 0
+  IMU2 (sensor_id 2, SPI3): init OK whoami 0xE9 | odr 0.0 Hz = 0.00% of 6400 (session avg 0.0) | fs ±32g/±4000dps | samples 0 ovf 0 frame_err 0
+  SD:   card 00000 14910MB 1-bit @10000kHz label ok:HIPPOSDATA | file LOG_0000.BIN closed, prealloc 0 MB | written 0.0 MB | verified 0/0 blocks = n/a (bad 0, last bad seq 0) | wr_max 0.0 ms sync_max 0.0 ms vfy_max 0.0 ms | ring 0/256 hw 0 drop 0
+  CPU:  core0 n/a core1 n/a | heap int 119K free (min 56K, largest 62K) psram 953K free (min 952K) | temp 26.8 C
+  TASK:  diag n/a/6240B  main n/a/4272B  IDLE1 n/a/784B  IDLE0 n/a/792B  acq n/a/3036B  sd_writer n/a/5372B  udp_tx n/a/3372B  batt n/a/2192B  tcpip n/a/2420B  led n/a/2168B  Tmr Svc n/a/1448B  TinyUSB n/a/4068B  sys_evt n/a/1672B
+  TASK:  esp_timer n/a/3228B  ipc1 n/a/412B  wifi n/a/4540B  ipc0 n/a/612B  (cpu%/stack-hwm)
+  BATT: 3586 mV used (nom 3673, pessimistic 3586, pin 2765) | soc 34% | cal none (5% margin) | low_latched 0 below 0 | thresh 3100 | adc ok 1 timeouts 0
+  WIFI: configured ssid 'Nirat' | down ip - rssi 0 dBm ch 0 | tx 8.50 dBm (cfg 8.50) | reconnect attempts 0 | sntp not synced
+  UDP:  idle -:0 | sent 0 (0.0 pkt/s) dropped 0 | queue 0/128
+[       5.381] prealloc took 3641 ms
+[       5.403] --- status: uptime 5 s | mode INIT | model demo | session 0010 | fw 1.1.0 | reset POWERON ---
+  IMU1 (sensor_id 1, SPI2): init OK whoami 0xE9 | odr 0.0 Hz = 0.00% of 6400 (session avg 0.0) | fs ±32g/±4000dps | samples 0 ovf 0 frame_err 0
+  IMU2 (sensor_id 2, SPI3): init OK whoami 0xE9 | odr 0.0 Hz = 0.00% of 6400 (session avg 0.0) | fs ±32g/±4000dps | samples 0 ovf 0 frame_err 0
+  SD:   card 00000 14910MB 1-bit @10000kHz label ok:HIPPOSDATA | file LOG_0000.BIN closed, prealloc 512 MB | written 0.0 MB | verified 0/0 blocks = n/a (bad 0, last bad seq 0) | wr_max 0.0 ms sync_max 0.0 ms vfy_max 0.0 ms | ring 0/256 hw 0 drop 0
+  CPU:  core0 65.0% core1 0.0% | heap int 120K free (min 56K, largest 62K) psram 952K free (min 952K) | temp 25.8 C
+  TASK:  IDLE1 100.0%/784B  main 63.6%/4272B  IDLE0 35.0%/792B  diag 0.9%/6240B  led 0.3%/2040B  wifi 0.1%/4540B  esp_timer 0.0%/3228B  acq 0.0%/3036B  sd_writer 0.0%/5372B  tcpip 0.0%/2420B  batt 0.0%/2192B  udp_tx 0.0%/3372B  sys_evt 0.0%/1672B
+  TASK:  TinyUSB 0.0%/4068B  ipc1 0.0%/412B  ipc0 0.0%/612B  Tmr Svc 0.0%/1448B  (cpu%/stack-hwm)
+  BATT: 3529 mV used (nom 3614, pessimistic 3529, pin 2721) | soc 22% | cal none (5% margin) | low_latched 0 below 0 | thresh 3100 | adc ok 4 timeouts 0
+  WIFI: configured ssid 'Nirat' | down ip - rssi 0 dBm ch 0 | tx 8.50 dBm (cfg 8.50) | reconnect attempts 1 | sntp not synced
+  UDP:  idle -:0 | sent 0 (0.0 pkt/s) dropped 0 | queue 0/128
+[      20.000] demo: INJ_TRIG HIGH at 20.000035 s (logging) — LOW again in 1000 ms
+[      20.011] --- status: uptime 20 s | mode LOGGING | model demo | session 0010 | fw 1.1.0 | reset POWERON ---
+  IMU1 (sensor_id 1, SPI2): init OK whoami 0xE9 | odr 6412.2 Hz = 100.19% of 6400 (session avg 5114.6) | fs ±32g/±4000dps | samples 93664 ovf 0 frame_err 0
+  IMU2 (sensor_id 2, SPI3): init OK whoami 0xE9 | odr 6402.8 Hz = 100.04% of 6400 (session avg 5107.1) | fs ±32g/±4000dps | samples 93528 ovf 0 frame_err 0
+  SD:   card 00000 14910MB 1-bit @10000kHz label ok:HIPPOSDATA | file LOG_0010.BIN open, prealloc 512 MB | written 2.5 MB | verified 56/56 blocks = 100.00% (bad 0, last bad seq 0) | wr_max 18.2 ms sync_max 6.1 ms vfy_max 19.2 ms | ring 0/256 hw 2 drop 0
+  CPU:  core0 18.7% core1 11.1% | heap int 119K free (min 56K, largest 62K) psram 952K free

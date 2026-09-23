@@ -20,6 +20,7 @@ from api.deps import WS_CLOSE_UNAUTHORIZED, require_user, ws_user
 from api.jobs.insights import InsightJob
 from api.jobs.predict import PredictJob
 from api.routes.auth import router as auth_router
+from api.routes.config import router as config_router
 from api.routes.devices import router as devices_router
 from api.routes.forecasts import router as forecasts_router
 from api.routes.health import router as health_router
@@ -88,6 +89,7 @@ def create_app() -> FastAPI:
     app.include_router(metrics_router, dependencies=guard)
     app.include_router(forecasts_router, dependencies=guard)
     app.include_router(insights_router, dependencies=guard)
+    app.include_router(config_router, dependencies=guard)
     # health router guards /api/health itself; /api/health/live stays open
     app.include_router(health_router)
 

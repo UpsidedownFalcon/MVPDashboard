@@ -373,6 +373,16 @@ export const unpairUnit = (unitId: string) =>
     ? Promise.reject(demoUnitError(unitId))
     : post<{ units: Unit[] }>(`/api/units/${unitId}/unpair`)
 
+/** GET /api/config/udp-target (PLAN_msd_management decision G): where the
+ *  knee sleeves should stream to. `ip` is null when the api could not resolve
+ *  DOMAIN and no UDP_PUBLIC_IP override is set; `source` says which it used. */
+export interface UdpTarget {
+  ip: string | null
+  port: number
+  source: 'env' | 'dns' | 'unresolved'
+}
+export const fetchUdpTarget = () => request<UdpTarget>('/api/config/udp-target')
+
 export const login = (username: string, password: string) =>
   post<Me>('/api/auth/login', { username, password })
 export const logout = () => post<Record<string, never>>('/api/auth/logout')

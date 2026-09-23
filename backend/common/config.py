@@ -5,6 +5,7 @@ Every key from TRD §7 lives here; nothing else reads env vars directly.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 from datetime import timedelta
 from functools import lru_cache
@@ -29,7 +30,8 @@ DEFAULT_LIMB_MAP = {
 
 # Unilateral knee sleeve: sensor_id -> segment. The firmware fixes 1 = thigh
 # (top) and 2 = shin (bottom) on every source (app_config.h SENSOR_ID_IMU0/1);
-# the side comes from the dashboard, never from the wire (common/kinds.py).
+# the side is per-unit dashboard config, seeded from the wire source_id
+# (0 left, 1 right; PLAN_msd_management decision H) -- common/kinds.py.
 DEFAULT_UNILATERAL_SENSOR_MAP = {1: "thigh", 2: "shin"}
 # Firmware defaults, assumed for a sleeve nobody has configured yet.
 DEFAULT_UNILATERAL_ACCEL_FS_G = 32
@@ -49,6 +51,12 @@ class Settings(BaseSettings):
 
     domain: str = "dash.example.com"
     udp_port: int = 5005
+    # IPv4 the knee sleeves should stream to, served by GET /api/config/udp-target
+    # for the dashboard's Sleeve storage page. Blank = the api resolves DOMAIN at
+    # request time; set it explicitly when DOMAIN sits behind a proxy or CDN,
+    # because the resolved address is then not this box (PLAN_msd_management
+    # decision G). IPv4 only: the sleeve firmware's udp_ip is a dotted quad.
+    udp_public_ip: str = ""
     api_port: int = 8000
 
     postgres_host: str = "db"
@@ -150,6 +158,23 @@ class Settings(BaseSettings):
     insight_warn_threshold: float = 85.0
     insight_alert_threshold: float = 92.0
     metrics_retention_raw: str = Field("30d", validation_alias="METRICS_RETENTION")
+
+    @field_validator("udp_public_ip", mode="after")
+    @classmethod
+    def _udp_public_ip_is_ipv4(cls, value: str) -> str:
+        """A typo here would be handed to every sleeve as its stream target and
+        silently disable streaming (the firmware does not validate udp_ip), so
+        it fails at load rather than at the first "Point at this dashboard"."""
+        value = value.strip()
+        if value:
+            try:
+                ipaddress.IPv4Address(value)
+            except ValueError as exc:
+                raise ValueError(
+                    f"UDP_PUBLIC_IP must be a dotted-quad IPv4 address or blank, "
+                    f"got {value!r}"
+                ) from exc
+        return value
 
     @field_validator("limb_map", mode="before")
     @classmethod

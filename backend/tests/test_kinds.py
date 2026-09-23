@@ -48,12 +48,36 @@ def test_rig_kind_is_derived_from_the_id_prefix() -> None:
     assert kinds.rig_kind("u30-0") == "unilateral"
 
 
-def test_unit_config_default_is_unpaired_and_side_less() -> None:
+def test_side_for_source_is_left_then_right() -> None:
+    # PLAN_msd_management decision H: the sleeve's own source_id names its leg
+    assert kinds.side_for_source(0) == "left"
+    assert kinds.side_for_source(1) == "right"
+    for bad in (2, -1, 255):
+        with pytest.raises(ValueError):
+            kinds.side_for_source(bad)
+
+
+def test_unit_config_default_is_unpaired_with_the_wire_side() -> None:
+    # decision H (2026-09-23) amends decision G: the default side comes from
+    # the unit id's source part instead of being unset
     cfg = kinds.UnitConfig.default("u30-0", 32, 4000)
     assert cfg.rig_id == "u30-0" and not cfg.paired
-    assert cfg.side is None and cfg.vsrc == 0
-    assert cfg.limb_map({1: "thigh", 2: "shin"}) == {(0, 1): "thigh", (0, 2): "shin"}
+    assert cfg.side == "left" and cfg.vsrc == 0
+    assert cfg.limb_map({1: "thigh", 2: "shin"}) == {(0, 1): "left_thigh", (0, 2): "left_shin"}
     assert cfg.limb_scale() == (1024.0, 8.192)
+
+    right = kinds.UnitConfig.default("u30-1", 32, 4000)
+    assert right.side == "right" and right.vsrc == 1
+    assert right.limb_map({1: "thigh", 2: "shin"}) == {(1, 1): "right_thigh", (1, 2): "right_shin"}
+
+    # an id that does not parse gets no side rather than a guess
+    assert kinds.UnitConfig.default("nonsense", 32, 4000).side is None
+
+
+def test_unit_config_cleared_side_streams_bare_segments() -> None:
+    cfg = kinds.UnitConfig("u30-0", "u30-0", None, 32, 4000)
+    assert cfg.vsrc == 0
+    assert cfg.limb_map({1: "thigh", 2: "shin"}) == {(0, 1): "thigh", (0, 2): "shin"}
 
 
 def test_unit_config_sides_drive_names_and_virtual_source() -> None:

@@ -12,10 +12,13 @@ Two jobs, one task:
   * registration (every REGISTER_INTERVAL_S) -- ingest publishes `unit:{id}:rig`
     into `ingest:stats` for every sleeve it has seen on the wire, which is how a
     brand-new sleeve announces itself. Unknown ids are inserted unpaired, with
-    no side (decision G) and the Settings full-scale defaults, then mirrored.
+    the side their wire source_id implies (0 left, 1 right: PLAN_msd_management
+    decision H, amending PLAN_unilateral decision G; the operator can still
+    override or clear it) and the Settings full-scale defaults, then mirrored.
     Ingest is already running exactly those defaults for an unconfigured unit
-    and `Registry.apply_unit_config` no-ops on an equal config, so registering a
-    sleeve never resets a rig (decision N is about real changes only).
+    (`UnitConfig.default`) and `Registry.apply_unit_config` no-ops on an equal
+    config, so registering a sleeve never resets a rig (decision N is about
+    real changes only).
 
   * re-mirror (at start and every MIRROR_INTERVAL_S) -- the keys have no TTL,
     so the only thing that loses them is a Redis restart or flush. Rewriting
@@ -114,8 +117,10 @@ async def register_units(
     pool: asyncpg.Pool, redis: aioredis.Redis, settings: Settings,
     unit_ids: list[str],
 ) -> list[str]:
-    """Insert unknown sleeves (unpaired, side-less, Settings full-scale).
+    """Insert unknown sleeves (unpaired, wire-source side, Settings full-scale).
 
+    The inserted row must equal `kinds.UnitConfig.default` for the unit, which
+    is what ingest already runs; the mirror publish is then a no-op there.
     Returns the ids actually created, already mirrored. `ON CONFLICT DO NOTHING`
     makes a second api instance or a racing restart harmless: the loser sees no
     RETURNING row and mirrors nothing, because the winner already did.
@@ -137,11 +142,12 @@ async def register_units(
         row = await pool.fetchrow(
             f"""INSERT INTO sleeve_units (unit_id, wire_device_id, wire_source_id,
                                           rig_id, side, accel_fs_g, gyro_fs_dps)
-                VALUES ($1, $2, $3, $1, NULL, $4, $5)
+                VALUES ($1, $2, $3, $1, $6, $4, $5)
                 ON CONFLICT (unit_id) DO NOTHING
                 RETURNING {MIRROR_COLUMNS}""",
             unit, device_id, source_id,
             settings.unilateral_accel_fs_g, settings.unilateral_gyro_fs_dps,
+            kinds.side_for_source(source_id),     # decision H: 0 left, 1 right
         )
         if row is None:
             continue
