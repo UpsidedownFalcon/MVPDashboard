@@ -54,6 +54,11 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+      # A fresh build starts cold: migrations, bcrypt seeding and the numpy/scipy/
+      # pandas imports can take more than the 40 s the retries alone allow on a
+      # 2-vCPU VPS, and compose then refuses to start caddy ("dependency api
+      # failed to start ... is unhealthy"). Failures inside this window do not count.
+      start_period: 120s
 
   db:
     image: timescale/timescaledb:latest-pg17

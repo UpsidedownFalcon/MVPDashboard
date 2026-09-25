@@ -52,6 +52,11 @@ exactly those four (22, 80, 443, 5005/udp).
   rebuild the containers. Nothing is uploaded from your PC.
 - The server's `.env` file is **not** in git. It holds the passwords and settings and
   survives every pull. Your PC's `.env` must never be copied to the server.
+- Containers only read `.env` when they are **created**. `docker compose up -d` re-creates
+  every container whose settings changed; `docker compose restart` does not re-read the
+  file. And the database keeps the `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB`
+  it was created with the very first time: editing those lines later changes what the api
+  sends, not what the database expects (B7 says how to recover).
 - The database lives in a Docker volume called `db_data`. Rebuilding containers does
   not touch it.
 - Every time the `api` container starts it runs the SQL migrations (new ones only) and
@@ -232,6 +237,10 @@ git branch --show-current
 git status --short
 git log -1 --oneline
 ```
+- Your prompt should start with `mvpdash@`. If it starts with `root@`, everything below
+  still works, but git will leave root-owned files behind and the next deploy as
+  `mvpdash` fails with permission errors. Either type `exit` and log in as `mvpdash`, or,
+  when you are done, run `chown -R mvpdash:mvpdash /home/mvpdash/MVPDashboard` as root.
 - The first command must print `main`. If it prints something else (for example
   nothing, after a rollback), type `git checkout main` and press Enter.
 - The second command should print nothing. If it lists files, someone edited files on
@@ -284,6 +293,10 @@ Two keys deserve a look after any pull:
 |---|---|
 | `UDP_PUBLIC_IP` | Your Cloudflare record is **Proxied** (orange cloud). Then it must be `<VPS_IP>`. With a DNS-only record leave it blank. |
 | `UDP_PORT` | Never change it without also changing the firewall and every sleeve. Confirm it still says `5005`: `grep '^UDP_PORT=' .env`. |
+| `POSTGRES_*` | Never change these on a running server. The database ignores a new password in `.env` (see B7 for the recovery if it has already happened). |
+
+Whatever you changed in `.env` takes effect in B7, when `docker compose up -d` re-creates
+the containers whose settings changed. A `docker compose restart` would not pick it up.
 
 ### B6. On the server: does this version contain a migration that changes data?
 
@@ -309,6 +322,42 @@ reconnect on their own; wearables keep sending and lose only those seconds.
 
 (`deploy/deploy.sh`, run from your PC as `VPS=mvpdash@<VPS_IP> bash deploy/deploy.sh`,
 does B4 and B7 in one go. Use it once you are comfortable; it skips B5 and B6.)
+
+**If it ends with `dependency failed to start: container mvpdashboard-api-1 is
+unhealthy`:** compose did not start `caddy` because the api did not answer its health
+check in time, so the website is down until this is fixed. Find out which case you are in:
+
+```bash
+docker compose logs --since 5m api | tail -40
+docker compose ps
+```
+
+- The log ends with `Uvicorn running on http://0.0.0.0:8000` and `api` shows `(healthy)`:
+  it was only slow to start. Run `docker compose up -d` once more; caddy starts and the
+  site is back. Continue with B8.
+- The log repeats `db not ready (password authentication failed for user "mvpdash")`:
+  the `POSTGRES_PASSWORD` in `.env` is not the one the database was created with (it only
+  reads that value the first time its volume is initialised). Make the database match the
+  file. Show the current value and copy everything after the `=`:
+  ```bash
+  grep '^POSTGRES_PASSWORD=' .env
+  docker compose exec db psql -U mvpdash -d mvpdash
+  ```
+  At the `mvpdash=#` prompt type the next line with the copied value between the quotes,
+  press Enter (it answers `ALTER ROLE`), then type `\q` and Enter:
+  ```sql
+  ALTER USER mvpdash WITH PASSWORD 'PASTE-THE-VALUE-HERE';
+  ```
+  Then re-create the api so it also reads the current file, watch it come up, and start
+  the rest:
+  ```bash
+  docker compose up -d --force-recreate api
+  docker compose logs --since 1m -f api        # Ctrl+C once you see "Uvicorn running"
+  docker compose up -d
+  docker compose ps
+  ```
+- Any other error, for example under `applying <file>.sql` or `RuntimeError: JWT_SECRET is
+  not set`: fix the cause it names in `.env` or ask for help, then `docker compose up -d`.
 
 ### B8. On the server: prove it worked
 
