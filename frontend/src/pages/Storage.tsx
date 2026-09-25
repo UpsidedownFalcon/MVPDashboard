@@ -9,6 +9,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useCallback, useEffect, useReducer, useRef } from 'react'
 import ConfigEditor from '../components/storage/ConfigEditor'
+import ConversionPanel from '../components/storage/ConversionPanel'
 import DrivePanel from '../components/storage/DrivePanel'
 import LogList from '../components/storage/LogList'
 import TransferPanel from '../components/storage/TransferPanel'
@@ -20,10 +21,14 @@ import {
 } from '../lib/config'
 import { useMergedDevices } from '../lib/devices'
 import { RIG_QUERY_KEYS } from '../lib/rig'
-import { FILE_HEADER_BYTES, parseFileHeader } from '../lib/storage/binFormat'
+import { FILE_HEADER_BYTES, parseFileHeader, SENSOR_SHIN, SENSOR_THIGH } from '../lib/storage/binFormat'
 import { applyEdits, interpretAsFirmware, stripBom, verifyReadback } from '../lib/storage/configFile'
 import { UNIT_ID_RE } from '../lib/storage/configSchema'
-import { STORAGE_COPY } from '../lib/storage/copy'
+import { listPending, outputsPresent } from '../lib/storage/convert/pending'
+import type { Placement } from '../lib/storage/convert/protocol'
+import { stemOf } from '../lib/storage/convert/types'
+import { ConversionQueue, type ConversionJobSpec } from '../lib/storage/convertQueue'
+import { fill, STORAGE_COPY } from '../lib/storage/copy'
 import { fsaDir, isSupported, pickDirectory, queryPermission, requestPermission } from '../lib/storage/fsa'
 import { loadHandle, saveHandle } from '../lib/storage/handleStore'
 import type { DirEntry, DirLike } from '../lib/storage/io'
@@ -33,6 +38,8 @@ import {
   canSave,
   canStart,
   changedKeysBetween,
+  conversionJobId,
+  conversionRows,
   draftIdentity,
   draftProblems,
   effectiveDraft,
@@ -41,9 +48,11 @@ import {
   identityFromHeader,
   identityOf,
   initialState,
+  missingCount,
   needsPowerCycle,
   parseTxtIdentity,
   reducer,
+  selectedSummary,
   soldierNameFor,
   udpTargetStatus,
   type DriveReason,
@@ -52,7 +61,7 @@ import {
   type SavedInfo,
 } from '../lib/storage/pageState'
 import { errorDetail as detailOf, errorName } from '../lib/storage/io'
-import { runTransfer, type TransferItem } from '../lib/storage/transfer'
+import { RAW_SUBDIR, runTransfer, type TransferItem } from '../lib/storage/transfer'
 
 const decoder = new TextDecoder()
 
@@ -143,6 +152,11 @@ export default function Storage() {
   const cardRef = useRef<FileSystemDirectoryHandle | null>(null)
   const destRef = useRef<FileSystemDirectoryHandle | null>(null)
   const abortRef = useRef<AbortController | null>(null)
+  /** CS2: created on first use; its worker on the first start(). */
+  const queueRef = useRef<ConversionQueue | null>(null)
+  /** The destination each job was queued for: a job never follows the page
+   *  to a folder picked later (review finding, 2026-09-25). */
+  const jobDests = useRef(new Map<string, FileSystemDirectoryHandle>())
   /** False once unmounted: late async results are dropped, not dispatched. */
   const alive = useRef(true)
 
@@ -177,6 +191,18 @@ export default function Storage() {
     }
   }, [])
 
+  /** Decision O: raw files in the destination that lack an output, found
+   *  whenever the destination becomes usable; queued only on request. */
+  const scanPending = useCallback(async (handle: FileSystemDirectoryHandle) => {
+    dispatch({ type: 'pending-scanning' })
+    try {
+      const pending = await listPending(fsaDir(handle))
+      if (alive.current) dispatch({ type: 'pending-loaded', pending })
+    } catch {
+      if (alive.current) dispatch({ type: 'pending-failed' })
+    }
+  }, [])
+
   // Mount: support check, then the persisted handles. A handle that still
   // has permission loads at once; one that needs a prompt waits for a click
   // (requestPermission needs a user gesture).
@@ -204,13 +230,16 @@ export default function Storage() {
       const p = await permissionOf(dest)
       if (cancelled) return
       dispatch(p === 'granted' ? { type: 'dest-set', name: dest.name } : { type: 'dest-reconnect', name: dest.name })
+      if (p === 'granted') await scanPending(dest)
     })()
     return () => {
       cancelled = true
       alive.current = false
       abortRef.current?.abort()
+      queueRef.current?.dispose()
+      queueRef.current = null
     }
-  }, [openDrive])
+  }, [openDrive, scanPending])
 
   // ---- drive -------------------------------------------------------------
 
@@ -266,6 +295,7 @@ export default function Storage() {
     destRef.current = handle
     await saveHandle('dest', handle)
     dispatch({ type: 'dest-set', name: handle.name })
+    await scanPending(handle)
   }
 
   const onReconnectDest = async () => {
@@ -277,8 +307,12 @@ export default function Storage() {
     } catch {
       /* treated as denied */
     }
-    if (p === 'granted') dispatch({ type: 'dest-set', name: handle.name })
-    else dispatch({ type: 'dest-clear' })
+    if (p === 'granted') {
+      dispatch({ type: 'dest-set', name: handle.name })
+      await scanPending(handle)
+    } else {
+      dispatch({ type: 'dest-clear' })
+    }
   }
 
   // ---- save (4.2) --------------------------------------------------------
@@ -373,6 +407,8 @@ export default function Storage() {
     const fallback = identityOf(state.config.view)
     const chosen = new Set(state.logs.selected)
     const items: TransferItem[] = []
+    /** Item id -> the sleeve it reports as, for the summary's placement column. */
+    const unitIds = new Map<string, string>()
     for (const row of state.logs.entries) {
       if (!chosen.has(row.name)) continue
       let ident: Identity | null = row.header ? identityFromHeader(row.header) : null
@@ -380,12 +416,14 @@ export default function Storage() {
         const bin = state.logs.entries.find((r) => r.kind === 'BIN' && r.session === row.session)
         ident = bin?.header ? identityFromHeader(bin.header) : await txtIdentity(cardDir, row.name)
       }
+      const who = ident ?? fallback
+      unitIds.set(row.name, who.unitId)
       items.push({
         id: row.name,
         name: row.name,
         size: row.size,
         kind: row.kind,
-        folder: folderFor(ident ?? fallback),
+        folder: folderFor(who),
       })
     }
     const ctrl = new AbortController()
@@ -400,6 +438,15 @@ export default function Storage() {
       for await (const event of events) {
         if (!alive.current) break
         dispatch({ type: 'transfer-event', event })
+        // CS2 (decisions L, Q, V): a verified BIN copy is queued for
+        // conversion whether or not the card-side delete succeeded, and the
+        // queue runs while the next file copies: nothing here is awaited.
+        if (event.type === 'item-done' || (event.type === 'item-failed' && event.code === 'card-delete')) {
+          const item = items.find((it) => it.id === event.id)
+          if (item?.kind === 'BIN' && event.localName) {
+            enqueueConversion(item.folder, event.localName, unitIds.get(item.id) ?? null)
+          }
+        }
       }
       if (alive.current) dispatch({ type: 'transfer-ended' })
     } catch (err) {
@@ -413,6 +460,67 @@ export default function Storage() {
   const onCancel = () => {
     abortRef.current?.abort()
     dispatch({ type: 'transfer-cancelling' })
+  }
+
+  // ---- conversion (CS2, PLAN_csv_summary 4.6) ------------------------------
+
+  /** Decision S: the summary's placement column, "left thigh" when the
+   *  dashboard knows the unit's side (assumption A7: the ['units'] query),
+   *  "thigh" when it does not. Sensor 1 is the thigh, 2 the shin. */
+  const placementFor = (unitId: string | null): Placement => {
+    const p = STORAGE_COPY.conversion.placement
+    const side = unitId ? (unitsQuery.data?.find((u) => u.unit_id === unitId)?.side ?? null) : null
+    const label = (segment: string) =>
+      side ? fill(p.sided, { side: STORAGE_COPY.conversion.sides[side], segment }) : segment
+    return { labels: { [SENSOR_THIGH]: label(p.thigh), [SENSOR_SHIN]: label(p.shin) }, fallback: p.notSet }
+  }
+
+  /** Assumption A1: the raw file and its output folder are re-derived from
+   *  the destination root the page holds, so the worker gets handles, never
+   *  paths. Decision V: all three outputs present means nothing to do. */
+  const getQueue = (): ConversionQueue => {
+    if (!queueRef.current) {
+      queueRef.current = new ConversionQueue({
+        createWorker: () => new Worker(new URL('../workers/convert.worker.ts', import.meta.url), { type: 'module' }),
+        resolve: async (job) => {
+          const dest = jobDests.current.get(job.id)
+          if (!dest) throw new DOMException('no destination folder', 'NotFoundError')
+          const folder = await dest.getDirectoryHandle(job.folder)
+          const raw = await (await folder.getDirectoryHandle(RAW_SUBDIR)).getFileHandle(job.localName)
+          // an empty placeholder (a failed run) is not an output
+          return { raw, outDir: folder, outputsPresent: outputsPresent(await fsaDir(folder).list(), job.stem) }
+        },
+        onEvent: (event) => {
+          if (alive.current) dispatch({ type: 'convert-event', event })
+        },
+      })
+    }
+    return queueRef.current
+  }
+
+  /** Queue one raw file and kick the queue; returns at once. */
+  const enqueueConversion = (folder: string, localName: string, unitId: string | null) => {
+    const id = conversionJobId(folder, localName)
+    const stem = stemOf(localName)
+    const spec: ConversionJobSpec = { id, folder, localName, stem, sourceFile: localName, placement: placementFor(unitId) }
+    const dest = destRef.current
+    if (!dest) return
+    const queue = getQueue()
+    if (queue.enqueue(spec)) {
+      jobDests.current.set(id, dest)
+      dispatch({ type: 'convert-queued', job: { id, folder, localName, stem, unitId } })
+    }
+    queue.start()
+  }
+
+  const onConvertMissing = () => {
+    for (const p of state.conversion.pending) enqueueConversion(p.folder, p.localName, p.unitId)
+  }
+
+  /** Decision R: the whole conversion runs again; outputs are rewritten. */
+  const onRetry = (id: string) => {
+    const job = state.conversion.jobs[id]
+    if (job) enqueueConversion(job.folder, job.localName, job.unitId)
   }
 
   // ---- derived -----------------------------------------------------------
@@ -484,6 +592,18 @@ export default function Storage() {
             onKeep={(keep) => dispatch({ type: 'keep-copies', keep })}
             onStart={() => void onStart()}
             onCancel={onCancel}
+          />
+
+          <ConversionPanel
+            rows={conversionRows(state)}
+            selected={state.conversion.selected}
+            summary={selectedSummary(state)}
+            pendingCount={missingCount(state)}
+            scanning={state.conversion.scanning}
+            destReady={state.dest.status === 'ready'}
+            onSelect={(id) => dispatch({ type: 'convert-select', id })}
+            onRetry={onRetry}
+            onConvertMissing={onConvertMissing}
           />
         </>
       )}

@@ -1,0 +1,58 @@
+========================================================================
+File: kitchen.csv
+========================================================================
+File header and decoder verdict
+  firmware 1.2.0  device 3  session 18  ODR 6,400 Hz  +/-32 g  +/-4000 deg/s  units: physical
+  blocks 59 valid / 7 bad CRC, 2 seq gaps, 2 FIFO overflows, CLEAN end
+  UTC sync: 2023-11-14 22:13:20Z (3 sync block(s))
+
+Total rows (data points) in file : 15,660
+Data points attributed to sensors: 15,660
+
+1) Unique sensors: 2
+
+2/3/4) Per-sensor breakdown
+  device_id  sensor_id    data_points   percent  placement                    
+  ---------  ---------  -------------  --------  -----------------------------
+          3          1          7,540   48.148%  placement not set            
+          3          2          8,120   51.852%  placement not set            
+  ---------  ---------  -------------  --------  -----------------------------
+      TOTAL                    15,660  100.000%
+
+5/6) Tap-order calibration not run (--plot stats). The tap analysis is
+     only meaningful for a recording where each sensor was struck a
+     known number of times in a known order; run --plot tap for those.
+
+Sampling and data continuity
+   sensor  placement                        nominal   delivered   at nom.   gaps>1ms     lost    max gap      clipped
+  -------  -----------------------------  ---------  ----------  --------  ---------  -------  ---------  -----------
+   (3, 1)  placement not set                 6410Hz      5953Hz    100.0%          2     0.1s     45.4ms        4a/3g
+   (3, 2)  placement not set                 6410Hz      6411Hz    100.0%          0     0.0s      0.2ms        3a/3g
+
+  'nominal' = 1/median(dt), the rate the sensor actually converts at.
+  'delivered' = samples/span, degraded by lost blocks and FIFO overflow.
+  'at nom.' = share of intervals within +/-20% of nominal, i.e. the fraction
+  of the record genuinely sampled at the full rate.
+
+8) Motion-agnostic noise and bias
+Motion-agnostic noise  (content above 20 Hz; 22 ms detrended windows inside gap-free bursts, median over windows)
+   sensor  placement                        accel noise (mg RMS)  gyro noise (mdeg/s RMS)  rest |a|     wins
+                                                x      y       z        x      y       z                   
+  -------  -----------------------------  ----------------------  ----------------------  --------  -------
+   (3, 1)  placement not set                 0.00   0.00    0.00        0      0       0  32.1514g       53
+   (3, 2)  placement not set                52.29   0.00    0.00        0      0       0  31.2336g       57
+
+  Accelerometer noise is divided by each sensor's own resting |accel| (the
+  'rest |a|' column), so per-unit gain error is removed. One count is
+  0.977 mg and 122 mdeg/s at this file's +/-32 g / +/-4000 deg/s.
+
+Rest orientation and gyroscope bias
+   sensor  placement                                 median accel (g)      gyro bias (mdeg/s)     tilt
+                                                  x        y        z        x      y       z         
+  -------  -----------------------------  ---------------------------  ----------------------  -------
+   (3, 1)  placement not set                 1.6323  -1.5532  -5.8232   -60730-285461  -65552    21.2d
+   (3, 2)  placement not set                -4.0630  -1.5532   2.0654   563416-168396  -59143    64.6d
+
+  'tilt' is the angle between the sensor +Z axis and the median gravity
+  vector. Gyro medians are the static bias to remove before integration.
+

@@ -1,0 +1,4 @@
+# Decoder fixtures and goldens are compared byte for byte (sha256 of the
+# CSV, parsed meta, summary text): never normalise line endings here.
+* -text
+*.bin binary

@@ -10,6 +10,7 @@ import {
   type ConfigKey,
   type ValidateCode,
 } from './configSchema'
+import type { ConversionErrorCode } from './convert/protocol'
 import type { TransferErrorCode } from './transfer'
 
 export const STORAGE_COPY = {
@@ -211,6 +212,57 @@ export const STORAGE_COPY = {
       'Sleeves transfer at about 1 MB/s over USB, so a 512 MB file takes about 9 minutes.',
   },
 
+  /** Change-set 2 (agent-docs/03_PLAN_csv_summary): CSV + summary per log. */
+  conversion: {
+    section: 'CSV and summary',
+    intro:
+      'Each transferred log becomes a CSV, a meta.json and a plain-text summary next to raw/ in its sleeve folder. This runs on this computer while the transfer continues; the raw file is never changed.',
+    columns: {
+      select: 'Show summary',
+      file: 'File',
+      sleeve: 'Sleeve',
+      status: 'Status',
+    },
+    status: {
+      queued: 'Queued for conversion',
+      scanning: 'Scanning {pct}%',
+      converting: 'Converting {pct}%',
+      converted: 'Converted',
+      alreadyConverted: 'Already converted',
+      failed: 'Conversion failed: {reason}',
+      cancelled: 'Conversion cancelled',
+    },
+    failed: {
+      format: 'the raw file is not a sleeve log (bad header)',
+      range: 'a timestamp in the raw file is out of range',
+      read: 'the raw file could not be read',
+      write: 'the CSV could not be written to the destination folder',
+      aborted: 'cancelled',
+      permission: 'the browser lost permission to the destination folder',
+      worker: 'the conversion worker stopped unexpectedly',
+    },
+    retry: 'Retry',
+    convertMissing: 'Convert missing ({n})',
+    scanning: 'Looking for raw files without a CSV...',
+    noneMissing: 'Every raw file in the destination has its CSV and summary.',
+    summaryHeading: 'Summary',
+    summaryWhere: 'Written to {folder} as {file}',
+    summaryEmpty: 'Select a converted log to see its summary here.',
+    /** Decision S: the summary's placement column, sensor 1 thigh, 2 shin. */
+    placement: {
+      thigh: 'thigh',
+      shin: 'shin',
+      sided: '{side} {segment}',
+      notSet: 'placement not set',
+    },
+    /** Lower-case on purpose: these sit inside a line of the summary text,
+     *  unlike the Left / Right button labels above. */
+    sides: {
+      left: 'left',
+      right: 'right',
+    },
+  },
+
   units: {
     b: 'B',
     kb: 'KB',
@@ -258,4 +310,9 @@ export function validationMessage(key: ConfigKey, code: ValidateCode): string {
 /** The reason text of a failed transfer item. */
 export function transferFailureText(code: TransferErrorCode): string {
   return fill(STORAGE_COPY.transfer.status.failed, { reason: STORAGE_COPY.transfer.failed[code] })
+}
+
+/** The status text of a failed conversion. */
+export function conversionFailureText(code: ConversionErrorCode): string {
+  return fill(STORAGE_COPY.conversion.status.failed, { reason: STORAGE_COPY.conversion.failed[code] })
 }

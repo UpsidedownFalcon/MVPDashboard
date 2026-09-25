@@ -4,7 +4,7 @@
 |---|---|
 | Status | Set in stone as the build order (revised 2026-08-02: staged, biomech-first, task-granular). All three stages shipped; work since then is tracked per change-set, not as new stages. |
 | Task detail | [tasks/STAGE1.md](tasks/STAGE1.md) · [tasks/STAGE2.md](tasks/STAGE2.md) · [tasks/STAGE3.md](tasks/STAGE3.md) · [tasks/STAGE4.md](tasks/STAGE4.md) (demo frontend + military theme, 2026-09-12) |
-| **Current work** | **Sleeve storage** — plan of record [`PLAN_msd_management.md`](../agent-docs/02_PLAN_msd_management.md) (approved 2026-09-23). Change-set 1 — the `/storage` page with a firmware-exact `CONFIG.TXT` editor and a verified log transfer, migration 006, `GET /api/config/udp-target`, and a sleeve's side seeded from its own `source_id` at registration (decision H) — **shipped 2026-09-23**; change-set 2 (a CSV plus a plain-text summary per transferred log, in a Web Worker) is **planned, not built** (that plan's §5). Previous change-set, shipped 2026-09-23: **unilateral knee sleeves** — [`PLAN_unilateral_devices.md`](../agent-docs/01_PLAN_unilateral_devices.md) (six work packages: common, ingest, api, simulator, frontend, docs): a second wearable kind on the same UDP port, dashboard-driven pairing, side and per-sleeve IMU full scale. Both touch the stable interfaces and config keys below, so read TRD §3/§4/§7 and BACKEND_SCHEMA §1/§3/§4/§5 before changing anything near them. |
+| **Current work** | **Sleeve storage** — plan of record [`PLAN_msd_management.md`](../agent-docs/02_PLAN_msd_management.md) (approved 2026-09-23). Change-set 1 — the `/storage` page with a firmware-exact `CONFIG.TXT` editor and a verified log transfer, migration 006, `GET /api/config/udp-target`, and a sleeve's side seeded from its own `source_id` at registration (decision H) — **shipped 2026-09-23**; change-set 2 (a CSV byte-exact with `bin2csv.py`, a `.meta.json` and a plain-text summary ported from `sensor_stats.py` per transferred log, in a Web Worker beside `raw/`, plus the "CSV and summary" card with Convert missing and Retry) **built 2026-09-25** on branch `csv-summary`, plan of record [`03_PLAN_csv_summary.md`](../agent-docs/03_PLAN_csv_summary.md) (decisions O-V); no backend change. Previous change-set, shipped 2026-09-23: **unilateral knee sleeves** — [`PLAN_unilateral_devices.md`](../agent-docs/01_PLAN_unilateral_devices.md) (six work packages: common, ingest, api, simulator, frontend, docs): a second wearable kind on the same UDP port, dashboard-driven pairing, side and per-sleeve IMU full scale. Both touch the stable interfaces and config keys below, so read TRD §3/§4/§7 and BACKEND_SCHEMA §1/§3/§4/§5 before changing anything near them. |
 | Related | [PLAN.md](PLAN.md) · [TRD.md](TRD.md) · [BACKEND_SCHEMA.md](BACKEND_SCHEMA.md) |
 
 ## The three stages (user-mandated order)
@@ -102,6 +102,11 @@ MVPDashboard/
   example/      (existing sample data + parser — read-only reference)
   mockup/       (stage-3 input from user)
   scripts/validate_stage1.py   (S1-T13 validation matrix runner)
+  scripts/kneesleeve/          (bin2csv.py, sensor_stats.py vendored verbatim
+                                2026-09-25; the reference the CSV + summary
+                                port is checked against; never edited)
+  scripts/storage_goldens.py   (regenerates the convert goldens with them:
+                                uv run --with matplotlib python scripts/storage_goldens.py)
   simulator/simulate.py
   backend/
     Dockerfile  pyproject.toml
@@ -130,7 +135,17 @@ MVPDashboard/
                               CRC32 + block scanner, verified-transfer engine,
                               page reducer and STORAGE_COPY; fsa.ts is the only
                               module touching the File System Access API)
-    src/components/storage/  src/pages/Storage.tsx   (the /storage page)
+    src/lib/storage/convert/ (2026-09-25, change-set 2: LOG -> CSV + meta.json
+                              decoder byte-exact with bin2csv.py, streaming
+                              statistics sink and the sensor_stats.py summary,
+                              pipeline, worker protocol, destination scan; pure)
+    src/lib/storage/convertQueue.ts  src/workers/convert.worker.ts
+                             (one Web Worker, FIFO, one file at a time)
+    src/lib/storage/fixtures/convert/  (8 synthetic BINs + goldens: *.csv.sha256,
+                              *.meta.json, *.summary.txt, also for LOG_0010.head64)
+    src/components/storage/  src/pages/Storage.tsx   (the /storage page; the
+                              CSV and summary card is ConversionPanel.tsx)
+    e2e/convert.html  e2e/convert.ts   (dev-only conversion dry run, npm run dev)
 ```
 
 ## Set in stone vs later

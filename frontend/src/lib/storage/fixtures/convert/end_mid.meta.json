@@ -1,0 +1,24 @@
+{
+ "fw": "1.2.0",
+ "device_id": 3,
+ "source_id": 0,
+ "sensor_count": 2,
+ "odr_hz": 6400,
+ "accel_fs_g": 32,
+ "gyro_fs_dps": 4000,
+ "accel_scale": 0.0009765625,
+ "gyro_scale": 0.1220703125,
+ "session_id": 12,
+ "source_file": "end_mid.bin",
+ "units": "physical",
+ "blocks_valid": 13,
+ "blocks_bad": 0,
+ "seq_gaps": 0,
+ "fifo_overflows": 0,
+ "clean_end": true,
+ "time_sync": [],
+ "rows": {
+  "1": 1740,
+  "2": 1740
+ }
+}

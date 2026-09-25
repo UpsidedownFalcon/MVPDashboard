@@ -2,11 +2,16 @@ import { describe, expect, it } from 'vitest'
 import type { UdpTarget } from '../api'
 import { interpretAsFirmware } from './configFile'
 import { fixtureBytes, LOG_0010_HEAD_TXT } from './fixtures/load'
+import type { PendingRaw } from './convert/pending'
+import type { MetaJson } from './convert/types'
+import type { QueueEvent } from './convertQueue'
 import {
   buildEdits,
   canSave,
   canStart,
   changedKeysBetween,
+  conversionJobId,
+  conversionRows,
   draftIdentity,
   draftProblems,
   effectiveDraft,
@@ -14,14 +19,17 @@ import {
   fullScaleOf,
   identityOf,
   initialState,
+  missingCount,
   needsPowerCycle,
   octalKeys,
   parseTxtIdentity,
   reducer,
+  selectedSummary,
   soldierNameFor,
   udpTargetStatus,
   type Action,
   type LogRow,
+  type QueuedJob,
   type StorageState,
 } from './pageState'
 import type { TransferItem, TransferSummary } from './transfer'
@@ -438,5 +446,216 @@ describe('log selection and transfer', () => {
     const s = run([{ type: 'transfer-start', items: ITEMS }, { type: 'transfer-ended', error: 'boom' }], ready())
     expect(s.transfer.running).toBe(false)
     expect(s.transfer.error).toBe('boom')
+  })
+})
+
+describe('conversion (change-set 2)', () => {
+  const META = { fw: '1.2.0', device_id: 7 } as unknown as MetaJson
+  const OUTPUTS = { csv: 'LOG_0010.csv', meta: 'LOG_0010.meta.json', summary: 'LOG_0010_summary.txt' }
+
+  function queued(name: string, folder = 'sleeve-u7-1', unitId: string | null = 'u7-1'): QueuedJob {
+    return { id: conversionJobId(folder, name), folder, localName: name, stem: name.replace(/\.BIN$/, ''), unitId }
+  }
+
+  function ev(event: QueueEvent): Action {
+    return { type: 'convert-event', event }
+  }
+
+  function pendingRaw(name: string, folder = 'sleeve-u7-1'): PendingRaw {
+    return {
+      folder,
+      localName: name,
+      stem: name.replace(/\.BIN$/, ''),
+      size: 4608,
+      unitId: folder.slice('sleeve-'.length),
+      missing: ['csv', 'meta', 'summary'],
+    }
+  }
+
+  const ID10 = conversionJobId('sleeve-u7-1', 'LOG_0010.BIN')
+  const ID11 = conversionJobId('sleeve-u7-1', 'LOG_0011.BIN')
+
+  it('starts empty and conversionJobId is folder/localName', () => {
+    expect(initialState.conversion).toEqual({ order: [], jobs: {}, selected: null, pending: [], scanning: false })
+    expect(ID10).toBe('sleeve-u7-1/LOG_0010.BIN')
+    expect(conversionRows(initialState)).toEqual([])
+    expect(missingCount(initialState)).toBe(0)
+    expect(selectedSummary(initialState)).toBeNull()
+  })
+
+  it('convert-queued adds a queued row in first-queued order', () => {
+    const s = run([
+      { type: 'convert-queued', job: queued('LOG_0011.BIN') },
+      { type: 'convert-queued', job: queued('LOG_0010.BIN') },
+    ])
+    expect(s.conversion.order).toEqual([ID11, ID10])
+    expect(s.conversion.jobs[ID10]).toEqual({
+      ...queued('LOG_0010.BIN'),
+      status: 'queued',
+      pct: 0,
+      rows: 0,
+    })
+    expect(conversionRows(s).map((j) => j.localName)).toEqual(['LOG_0011.BIN', 'LOG_0010.BIN'])
+  })
+
+  it('progress maps the pre-pass to scanning and the main pass to converting with a percentage', () => {
+    const base = reducer(initialState, { type: 'convert-queued', job: queued('LOG_0010.BIN') })
+    const scanning = reducer(base, ev({ type: 'progress', id: ID10, phase: 'prepass', bytesDone: 25, bytesTotal: 100, rows: 0 }))
+    expect(scanning.conversion.jobs[ID10]).toMatchObject({ status: 'scanning', pct: 25, rows: 0 })
+    const converting = reducer(
+      scanning,
+      ev({ type: 'progress', id: ID10, phase: 'convert', bytesDone: 50, bytesTotal: 100, rows: 1234 }),
+    )
+    expect(converting.conversion.jobs[ID10]).toMatchObject({ status: 'converting', pct: 50, rows: 1234 })
+    // the queue's own 'queued' echo and an event for an unknown job change nothing
+    expect(reducer(base, ev({ type: 'queued', id: ID10 }))).toBe(base)
+    expect(reducer(base, ev({ type: 'cancelled', id: 'nope' }))).toBe(base)
+  })
+
+  it('done records the summary and outputs and selects the row when nothing converted is selected', () => {
+    const s = run([
+      { type: 'convert-queued', job: queued('LOG_0010.BIN') },
+      ev({ type: 'done', id: ID10, meta: META, summary: 'TEXT', outputs: OUTPUTS }),
+    ])
+    expect(s.conversion.jobs[ID10]).toMatchObject({ status: 'converted', pct: 100, summary: 'TEXT', outputs: OUTPUTS })
+    expect(s.conversion.selected).toBe(ID10)
+    expect(selectedSummary(s)).toEqual({ id: ID10, folder: 'sleeve-u7-1', file: 'LOG_0010_summary.txt', text: 'TEXT' })
+  })
+
+  it('a later done does not steal the selection from a converted row the user picked', () => {
+    const both = run([
+      { type: 'convert-queued', job: queued('LOG_0010.BIN') },
+      { type: 'convert-queued', job: queued('LOG_0011.BIN') },
+      ev({ type: 'done', id: ID10, meta: META, summary: 'TEN', outputs: OUTPUTS }),
+    ])
+    expect(both.conversion.selected).toBe(ID10)
+    const later = reducer(both, ev({ type: 'done', id: ID11, meta: META, summary: 'ELEVEN', outputs: OUTPUTS }))
+    expect(later.conversion.selected).toBe(ID10)
+    // but it does take over when the selected row is not converted (a failed one, say)
+    const failedFirst = run([
+      { type: 'convert-queued', job: queued('LOG_0010.BIN') },
+      { type: 'convert-queued', job: queued('LOG_0011.BIN') },
+      ev({ type: 'failed', id: ID10, code: 'format', detail: 'bad magic' }),
+      { type: 'convert-select', id: ID10 },
+      ev({ type: 'done', id: ID11, meta: META, summary: 'ELEVEN', outputs: OUTPUTS }),
+    ])
+    expect(failedFirst.conversion.selected).toBe(ID11)
+  })
+
+  it('convert-select picks a known row only; a non-converted selection has no summary', () => {
+    const s = run([
+      { type: 'convert-queued', job: queued('LOG_0010.BIN') },
+      { type: 'convert-queued', job: queued('LOG_0011.BIN') },
+      ev({ type: 'done', id: ID10, meta: META, summary: 'TEN', outputs: OUTPUTS }),
+      { type: 'convert-select', id: ID11 },
+    ])
+    expect(s.conversion.selected).toBe(ID11)
+    expect(selectedSummary(s)).toBeNull()
+    expect(reducer(s, { type: 'convert-select', id: 'nope' })).toBe(s)
+    expect(selectedSummary(reducer(s, { type: 'convert-select', id: ID10 }))?.text).toBe('TEN')
+  })
+
+  it('failed, cancelled and already-converted land on their statuses', () => {
+    const base = run([
+      { type: 'convert-queued', job: queued('LOG_0010.BIN') },
+      ev({ type: 'progress', id: ID10, phase: 'convert', bytesDone: 50, bytesTotal: 100, rows: 9 }),
+    ])
+    const failed = reducer(base, ev({ type: 'failed', id: ID10, code: 'permission', detail: 'NotAllowedError' }))
+    expect(failed.conversion.jobs[ID10]).toMatchObject({
+      status: 'failed',
+      pct: 50,
+      error: { code: 'permission', detail: 'NotAllowedError' },
+    })
+    expect(failed.conversion.selected).toBeNull()
+    const cancelled = reducer(base, ev({ type: 'cancelled', id: ID10 }))
+    expect(cancelled.conversion.jobs[ID10].status).toBe('cancelled')
+    const already = reducer(base, ev({ type: 'already-converted', id: ID10, outputs: OUTPUTS }))
+    expect(already.conversion.jobs[ID10]).toMatchObject({ status: 'already-converted', pct: 100, outputs: OUTPUTS })
+    expect(already.conversion.jobs[ID10].summary).toBeUndefined()
+    expect(already.conversion.selected).toBeNull()
+  })
+
+  it('a retry (convert-queued again) resets the row in place', () => {
+    const s = run([
+      { type: 'convert-queued', job: queued('LOG_0010.BIN') },
+      { type: 'convert-queued', job: queued('LOG_0011.BIN') },
+      ev({ type: 'failed', id: ID10, code: 'write', detail: 'QuotaExceededError' }),
+      { type: 'convert-queued', job: queued('LOG_0010.BIN') },
+    ])
+    expect(s.conversion.order).toEqual([ID10, ID11])
+    expect(s.conversion.jobs[ID10]).toEqual({ ...queued('LOG_0010.BIN'), status: 'queued', pct: 0, rows: 0 })
+  })
+
+  it('pending-scanning / pending-loaded / pending-failed drive the missing count', () => {
+    const scanning = reducer(initialState, { type: 'pending-scanning' })
+    expect(scanning.conversion.scanning).toBe(true)
+    const loaded = reducer(scanning, { type: 'pending-loaded', pending: [pendingRaw('LOG_0010.BIN'), pendingRaw('LOG_0011.BIN')] })
+    expect(loaded.conversion.scanning).toBe(false)
+    expect(missingCount(loaded)).toBe(2)
+    const failed = reducer(reducer(loaded, { type: 'pending-scanning' }), { type: 'pending-failed' })
+    expect(failed.conversion.scanning).toBe(false)
+    expect(missingCount(failed)).toBe(0)
+  })
+
+  it('re-queueing a converted job keeps its summary; already-converted shows it; failure clears it', () => {
+    const s = run([
+      { type: 'convert-queued', job: queued('LOG_0010.BIN') },
+      ev({ type: 'done', id: ID10, meta: META, summary: 'TEN', outputs: OUTPUTS }),
+      { type: 'convert-queued', job: queued('LOG_0010.BIN') },
+    ])
+    expect(s.conversion.jobs[ID10]).toMatchObject({ status: 'queued', pct: 0, summary: 'TEN', outputs: OUTPUTS })
+    expect(selectedSummary(s)).toBeNull()
+    const again = reducer(s, ev({ type: 'already-converted', id: ID10, outputs: OUTPUTS }))
+    expect(again.conversion.jobs[ID10].status).toBe('already-converted')
+    expect(selectedSummary(again)?.text).toBe('TEN')
+    const failed = reducer(s, ev({ type: 'failed', id: ID10, code: 'write' }))
+    expect(failed.conversion.jobs[ID10].summary).toBeUndefined()
+    expect(failed.conversion.jobs[ID10].outputs).toBeUndefined()
+    expect(selectedSummary(failed)).toBeNull()
+    const cancelled = reducer(s, ev({ type: 'cancelled', id: ID10 }))
+    expect(cancelled.conversion.jobs[ID10].summary).toBeUndefined()
+  })
+
+  it('queueing a raw file removes it from pending; a rescan skips jobs in flight but lists finished and failed ones', () => {
+    const loaded = reducer(initialState, {
+      type: 'pending-loaded',
+      pending: [pendingRaw('LOG_0010.BIN'), pendingRaw('LOG_0011.BIN'), pendingRaw('LOG_0002.BIN', 'sleeve-u3-0')],
+    })
+    const queuedOne = reducer(loaded, { type: 'convert-queued', job: queued('LOG_0010.BIN') })
+    expect(queuedOne.conversion.pending.map((p) => p.localName)).toEqual(['LOG_0011.BIN', 'LOG_0002.BIN'])
+    const all = [pendingRaw('LOG_0010.BIN'), pendingRaw('LOG_0011.BIN'), pendingRaw('LOG_0002.BIN', 'sleeve-u3-0')]
+    // LOG_0010 converting (in flight), LOG_0011 converted: only the one in flight is hidden
+    const inFlight = run(
+      [
+        ev({ type: 'progress', id: ID10, phase: 'convert', bytesDone: 1, bytesTotal: 2, rows: 1 }),
+        { type: 'convert-queued', job: queued('LOG_0011.BIN') },
+        ev({ type: 'done', id: ID11, meta: META, summary: 'x', outputs: OUTPUTS }),
+        { type: 'pending-loaded', pending: all },
+      ],
+      queuedOne,
+    )
+    expect(inFlight.conversion.pending.map((p) => p.localName)).toEqual(['LOG_0011.BIN', 'LOG_0002.BIN'])
+    // LOG_0010 failed: listed again (the retry-after-reload path)
+    const rescan = run([ev({ type: 'failed', id: ID10, code: 'read' }), { type: 'pending-loaded', pending: all }], inFlight)
+    expect(rescan.conversion.pending.map((p) => p.localName)).toEqual(['LOG_0010.BIN', 'LOG_0011.BIN', 'LOG_0002.BIN'])
+  })
+
+  it('drive-ready and transfer-start leave the conversion slice alone', () => {
+    const before = run([
+      { type: 'convert-queued', job: queued('LOG_0010.BIN') },
+      ev({ type: 'done', id: ID10, meta: META, summary: 'TEN', outputs: OUTPUTS }),
+      { type: 'pending-loaded', pending: [pendingRaw('LOG_0011.BIN')] },
+    ])
+    const afterDrive = reducer(before, {
+      type: 'drive-ready',
+      name: 'HIPPOSDATA',
+      configName: 'CONFIG.TXT',
+      bytes: enc.encode(CONFIG),
+      entries: ROWS,
+    })
+    expect(afterDrive.conversion).toBe(before.conversion)
+    const afterStart = reducer(afterDrive, { type: 'transfer-start', items: ITEMS })
+    expect(afterStart.conversion).toBe(before.conversion)
+    expect(afterStart.transfer.running).toBe(true)
   })
 })

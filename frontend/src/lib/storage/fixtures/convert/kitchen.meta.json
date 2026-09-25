@@ -1,0 +1,37 @@
+{
+ "fw": "1.2.0",
+ "device_id": 3,
+ "source_id": 0,
+ "sensor_count": 2,
+ "odr_hz": 6400,
+ "accel_fs_g": 32,
+ "gyro_fs_dps": 4000,
+ "accel_scale": 0.0009765625,
+ "gyro_scale": 0.1220703125,
+ "session_id": 18,
+ "source_file": "kitchen.bin",
+ "units": "physical",
+ "blocks_valid": 59,
+ "blocks_bad": 7,
+ "seq_gaps": 2,
+ "fifo_overflows": 2,
+ "clean_end": true,
+ "time_sync": [
+  {
+   "esp_us": 1000050000,
+   "unix_us": 1700000000050300
+  },
+  {
+   "esp_us": 1000100000,
+   "unix_us": 1700000000100000
+  },
+  {
+   "esp_us": 1000900000,
+   "unix_us": 1700000000900700
+  }
+ ],
+ "rows": {
+  "1": 7540,
+  "2": 8120
+ }
+}

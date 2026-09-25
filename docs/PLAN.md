@@ -38,8 +38,11 @@ Everything favors simplicity, stubs with stable interfaces, and configuration ov
 >   sleeve only after its copy verified. Change-set 1 shipped 2026-09-23 together with
 >   migration 006, `GET /api/config/udp-target` and the registration default that seeds a
 >   sleeve's side from its own `source_id` (decision H, amending the unilateral plan's G).
->   Change-set 2 (a CSV plus a plain-text summary per log, in a Web Worker) is **planned, not
->   built** (that plan's §5).
+>   Change-set 2 (a CSV byte-exact with `bin2csv.py`, a `.meta.json` and a plain-text summary
+>   ported from `sensor_stats.py` per transferred log, produced in a Web Worker beside `raw/`,
+>   with a fifth card that shows the summary) was **built 2026-09-25**:
+>   [`../agent-docs/03_PLAN_csv_summary.md`](../agent-docs/03_PLAN_csv_summary.md) (decisions
+>   O-V, As built). No backend change.
 
 **Build order (revised 2026-08-02 — user-mandated stages):**
 1. **Stage 1 — local only:** real biomech model (5 primitives + 1 composite) on live

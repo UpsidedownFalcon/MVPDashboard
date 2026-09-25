@@ -113,14 +113,15 @@ A rig with one leg instrumented carries the `one_leg` flag: `m1`..`m4` run norma
 `m5` (L/R balance) reads blank with "one leg" as its reason. It is never reported as missing
 sensors.
 
-### 1.5 Sleeve storage: edit CONFIG.TXT, transfer logs (2026-09-23)
+### 1.5 Sleeve storage: edit CONFIG.TXT, transfer logs, convert them (2026-09-23, 2026-09-25)
 
 A sleeve plugged into the operator's PC exposes its SD card as the **HIPPOSDATA** USB drive
 (`CONFIG.TXT`, `LOG_NNNN.BIN`, `LOG_NNNN.TXT`). The dashboard's `/storage` page (UIUX §15,
 plan of record `PLAN_msd_management.md`) opens it in **Chrome or Edge on https or localhost**
 through the File System Access API — nothing is uploaded, there is no helper app. While the
 card is mounted the sleeve neither logs nor streams, and a host **eject does not end its
-session**: only unplugging does, about 2 s after which it re-reads `CONFIG.TXT`.
+session**: only unplugging does, about 2 s after which it re-reads `CONFIG.TXT`. Since 2026-09-25
+each transferred log is also converted on the PC (`agent-docs/03_PLAN_csv_summary.md`).
 
 ```
 /storage ─▶ isSupported()? ──no──▶ "Sleeve storage needs Chrome or Edge on a secure (https) address"
@@ -175,10 +176,36 @@ listing = LOG_NNNN.BIN / LOG_NNNN.TXT only
 "Do not unplug the sleeve while a transfer is running" ─▶ progress | rate | ETA  (~1 MB/s USB)
 cancel or unplug mid-copy ─▶ writable aborted (no partial copy), card as it was, "N not started"
 done ─▶ "Done: N copied, N already transferred, N failed, N removed from the sleeve" ─▶ re-list
+
+CONVERT  (Web Worker, 2026-09-25: one file at a time while the transfer keeps copying)
+entry    a BIN's item-done (or item-failed where only the card-side delete failed)
+   |     "Convert missing (N)"  (a scan of dest/sleeve-*/raw/LOG_*.BIN for files lacking any
+   |                             output, run when the destination is chosen or reconnected;
+   |                             the button queues them, the scan itself starts nothing)
+   |     "Retry" on a failed or cancelled row  (the whole run again, outputs rewritten)
+   v
+queue    FIFO, one worker; handles only (raw file + sleeve folder), never paths, no upload
+   ->    three non-empty outputs beside raw/? --yes--> "Already converted" (nothing written)
+   |no
+   v
+pass 1   "Scanning N%"    block CRCs, sync anchors, timestamps (outlier filter), the dt and
+                          |a| medians   (bounded memory: histograms and tables, never the CSV)
+pass 2   "Converting N%"  bin2csv's loop -> <stem>.csv (byte-exact, half-to-even ties)
+                          + <stem>.meta.json (bin2csv's keys + unused_tail_blocks, first_bad)
+                          + count histograms, clip counts, 22 ms detrended noise windows
+summary  <stem>_summary.txt   sensor_stats' text sections; placement "left thigh" when the
+                          dashboard knows the leg (GET /api/units), else "thigh"
+   each output lands on close() (.crswap until then): a failure or a cancel never leaves a
+   partial file; an empty placeholder can remain, rewritten by Retry / Convert missing
+   v
+"Converted" -> the page shows the summary: "Written to sleeve-u<dev>-<src> as LOG_NNNN_summary.txt"
+raw/ is only read, never modified; nothing on the PC is ever deleted
 ```
 
-Change-set 2 — a CSV plus a plain-text summary per transferred log, produced in a Web Worker
-next to `raw/` — is **planned, not built** (`PLAN_msd_management.md` §5).
+**Added 2026-09-25 (change-set 2, `agent-docs/03_PLAN_csv_summary.md`, built):** the CONVERT block
+above. The conversion runs in a Web Worker on the operator's PC while the transfer keeps copying;
+the raw file is only read, nothing on the PC is deleted, and no backend call is involved (the
+sleeve's side for the placement column comes from the `GET /api/units` the page already holds).
 
 ## 2. Data flows
 
