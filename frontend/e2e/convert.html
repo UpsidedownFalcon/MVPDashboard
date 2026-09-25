@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Sleeve log conversion dry run</title>
+    <style>
+      body { font: 14px/1.4 system-ui, sans-serif; margin: 24px; }
+      pre { background: #f4f4f4; padding: 12px; max-height: 60vh; overflow: auto; }
+    </style>
+  </head>
+  <body>
+    <h1>Sleeve log conversion dry run</h1>
+    <p>
+      Dev-only harness (served by <code>npm run dev</code> at <code>/e2e/convert.html</code>). Pick a
+      <code>LOG_NNNN.BIN</code>: it is copied into the browser's origin-private file system, converted by
+      the real worker and queue, and the CSV is hashed here. Nothing leaves the PC.
+    </p>
+    <input id="bin" type="file" />
+    <pre id="log"></pre>
+    <script type="module" src="./convert.ts"></script>
+  </body>
+</html>

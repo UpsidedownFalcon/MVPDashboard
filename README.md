@@ -246,7 +246,27 @@ checks that it holds `CONFIG.TXT`). The page then:
   Tick `Keep copies on the sleeve` to skip the delete. A failure, a cancel or
   an unplug mid-copy never deletes and never leaves a partial copy; a file
   already at the destination with the same CRC reads "Already transferred".
-  `CONFIG.TXT` can never be listed, transferred or deleted.
+  `CONFIG.TXT` can never be listed, transferred or deleted;
+- **converts each transferred log** (since 2026-09-25,
+  [PLAN_csv_summary.md](agent-docs/03_PLAN_csv_summary.md)): once a `.BIN`
+  copy has verified, a Web Worker in the page turns it into three files next
+  to `raw/` in the same sleeve folder: `LOG_NNNN.csv` (byte-exact with the
+  firmware team's `bin2csv.py`), `LOG_NNNN.meta.json` (its sidecar plus
+  `unused_tail_blocks` and `first_bad`) and `LOG_NNNN_summary.txt` (the text
+  sections of `sensor_stats.py`: header and decoder verdict, per-sensor
+  breakdown, sampling continuity, noise, rest orientation and gyro bias; the
+  placement column reads `left thigh` / `left shin` when the dashboard knows
+  the sleeve's leg, else `thigh` / `shin`). A fifth card, **CSV and summary**,
+  lists each conversion (Queued, Scanning, Converting, Converted, Already
+  converted, Conversion failed, Conversion cancelled), shows the selected
+  summary in the page under "Written to <folder> as <file>", offers `Retry`
+  on a failed or cancelled row and `Convert missing (N)` for raw files found
+  in the destination without their outputs (a scan runs when the destination
+  is chosen; only the button starts them). The conversion runs on this PC
+  while the next file copies, only reads the raw file and never deletes
+  anything on the PC; a failed or cancelled conversion never leaves a partial
+  output (an empty placeholder file can remain; it counts as missing, and a
+  Retry or Convert missing rewrites it).
 
 Requirements and rules:
 
@@ -268,13 +288,24 @@ Requirements and rules:
   and that soldier's session resets. Changing the sleeve number or leg makes
   the sleeve appear as a **new** soldier; pairing, leg and history stay with
   the old id.
-- Change-set 2 (a CSV and a plain-text summary per transferred log) is planned,
-  not built: [PLAN_msd_management.md](agent-docs/02_PLAN_msd_management.md) §5.
+- Change-set 2 (the CSV, meta and summary per transferred log) was built
+  2026-09-25: [PLAN_csv_summary.md](agent-docs/03_PLAN_csv_summary.md)
+  (decisions O-V, As built). The reference scripts it is checked against,
+  `bin2csv.py` and `sensor_stats.py`, are vendored verbatim in
+  `scripts/kneesleeve/` (never edit them); `uv run --with matplotlib python
+  scripts/storage_goldens.py` regenerates the goldens the frontend tests
+  compare the port with (`frontend/src/lib/storage/fixtures/convert/`).
 
 **Dry run without a sleeve**: `cd frontend; npm run dev`, then pick any local
 folder holding copies of `CONFIG.TXT` and some `LOG_NNNN.{BIN,TXT}` — for
 instance `frontend/src/lib/storage/fixtures/config_generated_1_2_0.txt` saved as
-`CONFIG.TXT` and `LOG_0010.head64.bin` saved as `LOG_0010.BIN`. Then verify
+`CONFIG.TXT` and `LOG_0010.head64.bin` saved as `LOG_0010.BIN`. To try the
+conversion alone, open `http://localhost:5173/e2e/convert.html` (served by
+the dev server only) and pick a `LOG_NNNN.BIN`: it is copied into the
+browser's origin-private file system and converted by the real worker and
+queue; the page prints the time taken, the CSV's sha256 (compare it with
+`bin2csv.py`'s) and the summary, and nothing leaves the PC. Chrome is not
+installed on the dev PC; the 2026-09-25 verification ran in Edge. Then verify
 with a real sleeve:
 
 1. the picker offers the drive root and `Open sleeve drive` accepts it;
@@ -283,7 +314,10 @@ with a real sleeve:
 3. transfer a 512 MB file and time it (about 9 min); re-plug and confirm it is
    gone from the card and present under `sleeve-u<dev>-<src>/raw/`;
 4. unplug mid-copy: the card is intact, nothing was deleted, and no partial
-   copy remains in the destination.
+   copy remains in the destination;
+5. after a transfer, the **CSV and summary** card reaches `Converted` and shows
+   the summary; `LOG_NNNN.csv`, `.meta.json` and `_summary.txt` sit beside
+   `raw\` in the sleeve folder.
 
 ### Local end-to-end test with one sleeve
 
@@ -359,8 +393,13 @@ is on; the sleeve joins the same network.
     `C:\Users\<you>\HipposLogs`). First run: tick `Keep copies on the sleeve`,
     `Transfer selected`, watch Copying, Verifying, then `Copied (kept on sleeve)`
     at about 1 MB/s; the files land in `HipposLogs\sleeve-u1-0\raw\` with the
-    sizes shown on the drive. Second run with the box unticked: identical files
-    read `Already transferred` and are removed from the sleeve; re-plugging
+    sizes shown on the drive. As each `.BIN` verifies, the **CSV and summary**
+    card shows `Scanning`, `Converting`, then `Converted`, and its summary
+    appears below the table; `HipposLogs\sleeve-u1-0\` now holds
+    `LOG_0010.csv`, `LOG_0010.meta.json` and `LOG_0010_summary.txt` beside
+    `raw\` (a 512 MB log gives a CSV of about 2.3 GB). Second run with the box
+    unticked: identical files read `Already transferred`, their card rows
+    `Already converted`, and they are removed from the sleeve; re-plugging
     shows an empty log table.
 11. **Two safety checks worth doing once**: pull the cable mid-copy and confirm
     the card still has the file and the destination has no partial copy; and

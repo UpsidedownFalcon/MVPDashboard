@@ -36,7 +36,9 @@ export function requestPermission(handle: FileSystemHandle): Promise<PermissionS
   return handle.requestPermission({ mode: 'readwrite' })
 }
 
-class FileSource implements ByteSource {
+/** ByteSource over a File snapshot. Exported for workers/convert.worker.ts,
+ *  which wraps `await handle.getFile()` of the raw file it was handed. */
+export class FileSource implements ByteSource {
   constructor(private readonly file: File) {}
 
   get size(): number {

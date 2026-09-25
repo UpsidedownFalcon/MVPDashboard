@@ -632,6 +632,10 @@ checks PASS (lightness band, chroma, CVD ΔE worst adjacent 8.4, normal-vision
   progress and per-file status are `aria-live="polite"`; the Advanced toggle carries
   `aria-expanded`/`aria-controls`; segmented groups are `role="group"` with `aria-pressed`
   buttons; every input has a `<label for>` and, where help text exists, `aria-describedby`.
+- Sleeve storage, CSV and summary card (2026-09-25, section 15 card 5): the summary selection is
+  a radio button per row (`aria-label` = the job id) in one named group; the Status cell is
+  `aria-live="polite"`; the scan line is `role="status"`; `Retry` and `Convert missing` are real
+  buttons; the summary is a `<pre>` under an `<h3>`, so it reads as text.
 - Contrast: ink tokens ≥4.5:1 on their surfaces; `--ink-3` used ≥11px only;
   status-on-surface ≥3:1 (validated).
 - Breakpoints: ≤1024px sidebar → top bar; ≤1180px detail stacks (live first) and
@@ -685,6 +689,16 @@ Added 2026-09-23 (sleeve storage, §15): `STORAGE_READ_CHUNK_BYTES` (4 MiB card 
 `GYRO_FS_ALLOWED_DPS`. Firmware limits (key ranges, byte limits, the 159-byte line) are
 **format facts** in `lib/storage/configSchema.ts`, deliberately not tunables. Every string of
 the page lives in `STORAGE_COPY` (`lib/storage/copy.ts`), also walked by the copy-rules test.
+Added 2026-09-25 (CS2, PLAN_csv_summary): `STORAGE_NOISE_F_CUT_HZ` (20; the summary's noise is
+the content above this frequency, its detrending window 0.44 / f_cut s, so 22 ms),
+`STORAGE_GAP_US` (1000; a longer interval between two samples of one sensor is a dropout),
+`STORAGE_TS_OUTLIER_US` (1 000 000; a timestamp farther than this from the rolling median of its
+11 neighbours is left out of the statistics, though it still reaches the CSV) and
+`STORAGE_CSV_WRITE_CHUNK_BYTES` (2 MiB, the worker's CSV encode buffer). The first three mirror
+`sensor_stats.py`'s defaults and change only together with the goldens
+(`scripts/storage_goldens.py`). Format facts stay format facts: the count per full scale (32768)
+and the CSV precisions (6 and 4 decimals) are named constants in `lib/storage/convert/scaled.ts`,
+the on-card layout in `binFormat.ts`. The conversion strings sit in `STORAGE_COPY.conversion`.
 
 ## 14. Demo soldiers — SET (2026-09-12, STAGE4 R2)
 
@@ -733,9 +747,11 @@ knee sleeve's **HIPPOSDATA** USB drive in the browser and does two things: it ed
 `CONFIG.TXT` exactly the way the firmware will parse it, and it moves the sleeve's `LOG_NNNN`
 files to a folder on this PC, verifying every copy before the original is deleted. It is
 **browser-native**: the File System Access API reads and writes the drive, nothing is uploaded
-and there is no helper app (decision A). Change-set 2 — a CSV and a plain-text summary per
-transferred log, produced in a Web Worker — is **planned, not built** (PLAN_msd_management §5);
-until then the page ends at the verified raw copy.
+and there is no helper app (decision A). **Amended 2026-09-25 (PLAN_csv_summary, change-set 2,
+built):** the page no longer ends at the verified raw copy. Each verified `LOG_NNNN.BIN` is turned,
+in a Web Worker on this PC, into a CSV, a `.meta.json` and a plain-text summary next to `raw/`,
+and the summary is shown in a fifth card (decisions O-V; `agent-docs/03_PLAN_csv_summary.md` is
+the plan of record, its As built the deviations).
 
 **Browser requirement.** `isSupported()` is "`showDirectoryPicker` exists **and** the context is
 secure", i.e. Chrome or Edge on `https://DOMAIN` or `localhost`. Anything else (Firefox, Safari,
@@ -749,8 +765,8 @@ needs a click, so it never runs on mount). Where the browser offers "Allow on ev
 controls) reconnecting becomes automatic. IndexedDB being unavailable (a private window) simply
 means the user picks again.
 
-**Layout** — one column, title "Sleeve storage", four cards top to bottom; cards 2–4 exist only
-once a drive is open and valid:
+**Layout** — one column, title "Sleeve storage", five cards top to bottom (the fifth added
+2026-09-25); cards 2–5 exist only once a drive is open and valid:
 
 1. **Drive** — the intro line, `Open sleeve drive` (primary, `HardDrive` icon), `Reconnect sleeve
    drive` when a stored handle needs permission again, "Drive: {name}" once open, and "Reading
@@ -820,6 +836,31 @@ once a drive is open and valid:
    {deleted} removed from the sleeve." (plus "{n} not started." after a cancel), or
    `role="alert"` "Transfer stopped unexpectedly - {detail}". The speed note "Sleeves transfer
    at about 1 MB/s over USB, so a 512 MB file takes about 9 minutes." is always visible.
+5. **CSV and summary** (added 2026-09-25, PLAN_csv_summary decisions O, P, R, S, V) - intro line
+   "Each transferred log becomes a CSV, a meta.json and a plain-text summary next to raw/ in its
+   sleeve folder. This runs on this computer while the transfer continues; the raw file is never
+   changed." Once a destination is ready: `Convert missing ({n})` (disabled while the scan runs or
+   when n is 0) beside "Looking for raw files without a CSV..." (`role="status"`) during the scan,
+   or "Every raw file in the destination has its CSV and summary." when nothing is missing. The
+   scan runs when the destination is chosen or reconnected and lists every `sleeve-*/raw/` BIN
+   (`LOG_NNNN.BIN` or `LOG_NNNN-2.BIN`) lacking any of its three outputs; the button queues them
+   all, the scan itself starts nothing (decision O). Then a `data-table` with Show summary | File
+   | Sleeve | Status, one row per raw BIN queued this session (by the transfer, by the button or
+   by a Retry), the first column a radio button per row (`aria-label` = the job id) that picks
+   whose summary is shown; the latest converted row selects itself unless the user is reading
+   another. Status (`aria-live="polite"`): "Queued for conversion", "Scanning {pct}%" (the
+   pre-pass), "Converting {pct}%", "Converted", "Already converted" (all three outputs were
+   already there, nothing written - decision V), "Conversion failed: {reason}", "Conversion
+   cancelled"; a failed or cancelled row carries `Retry` (decision R: the whole conversion runs
+   again and the outputs are rewritten; after a reload, `Convert missing` is the retry). Reasons:
+   "the raw file is not a sleeve log (bad header)", "a timestamp in the raw file is out of range",
+   "the raw file could not be read", "the CSV could not be written to the destination folder",
+   "cancelled", "the browser lost permission to the destination folder", "the conversion worker
+   stopped unexpectedly". Below the table, **Summary**: "Written to {folder} as {file}" (the
+   sleeve folder and `LOG_NNNN_summary.txt`; no download link, decision P) over the text in a
+   monospace block, or "Select a converted log to see its summary here." The summary's placement
+   column reads "left thigh" / "left shin" (or right) when the dashboard knows the unit's side
+   from `/api/units`, else "thigh" / "shin" (decision S; sensor 1 is the thigh, 2 the shin).
 
 **Save flow** (`pages/Storage.tsx` → `lib/storage/configFile.ts`). Every value the editor shows
 is what the **firmware** would read from the file (`interpretAsFirmware`: 159-byte `fgets`
@@ -866,10 +907,42 @@ destination folder", ...). The page never deletes anything on the PC. The engine
 main thread (its CPU cost is negligible against the ~1 MB/s full-speed USB link) and touches no
 DOM, so it can move to a worker for CS2.
 
+**Conversion guarantees** (added 2026-09-25: `lib/storage/convertQueue.ts`,
+`workers/convert.worker.ts`, `lib/storage/convert/*`; PLAN_csv_summary decisions L, Q, R, T, U,
+V). After a BIN's `item-done` (or an `item-failed` whose only failure is the card-side delete,
+the copy having verified) the page queues its conversion and the transfer carries on: one Web
+Worker converts one file at a time, FIFO, while the next file copies from the card; it receives
+the raw file's handle and the sleeve folder's handle, never paths, and nothing leaves the PC. Two
+streaming passes per file (decision T): a light pre-pass (block CRCs, sync anchors, timestamps,
+the dt and |a| medians), shown as "Scanning", then the main pass (CSV, meta, histograms, 22 ms
+detrended noise windows), shown as "Converting"; memory holds tables and histograms, never the
+CSV. Outputs, beside `raw/`: `<stem>.csv` byte-exact with `bin2csv.py` (decision N),
+`<stem>.meta.json` (bin2csv's keys plus `unused_tail_blocks` and `first_bad`) and
+`<stem>_summary.txt` (the text sections of `sensor_stats.py`; decision U drops its
+DATA_DESCRIPTION block, tap note and PDF line), `<stem>` being the raw name without its extension
+(`LOG_0010`, `LOG_0010-2`). The raw file is only read and nothing on the PC is ever deleted.
+Outputs are atomic in content, not in existence: the browser lands a file only on `close()` (a
+`.crswap` beside it until then) but creates the entry before the write starts, so a failed or
+cancelled conversion never leaves a partial output while an empty placeholder file can remain,
+and a Retry or Convert missing rewrites it. The page treats a raw file as converted only when all
+three outputs exist and are not empty (a placeholder counts as missing): the queue checks before
+posting to the worker and answers "Already converted" without writing (decision V), and the
+destination scan lists a raw file that lacks any of them (decision O). Cancel is cooperative (honoured between awaited reads and writes; the
+writable is aborted); leaving the page cancels the queue and terminates the worker. A worker that
+dies fails its row with "the conversion worker stopped unexpectedly" and the next job gets a
+fresh worker. Parity with the Python tools is tested on goldens (`lib/storage/fixtures/convert/`,
+regenerated by `scripts/storage_goldens.py` from the scripts vendored in `scripts/kneesleeve/`):
+CSV rows by exact integer arithmetic with half-to-even ties (Python's `%.6f` / `%.4f`, sha256
+equal), meta compared parsed, summary figures within one unit of the last printed digit and
+everything else identical.
+
 **Never possible.** `CONFIG.TXT` cannot be listed, transferred or deleted (the transfer allowlist
 is the `LOG_NNNN` pattern, pinned by `logNames.test.ts`); the destination is never deleted from;
 the card is never written except by Save (`CONFIG.TXT`) and the post-verify delete; a demo id
-never reaches the API (the one PATCH is guarded by `UNIT_ID_RE`).
+never reaches the API (the one PATCH is guarded by `UNIT_ID_RE`). Since 2026-09-25: the raw file
+under `raw/` is never modified or deleted by the conversion (it is only read); no upload, the
+worker holds only the handles the user granted; only `<stem>.csv`, `<stem>.meta.json` and
+`<stem>_summary.txt` are ever written, and only in the sleeve folder.
 
 **Copy rules.** Every user-facing string lives in `STORAGE_COPY` (`lib/storage/copy.ts`), which
 `text.test.ts` walks for the §11 rules: plain ASCII (a spaced hyphen joins clauses, " | "
@@ -877,7 +950,9 @@ separates), "soldier" never "athlete", the device is a "sleeve" and its side is 
 this sleeve is worn on"; "Pairing, leg and history stay with..."). Firmware key names
 (`wifi_ssid`, `accel_fs_g`, ...) appear only in notices that describe the sleeve's own file.
 Composite messages are templates with `{slot}` holes filled at render time, so the test sees
-every word the page can show.
+every word the page can show. The conversion strings (card 5's intro, columns, statuses, failure
+reasons, the placement words and the lower-case "left" / "right" that sit inside a summary line)
+live in `STORAGE_COPY.conversion` (2026-09-25), walked the same way.
 
 **Accessibility.** Real buttons everywhere (segmented groups are buttons with `aria-pressed`);
 each input has a `<label for>` and, where a help line exists, `aria-describedby`; validation and

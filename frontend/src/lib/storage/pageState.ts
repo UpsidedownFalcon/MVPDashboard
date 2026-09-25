@@ -27,6 +27,11 @@ import {
   type ConfigKey,
   type ValidateCode,
 } from './configSchema'
+import type { PendingRaw } from './convert/pending'
+import type { ConversionErrorCode } from './convert/protocol'
+import type { OutputNames } from './convert/types'
+import type { QueueEvent } from './convertQueue'
+import { percent } from './format'
 import type { LogKind } from './logNames'
 import type {
   TransferErrorCode,
@@ -148,6 +153,50 @@ export interface TransferState {
   error?: string
 }
 
+/** Change-set 2 (agent-docs/03_PLAN_csv_summary 4.6). 'scanning' is the
+ *  pipeline's pre-pass, 'converting' its main pass (assumption A5). */
+export type ConversionStatus =
+  | 'queued'
+  | 'scanning'
+  | 'converting'
+  | 'converted'
+  | 'already-converted'
+  | 'failed'
+  | 'cancelled'
+
+export interface ConversionJob {
+  /** conversionJobId(folder, localName). */
+  id: string
+  folder: string
+  localName: string
+  stem: string
+  /** The sleeve the raw file belongs to, when known (header or folder name). */
+  unitId: string | null
+  status: ConversionStatus
+  /** Whole-percent progress of the current phase. */
+  pct: number
+  /** CSV rows written so far. */
+  rows: number
+  /** The summary text, once converted (also on disk as outputs.summary). */
+  summary?: string
+  outputs?: OutputNames
+  error?: { code: ConversionErrorCode; detail?: string }
+}
+
+/** What convert-queued needs; the reducer adds the progress fields. */
+export type QueuedJob = Pick<ConversionJob, 'id' | 'folder' | 'localName' | 'stem' | 'unitId'>
+
+export interface ConversionState {
+  /** Job ids in the order they were first queued. */
+  order: string[]
+  jobs: Record<string, ConversionJob>
+  /** The row whose summary is shown. */
+  selected: string | null
+  /** Decision O: raw files in the destination that lack an output. */
+  pending: PendingRaw[]
+  scanning: boolean
+}
+
 export interface StorageState {
   support: SupportState
   drive: DriveState
@@ -155,6 +204,7 @@ export interface StorageState {
   logs: LogsState
   dest: DestState
   transfer: TransferState
+  conversion: ConversionState
 }
 
 export const initialState: StorageState = {
@@ -171,6 +221,12 @@ export const initialState: StorageState = {
   logs: { entries: [], selected: [] },
   dest: { status: 'none' },
   transfer: { running: false, cancelling: false, keepCopies: false, order: [], items: {} },
+  conversion: { order: [], jobs: {}, selected: null, pending: [], scanning: false },
+}
+
+/** One job per raw file on the PC; a retry reuses the id. */
+export function conversionJobId(folder: string, localName: string): string {
+  return `${folder}/${localName}`
 }
 
 // ---------------------------------------------------------------------------
@@ -203,6 +259,12 @@ export type Action =
   | { type: 'transfer-event'; event: TransferEvent }
   | { type: 'transfer-cancelling' }
   | { type: 'transfer-ended'; error?: string }
+  | { type: 'convert-queued'; job: QueuedJob }
+  | { type: 'convert-event'; event: QueueEvent }
+  | { type: 'convert-select'; id: string }
+  | { type: 'pending-scanning' }
+  | { type: 'pending-loaded'; pending: PendingRaw[] }
+  | { type: 'pending-failed' }
 
 // ---------------------------------------------------------------------------
 // Reducer
@@ -322,6 +384,64 @@ function foldTransfer(t: TransferState, event: TransferEvent): TransferState {
       }
       return { ...t, items, summary: event.summary, running: false, cancelling: false }
     }
+  }
+}
+
+/** A pending entry is "live" once its job exists and has not failed or been
+ *  cancelled: it is queued, running or already has its outputs. */
+function isLiveJob(jobs: Record<string, ConversionJob>, folder: string, localName: string): boolean {
+  const job = jobs[conversionJobId(folder, localName)]
+  // only a job in flight is live: a finished one whose raw the scan finds
+  // without outputs again (the user removed them) must be offered once more
+  return job !== undefined && (job.status === 'queued' || job.status === 'scanning' || job.status === 'converting')
+}
+
+function foldConversion(c: ConversionState, event: QueueEvent): ConversionState {
+  const prev = c.jobs[event.id]
+  // a job this page never queued (or already forgot): nothing to update
+  if (!prev) return c
+  const jobs = { ...c.jobs }
+  switch (event.type) {
+    case 'queued':
+      // convert-queued created the row already; the queue's echo adds nothing
+      return c
+    case 'progress':
+      jobs[event.id] = {
+        ...prev,
+        status: event.phase === 'prepass' ? 'scanning' : 'converting',
+        pct: percent(event.bytesDone, event.bytesTotal),
+        rows: event.rows,
+      }
+      return { ...c, jobs }
+    case 'done': {
+      jobs[event.id] = {
+        ...prev,
+        status: 'converted',
+        pct: 100,
+        summary: event.summary,
+        outputs: event.outputs,
+        error: undefined,
+      }
+      // the latest summary shows itself unless the user is reading another
+      const sel = c.selected === null ? undefined : c.jobs[c.selected]
+      const keep = sel !== undefined && (sel.status === 'converted' || sel.status === 'already-converted')
+      return { ...c, jobs, selected: keep ? c.selected : event.id }
+    }
+    case 'already-converted':
+      jobs[event.id] = { ...prev, status: 'already-converted', pct: 100, outputs: event.outputs, error: undefined }
+      return { ...c, jobs }
+    case 'failed':
+      jobs[event.id] = {
+        ...prev,
+        status: 'failed',
+        error: { code: event.code, detail: event.detail },
+        summary: undefined,
+        outputs: undefined,
+      }
+      return { ...c, jobs }
+    case 'cancelled':
+      jobs[event.id] = { ...prev, status: 'cancelled', summary: undefined, outputs: undefined }
+      return { ...c, jobs }
   }
 }
 
@@ -491,6 +611,45 @@ export function reducer(s: StorageState, a: Action): StorageState {
         drive: { ...s.drive, status: s.drive.status === 'busy' ? 'ready' : s.drive.status },
         transfer: { ...s.transfer, running: false, cancelling: false, error: a.error },
       }
+
+    case 'convert-queued': {
+      const c = s.conversion
+      // a re-run keeps the summary and outputs of its last success: they
+      // describe files still on disk, and an 'already-converted' answer (the
+      // same raw copied again) shows them; done replaces them, failed and
+      // cancelled clear them
+      const last = c.jobs[a.job.id]
+      const job: ConversionJob = { ...a.job, status: 'queued', pct: 0, rows: 0, summary: last?.summary, outputs: last?.outputs }
+      // a retry keeps its place in the list; a queued file is no longer "missing"
+      const order = c.order.includes(job.id) ? c.order : [...c.order, job.id]
+      const pending = c.pending.filter((p) => conversionJobId(p.folder, p.localName) !== job.id)
+      return { ...s, conversion: { ...c, order, jobs: { ...c.jobs, [job.id]: job }, pending } }
+    }
+
+    case 'convert-event': {
+      const conversion = foldConversion(s.conversion, a.event)
+      return conversion === s.conversion ? s : { ...s, conversion }
+    }
+
+    case 'convert-select':
+      if (!s.conversion.jobs[a.id]) return s
+      return { ...s, conversion: { ...s.conversion, selected: a.id } }
+
+    case 'pending-scanning':
+      return { ...s, conversion: { ...s.conversion, scanning: true } }
+
+    case 'pending-loaded':
+      return {
+        ...s,
+        conversion: {
+          ...s.conversion,
+          scanning: false,
+          pending: a.pending.filter((p) => !isLiveJob(s.conversion.jobs, p.folder, p.localName)),
+        },
+      }
+
+    case 'pending-failed':
+      return { ...s, conversion: { ...s.conversion, scanning: false, pending: [] } }
   }
 }
 
@@ -723,4 +882,38 @@ export function soldierNameFor(
   if (own) return own.display_name
   const host = devices.find((d) => d.units?.some((u) => u.unit_id === unitId))
   return host ? host.display_name : null
+}
+
+// ---- conversion (change-set 2) --------------------------------------------
+
+/** The conversion rows in the order they were first queued. */
+export function conversionRows(state: StorageState): ConversionJob[] {
+  const out: ConversionJob[] = []
+  for (const id of state.conversion.order) {
+    const job = state.conversion.jobs[id]
+    if (job) out.push(job)
+  }
+  return out
+}
+
+/** Raw files "Convert missing" would queue (decision O). */
+export function missingCount(state: StorageState): number {
+  return state.conversion.pending.length
+}
+
+export interface SelectedSummary {
+  id: string
+  folder: string
+  /** `<stem>_summary.txt`, the file the text was written to. */
+  file: string
+  text: string
+}
+
+/** The summary the panel shows: the selected row's, once it is converted. */
+export function selectedSummary(state: StorageState): SelectedSummary | null {
+  const id = state.conversion.selected
+  const job = id === null ? undefined : state.conversion.jobs[id]
+  const finished = job?.status === 'converted' || job?.status === 'already-converted'
+  if (!job || !finished || job.summary === undefined || !job.outputs) return null
+  return { id: job.id, folder: job.folder, file: job.outputs.summary, text: job.summary }
 }

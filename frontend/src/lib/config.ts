@@ -84,3 +84,26 @@ export const STORAGE_TXT_CFG_PROBE_BYTES = 4096
  *  many bad-block indices per file, so the extra card traffic is bounded to
  *  this many 4096 B reads (a genuinely corrupt file rarely has more). */
 export const STORAGE_BAD_BLOCK_CONFIRM_MAX = 32
+
+/** Sleeve storage change-set 2 (agent-docs/03_PLAN_csv_summary): the per-log
+ *  summary ports sensor_stats.py and keeps its defaults. Signal content above
+ *  this frequency is treated as instrumentation noise (human locomotion sits
+ *  below about 20 Hz); the detrending window is 0.44 / f_cut seconds, so
+ *  22 ms here (lib/storage/convert/stats.ts). */
+export const STORAGE_NOISE_F_CUT_HZ = 20
+
+/** An interval between consecutive samples of one sensor longer than this is
+ *  a dropout: counted as a gap, its length as lost time, and it splits the
+ *  gap-free bursts the noise windows are cut from. */
+export const STORAGE_GAP_US = 1_000
+
+/** A sample whose timestamp sits farther than this from the rolling median
+ *  of its 11 neighbours is a corrupt clock value: left out of the continuity,
+ *  noise and bias figures (it still reaches the CSV, like bin2csv.py). */
+export const STORAGE_TS_OUTLIER_US = 1_000_000
+
+/** CSV text is encoded into a buffer of this size and handed to the
+ *  destination file's writable stream whenever it fills
+ *  (lib/storage/convert/csv.ts). A 2 GiB log yields a ~9 GB CSV, so the
+ *  buffer, not the file, bounds the worker's memory. */
+export const STORAGE_CSV_WRITE_CHUNK_BYTES = 2 * 1024 * 1024

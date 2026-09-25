@@ -1986,6 +1986,44 @@
   color: var(--ink);
 }
 
+/* CSV + summary card (change-set 2) */
+.storage-table tr.is-selected td {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.storage-inline-action {
+  margin-left: 10px;
+}
+
+.storage-summary-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.storage-h3 {
+  font-size: 13.5px;
+  font-weight: 600;
+  margin: 0;
+}
+
+/* the summary keeps sensor_stats.py's column layout: monospace, never
+   wrapped (the wide tables scroll sideways), bounded height */
+.storage-summary-text {
+  margin: 0;
+  padding: 10px 12px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--ink);
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-s);
+  max-height: 420px;
+  overflow: auto;
+  white-space: pre;
+}
+
 /* theme.css covers a, button and input; select and textarea were missed */
 :is(select, textarea):focus-visible {
   outline: 2px solid var(--accent);
