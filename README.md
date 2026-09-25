@@ -408,11 +408,12 @@ is on; the sleeve joins the same network.
 
 Production is one Ubuntu VPS running this compose stack behind Caddy; a release
 is `git pull` + `docker compose up -d --build` on the box, wrapped by
-`deploy/deploy.sh`. The step-by-step guide, first-time provisioning, the
-production `.env` checklist, post-deploy checks and rollback are in
-[deploy/deploy.md](deploy/deploy.md). Read it before running either script:
-`provision.sh` resets the firewall and `deploy.sh` rebuilds production without
-asking.
+`deploy/deploy.sh`. [deploy/deploy.md](deploy/deploy.md) walks through it one
+command at a time, saying where to type each one: first-time setup of a new
+server, deploying a new version (with the backup, the `.env` key check and the
+"prove it worked" steps), rolling back, and pointing a domain at the dashboard
+with Cloudflare. Read it before running either script: `provision.sh` resets the
+firewall and `deploy.sh` rebuilds production without asking.
 
 ## Configuration
 
